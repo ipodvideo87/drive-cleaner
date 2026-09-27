@@ -21,7 +21,7 @@ cd drive-cleaner
 
 ### Portable versions
 
-“Portable” means you do not install the app: download the [official WizTree portable ZIP](https://diskanalyzer.com/download) or a [WinDirStat portable ZIP/7z](https://github.com/windirstat/windirstat/releases), extract it, and run the included executable. Drive Cleanr supports portable builds; installation is not required, and portable packaging itself does not remove the scan/export features this workflow uses. Automated WinDirStat scans require version 2.6.0 or newer: command-line scanning was added in 2.5.0 and the save/load options changed in 2.6.0; this project uses the current `/SaveTo` form. Current WizTree portable releases start in non-admin mode by default. Drive Cleanr currently requires an elevated terminal for any WizTree scan, which lets WizTree use its fast MFT scan. WinDirStat can scan without elevation, but may miss protected paths. These limits come from app version and permissions, not from needing an installer. If automatic discovery misses a portable executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
+Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. WizTree scans require an elevated terminal. If automatic discovery misses either executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
 
 ## Quick start
 
