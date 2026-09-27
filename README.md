@@ -15,9 +15,13 @@ cd drive-cleaner
 
 - Windows 10 or newer
 - Python 3.10+
-- [WizTree](https://diskanalyzer.com/) or [WinDirStat 2.x](https://github.com/windirstat/windirstat), installed or available through `WIZTREE_PATH` / `WINDIRSTAT_PATH`
+- [WizTree](https://diskanalyzer.com/) or [WinDirStat](https://github.com/windirstat/windirstat), installed or available through `WIZTREE_PATH` / `WINDIRSTAT_PATH`
 - Administrator rights for MFT scanning
 - A non-system drive with at least 5 GB free for backups; the backup also needs enough room for the selected data
+
+### Portable versions
+
+“Portable” means you do not install the app: download the [official WizTree portable ZIP](https://diskanalyzer.com/download) or a [WinDirStat portable ZIP/7z](https://github.com/windirstat/windirstat/releases), extract it, and run the included executable. Drive Cleanr supports portable builds; installation is not required, and portable packaging itself does not remove the scan/export features this workflow uses. Automated WinDirStat scans require version 2.6.0 or newer: command-line scanning was added in 2.5.0 and the save/load options changed in 2.6.0; this project uses the current `/SaveTo` form. Current WizTree portable releases start in non-admin mode by default. Drive Cleanr currently requires an elevated terminal for any WizTree scan, which lets WizTree use its fast MFT scan. WinDirStat can scan without elevation, but may miss protected paths. These limits come from app version and permissions, not from needing an installer. If automatic discovery misses a portable executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
 
 ## Quick start
 
@@ -48,7 +52,7 @@ The script lists numbered targets and lets you choose individual items, choose a
 # Scan another drive; include individual files by default
 python scan.py D:
 
-# Choose the scanner directly (WinDirStat 2.x required for automated export)
+# Choose the scanner directly (WinDirStat 2.6+ required for automated export)
 python scan.py C: --app windirstat
 python scan.py C: --app wiztree
 
@@ -72,7 +76,7 @@ python analyze.py .\data\scan.csv --output clean_review.ps1 --priority low
 python analyze.py .\data\scan.csv --output clean_review.ps1 --priority all
 ```
 
-The analysis supports WizTree English/Chinese CSV and WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. WizTree needs administrator rights for its fast MFT scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
+The analysis supports WizTree English/Chinese CSV and WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. Drive Cleanr requires an elevated terminal for any WizTree scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
 
 Scans retain previous exports and reviewed scripts. To prune old scan files and generated plans intentionally, run `python scan.py --cleanup --keep-latest 1`.
 

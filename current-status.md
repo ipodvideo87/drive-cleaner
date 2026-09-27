@@ -6,12 +6,12 @@ GitHub repository: https://github.com/ipodvideo87/drive-cleaner (public; local s
 
 ## Project shape
 
-This is a Python command-line utility for Windows that uses WizTree or WinDirStat 2.x exports. `python drive_cleaner.py` opens a guided menu for scanning, analysis, and backup management. It is not yet a signed installer or desktop GUI. The primary user flow is scan → review report → generate PowerShell plan → confirm → backup → cleanup → observe/restore if needed.
+This is a Python command-line utility for Windows that uses WizTree or WinDirStat exports. `python drive_cleaner.py` opens a guided menu for scanning, analysis, and backup management. Automated WinDirStat scanning requires 2.6.0 or later. It is not yet a signed installer or desktop GUI. The primary user flow is scan → review report → generate PowerShell plan → confirm → backup → cleanup → observe/restore if needed.
 
 ## Current capabilities
 
 - Guided single-command menu for scan, review, and backup management.
-- WizTree and WinDirStat 2.x scanning, selectable at the prompt or with `--app`; both auto-detected through environment variables, local folders, common install paths, and `PATH`.
+- WizTree and WinDirStat 2.6+ scanning, selectable at the prompt or with `--app`; both auto-detected through environment variables, local folders, common install paths, and `PATH`. Official portable builds are supported when the executable is located or configured.
 - WinDirStat CSV parsing using its full path, logical size, physical size, and directory attributes.
 - Process-aware scan progress and configurable timeouts; prior scan exports and reviewed cleanup scripts stay until explicit cleanup.
 - Full scans include file rows so large individual files are visible.
@@ -33,7 +33,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 ## Known work / limitations
 
 - The real WizTree integration still needs validation on an elevated Windows machine with the user's installed WizTree version.
-- The real WinDirStat 2.x integration needs a Windows scan pass; its saved filters affect command-line exports.
+- The real WinDirStat 2.6+ integration needs a Windows scan pass; its saved filters affect command-line exports.
 - Backup archive fidelity and restore behavior need a Windows integration pass with hidden/system entries and files larger than 4 GB.
 - The TUI remains text-based; no installer, desktop interface, scheduled cleanup, or automatic deletion is provided.
 - Review reclaimable-space estimates conservatively: hard links, busy files, and overlapping folder totals can make them differ from actual free-space changes.

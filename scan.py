@@ -31,7 +31,7 @@ def find_wiztree():
 
 
 def find_windirstat():
-    """Find WinDirStat 2.x. Set WINDIRSTAT_PATH for portable/custom installs."""
+    """Find WinDirStat 2.6+. Set WINDIRSTAT_PATH for portable/custom installs."""
     candidates = [
         os.environ.get("WINDIRSTAT_PATH", ""),
         str(SKILL_DIR / "WinDirStat" / "WinDirStat.exe"),
@@ -49,7 +49,7 @@ def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
     print("Choose a disk usage scanner:")
     print("  1. WizTree (fast NTFS scan; administrator rights recommended)")
-    print("  2. WinDirStat 2.x (standard scan; administrator rights optional)")
+    print("  2. WinDirStat 2.6+ (standard scan; administrator rights optional)")
     while True:
         try:
             choice = input("Scanner [1/2]: ").strip().lower()
@@ -189,7 +189,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         folder_name = "WizTree" if app == "wiztree" else "WinDirStat"
         print(f"Place the executable in this project's {folder_name}\\ folder, or set the {env_name} environment variable")
         if app == "windirstat":
-            print("Automated CSV scanning requires WinDirStat 2.x or newer.")
+            print("Automated CSV scanning requires WinDirStat 2.6.0 or newer.")
         return None
 
     # Ensure the data directory exists
@@ -205,7 +205,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
                '/exportfolders=1', f'/exportfiles={1 if include_files else 0}',
                '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
     else:
-        # WinDirStat 2.x /SaveTo runs headlessly and selects CSV from the suffix.
+        # WinDirStat 2.6+ /SaveTo runs headlessly and selects CSV from the suffix.
         cmd = [executable, '/SaveTo', output_file, drive]
 
     print(f"Starting {app_name} scan: {drive}")

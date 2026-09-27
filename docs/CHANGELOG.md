@@ -2,7 +2,8 @@
 
 ## Unreleased
 - Add a guided `python drive_cleaner.py` menu for scanning, reviewing, and managing backups.
-- Add scanner selection for WizTree and WinDirStat 2.x, with WinDirStat CSV parsing and physical-size handling.
+- Add scanner selection for WizTree and WinDirStat 2.6+, with WinDirStat CSV parsing and physical-size handling.
+- Document that official portable archives need no installation and are supported, with the correct WinDirStat CLI version and WizTree elevation requirements.
 - Add mocked coverage for WinDirStat command construction, CSV parsing, and the guided scan-to-review flow.
 
 This project follows [Semantic Versioning](https://semver.org/).

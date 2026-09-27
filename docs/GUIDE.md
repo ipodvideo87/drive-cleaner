@@ -4,7 +4,11 @@ Drive Cleanr is a conservative Windows CLI workflow. It finds disk usage with Wi
 
 ## 1. Install and scan
 
-Install Python 3.10+ and either WizTree or WinDirStat 2.x. WinDirStat 2.x is required for automated CSV export. Open PowerShell as Administrator for WizTree's fast MFT scan; WinDirStat can run without elevation, but may miss protected paths. Start the guided workflow with:
+Install Python 3.10+ and either WizTree or WinDirStat. WinDirStat 2.6.0 or newer is required for automated CSV export. Run PowerShell as Administrator for any WizTree scan; WinDirStat can run without elevation, but may miss protected paths.
+
+The official [WizTree portable ZIP](https://diskanalyzer.com/download) and [WinDirStat portable ZIP/7z](https://github.com/windirstat/windirstat/releases) need no installation: extract the archive and run its executable. They work with this project too. For WinDirStat, use 2.6.0 or newer: command-line scanning was added in 2.5.0 and its save/load options changed in 2.6.0; this project uses the current `/SaveTo` form. Current WizTree portable builds default to non-admin mode, but Drive Cleanr requires an elevated terminal for any WizTree scan. If a portable executable isn't discovered, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path. WinDirStat applies its saved filters in either package type, so check those before a full-drive scan.
+
+Start the guided workflow with:
 
 ```powershell
 python drive_cleaner.py
