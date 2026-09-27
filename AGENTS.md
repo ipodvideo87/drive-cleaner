@@ -1,0 +1,31 @@
+# Project instructions
+
+## Purpose
+
+Drive Cleanr analyzes WizTree exports and proposes conservative Windows cleanup plans. A scan is evidence for a review, not permission to remove anything.
+
+## Safety requirements
+
+- Never run a cleanup against a real user path as part of development or tests. Use temporary directories and mocked process calls.
+- Never bypass the user's explicit plan review. Generated scripts must ask before doing work unless the user separately starts them with `-Force` after reviewing the script.
+- Every cleanup script must create and verify a complete backup before the first removal. Any missing, incomplete, or failed backup must stop the script.
+- Treat CSV content and backup manifests as untrusted input. Quote it as data, constrain paths and backup IDs, recheck target type and reparse-point status immediately before removal, and preserve safety exclusions.
+- Do not include local scan exports, backup contents, generated scripts, or personal paths in source control.
+- Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
+- Prefer leaving uncertain files untouched. Avoid overstating reclaimable size: folder totals can overlap and hard links can inflate apparent savings.
+
+## Development
+
+- Python standard library only; supported runtime is Python 3.10+ on Windows.
+- Keep WizTree optional for tests. Mock its process and use small synthetic CSV fixtures.
+- Run `python -m unittest discover -s tests -v` and `python -m py_compile analyze.py backup.py scan.py` after changes.
+- Any cleanup workflow changes need negative tests for protected paths, stale paths, and backup failure.
+- Update `README.md`, `current-status.md`, and relevant files under `docs/` when behavior or operator steps change.
+
+## Main entry points
+
+- `scan.py`: invoke WizTree and manage scan exports.
+- `analyze.py`: analyze WizTree CSV, show reports, export candidate lists, and generate reviewed PowerShell plans.
+- `backup.py`: create, list, inspect, restore, and delete backups.
+- `references/knowledge.md`: cleanup knowledge base and red lines.
+- `tests/test_safety.py`: destructive-boundary and mock tests.
