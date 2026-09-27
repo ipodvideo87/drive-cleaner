@@ -248,14 +248,19 @@ class ScanSafetyTests(unittest.TestCase):
             try:
                 with mock.patch.object(scan, "find_windirstat", return_value="/mock/WinDirStat.exe"), \
                      mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
-                     mock.patch.object(scan, "wait_for_scan_process", return_value=True):
+                     mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                     mock.patch("builtins.print") as output:
                     result = scan.scan("D:", app="windirstat")
+                    output_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
             finally:
                 scan.DATA_DIR = old_data_dir
         self.assertTrue(result.endswith(".csv"))
         self.assertEqual(captured["command"][:2], ["/mock/WinDirStat.exe", "/SaveTo"])
         self.assertEqual(captured["command"][-1], "D:")
         self.assertEqual(captured["command"][2], result)
+        self.assertNotIn("Command:", output_text)
+        self.assertNotIn("python scan.py --cleanup", output_text)
+        self.assertIn("Previous scans and cleanup plans were kept.", output_text)
 
     def test_guided_scan_runs_chosen_scanner_then_opens_review(self):
         with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \

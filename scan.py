@@ -209,9 +209,6 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         cmd = [executable, '/SaveTo', output_file, drive]
 
     print(f"Starting {app_name} scan: {drive}")
-    print(f"Output file: {output_file}")
-    print(f"Command: {' '.join(cmd)}")
-    print("-" * 50)
 
     try:
         # Wait on the scanner's real process lifetime. File size can pause during
@@ -224,11 +221,9 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         )
 
         if wait_for_scan_process(process, output_file, timeout=timeout):
-            print(f"\nScan successful!")
-            print(f"Scanner: {app_name}")
-            print(f"Data file: {output_file}")
-            print("Earlier scans and reviewed cleanup plans were retained.")
-            print("Run `python scan.py --cleanup --keep-latest 1` to prune old scan exports intentionally.")
+            print("\nScan complete.")
+            print(f"Results: {output_file}")
+            print("Previous scans and cleanup plans were kept.")
 
             return output_file
         else:
