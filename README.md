@@ -1,6 +1,6 @@
 # Drive Cleanr
 
-Drive Cleanr helps Windows users find reclaimable disk space with WizTree, review conservative cleanup candidates, back up selected targets, and only then run an explicit cleanup plan.
+Drive Cleanr helps Windows users find reclaimable disk space with WizTree or WinDirStat, review conservative cleanup candidates, back up selected targets, and only then run an explicit cleanup plan.
 
 **Nothing is deleted during scanning or analysis.** Generated PowerShell plans ask for confirmation, create and verify a backup, then clean only the listed targets. Backups are kept until the user removes them.
 
@@ -15,20 +15,19 @@ cd drive-cleaner
 
 - Windows 10 or newer
 - Python 3.10+
-- [WizTree](https://diskanalyzer.com/), installed or available through `WIZTREE_PATH`
+- [WizTree](https://diskanalyzer.com/) or [WinDirStat 2.x](https://github.com/windirstat/windirstat), installed or available through `WIZTREE_PATH` / `WINDIRSTAT_PATH`
 - Administrator rights for MFT scanning
 - A non-system drive with at least 5 GB free for backups; the backup also needs enough room for the selected data
 
 ## Quick start
 
-Open an elevated PowerShell terminal in this folder:
+Open PowerShell in this folder (use an elevated terminal when choosing WizTree):
 
 ```powershell
-python scan.py C:
-python analyze.py --tui
+python drive_cleaner.py
 ```
 
-The interactive report lets you pick the scan, review candidates, export a list, or generate a cleanup script. For direct commands, use the exact CSV path printed by `scan.py`.
+The guided command-line menu lets you scan with WizTree or WinDirStat, review a new or existing scan, and manage backups. During a scan it asks for the scanner, drive, file-row preference, and timeout. After the scan it can open the results in the review menu. Existing scripts remain available for direct commands and automation.
 
 ```powershell
 python analyze.py .\data\scan.csv --min-size 50 --list-items
@@ -49,6 +48,14 @@ The script lists numbered targets and lets you choose individual items, choose a
 # Scan another drive; include individual files by default
 python scan.py D:
 
+# Choose the scanner directly (WinDirStat 2.x required for automated export)
+python scan.py C: --app windirstat
+python scan.py C: --app wiztree
+
+# Start directly in the analysis menu or show scan options
+python analyze.py --tui
+python scan.py --help
+
 # Smaller CSV when individual large files are not needed
 python scan.py C: --folders-only
 
@@ -65,7 +72,7 @@ python analyze.py .\data\scan.csv --output clean_review.ps1 --priority low
 python analyze.py .\data\scan.csv --output clean_review.ps1 --priority all
 ```
 
-The analysis supports English and Chinese WizTree column headings and GUI CSV exports with the WizTree note line. It excludes protected locations, accepts only absolute local-drive paths, and refuses drive roots, UNC paths, device paths, and traversal paths.
+The analysis supports WizTree English/Chinese CSV and WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. WizTree needs administrator rights for its fast MFT scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
 
 Scans retain previous exports and reviewed scripts. To prune old scan files and generated plans intentionally, run `python scan.py --cleanup --keep-latest 1`.
 

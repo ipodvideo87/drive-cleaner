@@ -1,17 +1,18 @@
 # Drive Cleanr user guide
 
-Drive Cleanr is a conservative Windows CLI workflow. It finds disk usage with WizTree, screens candidate paths against safety exclusions, creates a reviewable PowerShell plan, and requires a verified backup before cleanup.
+Drive Cleanr is a conservative Windows CLI workflow. It finds disk usage with WizTree or WinDirStat, screens candidate paths against safety exclusions, creates a reviewable PowerShell plan, and requires a verified backup before cleanup.
 
 ## 1. Install and scan
 
-Install WizTree and Python 3.10+. Open PowerShell as Administrator if you want the fast MFT scan. If WizTree is not found automatically, set `WIZTREE_PATH` to its executable.
+Install Python 3.10+ and either WizTree or WinDirStat 2.x. WinDirStat 2.x is required for automated CSV export. Open PowerShell as Administrator for WizTree's fast MFT scan; WinDirStat can run without elevation, but may miss protected paths. Start the guided workflow with:
 
 ```powershell
-$env:WIZTREE_PATH = 'C:\Program Files\WizTree\WizTree64.exe'
-python scan.py C:
+python drive_cleaner.py
 ```
 
-Scans include file rows so large individual files remain visible. The default timeout is 30 minutes; for a larger or slower volume, increase it with `--timeout 3600`. Progress shows elapsed time and bytes written. The scan is complete only after WizTree exits and its CSV is stable.
+Choose **Scan a drive**, then select WizTree or WinDirStat and answer the drive, export, and timeout prompts. The menu can open the completed scan in the review interface. You can also run `python scan.py --app wiztree C:` or `python scan.py --app windirstat C:` directly. Set `WIZTREE_PATH` or `WINDIRSTAT_PATH` if an executable isn't found automatically.
+
+Scans include file rows so large individual files remain visible. The default timeout is 30 minutes; for a larger or slower volume, increase it with `--timeout 3600`. Progress shows elapsed time and bytes written. The scan is complete only after the selected scanner exits and its CSV is stable. WinDirStat applies its saved filters to command-line scans, so review its filter settings before scanning a whole drive.
 
 Scans retain earlier exports and reviewed `clean_*.ps1` plans. Run `python scan.py --cleanup --keep-latest 1` only when you intend to remove older CSVs and generated plans in this project folder; increase `--keep-latest` to preserve more exports.
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Drive Cleanr analyzes WizTree exports and proposes conservative Windows cleanup plans. A scan is evidence for a review, not permission to remove anything.
+Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservative Windows cleanup plans. A scan is evidence for a review, not permission to remove anything.
 
 ## Safety requirements
 
@@ -24,6 +24,7 @@ Drive Cleanr analyzes WizTree exports and proposes conservative Windows cleanup 
 
 ## Main entry points
 
+- `drive_cleaner.py`: guided command-line menu for scan, analysis, and backup tasks.
 - `scan.py`: invoke WizTree and manage scan exports.
 - `analyze.py`: analyze WizTree CSV, show reports, export candidate lists, and generate reviewed PowerShell plans.
 - `backup.py`: create, list, inspect, restore, and delete backups.

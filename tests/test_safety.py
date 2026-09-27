@@ -11,6 +11,7 @@ from unittest import mock
 import analyze
 import backup
 import scan
+import drive_cleaner
 
 
 class AnalyzeSafetyTests(unittest.TestCase):
@@ -52,6 +53,29 @@ class AnalyzeSafetyTests(unittest.TestCase):
         items = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in items], ["C:\\Users\\A\\AppData\\Local\\Temp\\normal.tmp"])
         self.assertEqual(items[0]["size"], 89_000_000)
+
+    def test_windirstat_export_uses_physical_size_and_directory_attributes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "windirstat.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=[
+                    "Name", "Files", "Folders", "Logical Size", "Physical Size", "Attributes",
+                ])
+                writer.writeheader()
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp", "Files": "4", "Folders": "1",
+                    "Logical Size": "125000000", "Physical Size": "120000000", "Attributes": "Directory",
+                })
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp\large.bin", "Files": "0", "Folders": "0",
+                    "Logical Size": "125000000", "Physical Size": "120000000", "Attributes": "Archive",
+                })
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+        items = results["categories"]["high"]["items"]
+        self.assertEqual(len(items), 1)  # parent folder prevents double-counting its file
+        self.assertEqual(items[0]["path"], "C:\\Users\\A\\AppData\\Local\\Temp\\")
+        self.assertEqual(items[0]["size"], 120_000_000)
+        self.assertEqual(items[0]["kind"], "Directory")
 
     def test_generated_script_quotes_untrusted_path_and_backs_up_first(self):
         path = "C:\\Users\\O'Brien\\$(not-a-command)\\AppData\\Local\\Temp\\"
@@ -207,6 +231,45 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
 
 class ScanSafetyTests(unittest.TestCase):
+    def test_scanner_choice_accepts_windirstat_alias(self):
+        with mock.patch("builtins.input", side_effect=["x", "2"]):
+            self.assertEqual(scan.choose_scanner(), "windirstat")
+
+    def test_windirstat_launches_documented_save_to_csv_command(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            captured = {}
+
+            def fake_popen(command, **kwargs):
+                captured["command"] = command
+                return object()
+
+            try:
+                with mock.patch.object(scan, "find_windirstat", return_value="/mock/WinDirStat.exe"), \
+                     mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                     mock.patch.object(scan, "wait_for_scan_process", return_value=True):
+                    result = scan.scan("D:", app="windirstat")
+            finally:
+                scan.DATA_DIR = old_data_dir
+        self.assertTrue(result.endswith(".csv"))
+        self.assertEqual(captured["command"][:2], ["/mock/WinDirStat.exe", "/SaveTo"])
+        self.assertEqual(captured["command"][-1], "D:")
+        self.assertEqual(captured["command"][2], result)
+
+    def test_guided_scan_runs_chosen_scanner_then_opens_review(self):
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
+             mock.patch.object(analyze, "run_tui") as run_review, \
+             mock.patch("builtins.input", side_effect=["D:", "", "", ""]):
+            drive_cleaner._scan_flow()
+        run_scan.assert_called_once_with(drive="D:", include_files=True, timeout=1800, app="windirstat")
+        run_review.assert_called_once_with(initial_csv="data/scan_test.csv")
+
+    def test_guided_entry_point_has_simple_exit(self):
+        with mock.patch("builtins.input", return_value="0"):
+            drive_cleaner.main_menu()
+
     def test_scan_does_not_delete_reviewed_scripts_as_a_side_effect(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR

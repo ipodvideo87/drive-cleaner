@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-WizTree automatic scan script
-Automatically runs WizTree, waits for export completion
-"""
+"""Run a supported disk-usage scanner and wait for its export to finish."""
 
 import os
 import sys
@@ -31,6 +28,39 @@ def find_wiztree():
         if c and os.path.exists(c):
             return c
     return shutil.which("WizTree64.exe") or shutil.which("WizTree64")
+
+
+def find_windirstat():
+    """Find WinDirStat 2.x. Set WINDIRSTAT_PATH for portable/custom installs."""
+    candidates = [
+        os.environ.get("WINDIRSTAT_PATH", ""),
+        str(SKILL_DIR / "WinDirStat" / "WinDirStat.exe"),
+        str(SKILL_DIR.parent / "WinDirStat" / "WinDirStat.exe"),
+        r"C:\Program Files\WinDirStat\WinDirStat.exe",
+        r"C:\Program Files (x86)\WinDirStat\WinDirStat.exe",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
+
+
+def choose_scanner():
+    """Ask an interactive user which installed scanner should create the export."""
+    print("Choose a disk usage scanner:")
+    print("  1. WizTree (fast NTFS scan; administrator rights recommended)")
+    print("  2. WinDirStat 2.x (standard scan; administrator rights optional)")
+    while True:
+        try:
+            choice = input("Scanner [1/2]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nScan cancelled.")
+            return None
+        if choice in ("1", "wiztree", "w"):
+            return "wiztree"
+        if choice in ("2", "windirstat", "win", "wds"):
+            return "windirstat"
+        print("Enter 1 for WizTree or 2 for WinDirStat.")
 
 
 def check_admin():
@@ -87,10 +117,10 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
 
 
 def wait_for_scan_process(process, filepath, timeout=1800):
-    """Wait for WizTree itself to finish, then verify its closed export file."""
+    """Wait for the scanner itself to finish, then verify its closed export file."""
     started = time.monotonic()
     last_report = -5
-    print(f"Waiting for WizTree to finish (timeout: {timeout // 60} minutes)...")
+    print(f"Waiting for the scanner to finish (timeout: {timeout // 60} minutes)...")
     while process.poll() is None:
         elapsed = int(time.monotonic() - started)
         if elapsed >= timeout:
@@ -111,13 +141,13 @@ def wait_for_scan_process(process, filepath, timeout=1800):
 
     return_code = process.wait()
     if return_code != 0:
-        print(f"\nWizTree exited with code {return_code}")
+        print(f"\nScanner exited with code {return_code}")
         return False
-    print("\nWizTree finished; checking the export file...")
+    print("\nScanner finished; checking the export file...")
     return wait_for_file(filepath, timeout=30, stable_time=2)
 
 
-def scan(drive="C:", include_files=True, max_depth=0, timeout=1800):
+def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree"):
     """
     Run a WizTree scan
 
@@ -126,6 +156,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800):
         include_files: whether to include file rows (default True; single huge files such as dumps/models
                        are only visible in file rows and often provide the biggest cleanup win)
         max_depth: maximum export depth; 0 means unlimited
+        app: scanner to invoke ("wiztree" or "windirstat")
 
     Returns:
         str: exported CSV file path, or None on failure
@@ -138,17 +169,27 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800):
         print("Error: max-depth must be nonnegative and timeout must be positive")
         return None
 
-    # 检查管理员权限
-    if not check_admin():
+    app = app.lower().strip()
+    if app not in {"wiztree", "windirstat"}:
+        print("Error: app must be 'wiztree' or 'windirstat'")
+        return None
+
+    # WizTree's MFT-based scan requires elevation. WinDirStat can scan as a
+    # regular user, though protected paths may be missing from its results.
+    if app == "wiztree" and not check_admin():
         print("Error: administrator privileges are required to scan")
         print("Please run this script as administrator")
         return None
 
-    # 探测 WizTree
-    wiztree = find_wiztree()
-    if not wiztree:
-        print("Error: WizTree64.exe was not found")
-        print(r"Place WizTree in the skill directory's WizTree\ subfolder, or set the WIZTREE_PATH environment variable")
+    executable = find_wiztree() if app == "wiztree" else find_windirstat()
+    app_name = "WizTree" if app == "wiztree" else "WinDirStat"
+    if not executable:
+        print(f"Error: {app_name} executable was not found")
+        env_name = "WIZTREE_PATH" if app == "wiztree" else "WINDIRSTAT_PATH"
+        folder_name = "WizTree" if app == "wiztree" else "WinDirStat"
+        print(f"Place the executable in this project's {folder_name}\\ folder, or set the {env_name} environment variable")
+        if app == "windirstat":
+            print("Automated CSV scanning requires WinDirStat 2.x or newer.")
         return None
 
     # Ensure the data directory exists
@@ -158,32 +199,22 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800):
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     output_file = os.path.join(DATA_DIR, f"scan_{timestamp}.csv")
 
-    # Build command
-    # /admin=1 - administrator mode
-    # /exportfolders=1 - export folders
-    # /exportfiles=0/1 - include file rows
-    # /sortby=2 - sort by size
-    # /exportdrivecapacity=1 - include drive capacity information
-    # /exportmaxdepth=200 - maximum folder depth (smaller exports, faster analysis)
-    cmd = [
-        wiztree,
-        drive,
-        f'/export={output_file}',
-        '/admin=1',
-        '/exportfolders=1',
-        f'/exportfiles={1 if include_files else 0}',
-        '/sortby=2',
-        '/exportdrivecapacity=1',
-        f'/exportmaxdepth={max_depth}',
-    ]
+    if app == "wiztree":
+        # /admin=1 enables the fast NTFS MFT scan; export files as well as folders.
+        cmd = [executable, drive, f'/export={output_file}', '/admin=1',
+               '/exportfolders=1', f'/exportfiles={1 if include_files else 0}',
+               '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
+    else:
+        # WinDirStat 2.x /SaveTo runs headlessly and selects CSV from the suffix.
+        cmd = [executable, '/SaveTo', output_file, drive]
 
-    print(f"Starting scan: {drive}")
+    print(f"Starting {app_name} scan: {drive}")
     print(f"Output file: {output_file}")
     print(f"Command: {' '.join(cmd)}")
     print("-" * 50)
 
     try:
-        # Wait on WizTree's real process lifetime. File size can pause during
+        # Wait on the scanner's real process lifetime. File size can pause during
         # large exports and is not a reliable completion signal.
         process = subprocess.Popen(
             cmd,
@@ -194,6 +225,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800):
 
         if wait_for_scan_process(process, output_file, timeout=timeout):
             print(f"\nScan successful!")
+            print(f"Scanner: {app_name}")
             print(f"Data file: {output_file}")
             print("Earlier scans and reviewed cleanup plans were retained.")
             print("Run `python scan.py --cleanup --keep-latest 1` to prune old scan exports intentionally.")
@@ -281,11 +313,12 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description='WizTree automatic scan tool')
+    parser = argparse.ArgumentParser(description='Drive Cleanr disk usage scan tool')
     parser.add_argument('drive', nargs='?', default='C:', help='Drive to scan (default: C:)')
     parser.add_argument('--folders-only', action='store_true', help='Export folders only (default also includes file rows so large single files stay visible)')
     parser.add_argument('--max-depth', type=int, default=0, help='Maximum export depth; 0 means unlimited (default: 0)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
+    parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')
     parser.add_argument('--cleanup', action='store_true', help='Clean old data and keep only the newest one')
     parser.add_argument('--keep-latest', type=int, default=1, help='When using --cleanup, keep this many newest scan CSVs (default: 1)')
@@ -310,12 +343,16 @@ def main():
             print("No scan file found")
         return
 
-    # 执行扫描
+    app = args.app or choose_scanner()
+    if not app:
+        sys.exit(1)
+
     result = scan(
         drive=args.drive,
         include_files=not args.folders_only,
         max_depth=args.max_depth,
         timeout=args.timeout,
+        app=app,
     )
 
     if result:
