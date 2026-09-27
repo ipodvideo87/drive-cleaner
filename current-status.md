@@ -13,6 +13,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 - Guided single-command menu for scan, review, and backup management.
 - WizTree and WinDirStat 2.6+ scanning, selectable at the prompt or with `--app`; both auto-detected through environment variables, local folders, common install paths, and `PATH`. Official portable builds are supported when the executable is located or configured.
 - WinDirStat CSV parsing using its full path, logical size, physical size, and directory attributes.
+- English-language menus, prompts, reports, and reference documentation; the analyzer still accepts Chinese WizTree column headings.
 - Process-aware scan progress and configurable timeouts; prior scan exports and reviewed cleanup scripts stay until explicit cleanup.
 - Full scans include file rows so large individual files are visible.
 - English/Chinese and GUI WizTree export parsing plus WinDirStat 2.x export parsing; size threshold, JSON output, report export, and interactive TUI.
@@ -25,7 +26,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 ## Verification snapshot
 
 - `python -m py_compile analyze.py backup.py scan.py drive_cleaner.py tests/test_safety.py` — passed.
-- `python -m unittest discover -s tests -v` — passed (25 tests), including PowerShell item selection, cancel, partial-backup abort, ZIP restore path validation, temporary-directory deletion behavior, WinDirStat CSV/launch mocks, and the guided scan-to-review menu.
+- `python -m unittest discover -s tests -v` — passed (27 tests), including PowerShell item selection, cancel, partial-backup abort, ZIP restore path validation, temporary-directory deletion behavior, both scanner CSV/launch mocks, English UI, and the guided previous-scan/scan-to-review menu.
 - Parsed the existing 1.32 GB WizTree export read-only; English headers, volume capacity, and candidate extraction worked.
 - An end-to-end scan was not run because it requires a working, elevated WizTree installation. The scan runner now waits for process exit, reports output growth, and defaults to a 30-minute timeout.
 - Generated PowerShell was parsed and executed against isolated temporary directories with a mock backup helper; no real user data was targeted.

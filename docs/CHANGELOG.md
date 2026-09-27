@@ -5,6 +5,8 @@
 - Add scanner selection for WizTree and WinDirStat 2.6+, with WinDirStat CSV parsing and physical-size handling.
 - Document that official portable archives need no installation and are supported, with the correct WinDirStat CLI version and WizTree elevation requirements.
 - Keep guided scan output focused on progress/results; omit raw executable commands and unrelated cleanup commands.
+- Translate the user interface and cleanup knowledge base into English while retaining compatibility with Chinese WizTree CSV headers.
+- Label the main-menu scan picker as “Use a previous scan.”
 - Add mocked coverage for WinDirStat command construction, CSV parsing, and the guided scan-to-review flow.
 
 This project follows [Semantic Versioning](https://semver.org/).

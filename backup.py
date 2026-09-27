@@ -26,9 +26,9 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(errors="backslashreplace")
 
-# 配置
+# Configuration
 BACKUP_DIR_NAME = "CleanBackups"
-SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # 1GB - 超过此大小使用压缩
+SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # Compress directories at or above 1 GB.
 
 
 def format_size(size_bytes: int) -> str:
@@ -151,14 +151,14 @@ def find_backup_drive(exclude_drives=None, required_space_bytes=0) -> Optional[s
     min_required = max(5 * 1024 * 1024 * 1024, required_space_bytes + 100 * 1024 * 1024)
     excluded = {str(letter).upper().rstrip(":\\/") for letter in (exclude_drives or set())}
 
-    # 遍历所有可能的驱动器号
+    # Check all eligible drive letters.
     for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
         if letter in excluded:
             continue
         drive = f"{letter}:\\"
         if os.path.exists(drive):
             try:
-                # 获取磁盘剩余空间
+                # Read available disk space.
                 free_bytes = ctypes.c_ulonglong(0)
                 ctypes.windll.kernel32.GetDiskFreeSpaceExW(
                     ctypes.c_wchar_p(drive), None, None, ctypes.pointer(free_bytes)
@@ -211,7 +211,7 @@ def _find_backup_dir(backup_id: str):
 def sanitize_path_name(path: str) -> str:
     """Convert a path into a safe filename"""
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", path).strip("_ .")
-    # 限制长度
+    # Limit the generated filename length.
     if len(name) > 100:
         name = name[:100]
     return name
@@ -285,7 +285,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         safe_name = f"{sanitize_path_name(path) or 'item'}_{digest}"
         is_file = os.path.isfile(path)
 
-        # 智能选择备份格式
+        # Choose a backup format based on the target type and size.
         if is_file:
             backup_format = "file"
             backup_path = os.path.join(backup_dir, safe_name)
@@ -296,7 +296,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 manifest["errors"].append(f"File backup failed for {path}: {e}")
                 continue
         elif dir_size < SIZE_THRESHOLD:
-            # 小于1GB，直接复制
+            # Copy directories smaller than 1 GB.
             backup_format = "copy"
             backup_path = os.path.join(backup_dir, safe_name)
             print(f"[Backup] {format_size(dir_size):>10} {path}")
@@ -307,15 +307,15 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 result = subprocess.run(
                     [
                         "robocopy", path, backup_path,
-                        "/E",  # 复制所有子目录
-                        "/COPY:DAT",  # 复制数据、属性、时间戳
+                        "/E",  # Copy all subdirectories.
+                        "/COPY:DAT",  # Copy data, attributes, and timestamps.
                         "/XJ",  # Never follow junctions
-                        "/R:1",  # 重试1次
-                        "/W:1",  # 等待1秒
-                        "/NFL", "/NDL", "/NJH", "/NJS",  # 减少输出
+                        "/R:1",  # Retry once.
+                        "/W:1",  # Wait one second between retries.
+                        "/NFL", "/NDL", "/NJH", "/NJS",  # Reduce console output.
                     ],
                     capture_output=True,
-                    timeout=300  # 5分钟超时
+                    timeout=300  # Five-minute timeout.
                 )
                 # Robocopy codes 0-7 indicate success or copied extras.
                 if result.returncode >= 8:
@@ -325,7 +325,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 print(f"        [Failed] {e}")
                 continue
         else:
-            # 大于等于1GB，使用压缩
+            # Compress directories of 1 GB or larger.
             backup_format = "zip"
             backup_path = os.path.join(backup_dir, f"{safe_name}.zip")
             print(f"[Backup] {format_size(dir_size):>10} {path}")
@@ -373,7 +373,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
     manifest["total_size_formatted"] = format_size(manifest["total_size"])
     manifest["status"] = "completed" if not manifest["errors"] and len(manifest["items"]) == len(paths) else "partial"
 
-    # 保存 manifest
+    # Save the backup manifest.
     manifest_path = os.path.join(backup_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -427,20 +427,20 @@ def list_backups() -> List[Dict]:
                 except (OSError, ValueError):
                     continue
 
-    # 按时间排序（最新的在前）
+    # Sort newest backups first.
     backups.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
     return backups
 
 
 def get_backup(backup_id: str) -> Optional[Dict]:
     """
-    获取指定备份的信息
+    Get information about a specific backup.
 
     Args:
-        backup_id: 备份ID
+        backup_id: Backup identifier.
 
     Returns:
-        dict: 备份信息，不存在返回 None
+        dict: Backup information, or None if it does not exist.
     """
     if not _valid_backup_id(backup_id):
         return None
@@ -458,13 +458,13 @@ def get_backup(backup_id: str) -> Optional[Dict]:
 
 def restore_backup(backup_id: str) -> bool:
     """
-    回滚恢复指定备份
+    Restore a specific backup.
 
     Args:
-        backup_id: 备份ID
+        backup_id: Backup identifier.
 
     Returns:
-        bool: 是否成功
+        bool: Whether restoration succeeded.
     """
     manifest = get_backup(backup_id)
     if not manifest:
@@ -505,7 +505,7 @@ def restore_backup(backup_id: str) -> bool:
                 shutil.copy2(backup_path, original_path)
             elif backup_format == "copy":
                 os.makedirs(original_path, exist_ok=True)
-                # 直接复制恢复
+                # Restore by copying the saved directory.
                 result = subprocess.run(
                     [
                         "robocopy", backup_path, original_path,
@@ -534,13 +534,13 @@ def restore_backup(backup_id: str) -> bool:
 
 def delete_backup(backup_id: str) -> bool:
     """
-    删除指定备份
+    Delete a specific backup.
 
     Args:
-        backup_id: 备份ID
+        backup_id: Backup identifier.
 
     Returns:
-        bool: 是否成功
+        bool: Whether deletion succeeded.
     """
     if not _valid_backup_id(backup_id):
         print(f"Invalid backup ID: {backup_id}")
@@ -562,10 +562,10 @@ def delete_backup(backup_id: str) -> bool:
 
 def cleanup_all_backups() -> int:
     """
-    清理所有备份
+    Delete all backups.
 
     Returns:
-        int: 删除的备份数量
+        int: Number of backups deleted.
     """
     backups = list_backups()
     deleted = 0
@@ -578,7 +578,7 @@ def cleanup_all_backups() -> int:
 
 
 def get_latest_backup() -> Optional[Dict]:
-    """获取最新的备份"""
+    """Get the most recent backup."""
     backups = list_backups()
     return backups[0] if backups else None
 
@@ -611,35 +611,35 @@ def main():
     parser = argparse.ArgumentParser(description='Disk cleanup backup tool')
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
-    # create 命令
+    # Create command.
     create_parser = subparsers.add_parser('create', help='Create a backup')
     create_parser.add_argument('--paths', nargs='+', required=True, help='Directories to back up')
     create_parser.add_argument('--priority', default='high', choices=['high', 'medium', 'low', 'all'],
                                help='Priority label')
     create_parser.add_argument('--json', action='store_true', help='Print only the JSON manifest (for automation)')
 
-    # list 命令
+    # List command.
     subparsers.add_parser('list', help='List all backups')
 
-    # restore 命令
+    # Restore command.
     restore_parser = subparsers.add_parser('restore', help='Restore a backup')
     restore_parser.add_argument('--id', required=True, help='Backup ID')
     restore_parser.add_argument('--yes', action='store_true', help='Confirm overwriting restored paths')
 
-    # delete 命令
+    # Delete command.
     delete_parser = subparsers.add_parser('delete', help='Delete a backup')
     delete_parser.add_argument('--id', required=True, help='Backup ID')
     delete_parser.add_argument('--yes', action='store_true', help='Confirm permanently deleting the backup')
 
-    # cleanup 命令
+    # Cleanup command.
     cleanup_parser = subparsers.add_parser('cleanup', help='Clean up backups')
     cleanup_parser.add_argument('--all', action='store_true', help='Confirm deleting all backups')
 
-    # info 命令
+    # Info command.
     info_parser = subparsers.add_parser('info', help='Show backup details')
     info_parser.add_argument('--id', required=True, help='Backup ID')
 
-    # drive 命令
+    # Backup-drive command.
     subparsers.add_parser('drive', help='Show backup drive information')
 
     args = parser.parse_args()

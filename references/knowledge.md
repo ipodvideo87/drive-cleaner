@@ -1,93 +1,95 @@
-# C盘清理知识库（安全红线 / 分层惯犯清单 / 执行守则）
+# Drive Cleanup Safety Knowledge Base
 
-## English safety summary
+## Safety summary
 
-- Leave unclear paths untouched. Treat an unfamiliar file or application as a red line until the user identifies it.
-- Review the exact paths before cleanup. A classification is a suggestion, not permission.
-- Make a complete backup to a different drive before any removal. Stop if any selected target was skipped or the backup is partial.
+- Leave unclear paths untouched. Treat an unfamiliar file or application as protected until the user identifies it.
+- Review every exact path before cleanup. A classification is a suggestion, not permission to delete.
+- Create and verify a complete backup on a different drive before removing anything. Stop if any selected target is skipped or the backup is incomplete.
 - Never directly remove Windows component stores, restore points, installed-program repair data, personal files, messaging data, or credentials.
-- Use WizTree allocated size where available. Hard links and nested folder totals can inflate apparent cleanup gains.
-- The Windows Update candidate is only `SoftwareDistribution\\Download`; never select the entire `SoftwareDistribution` tree.
-- A scan completes when WizTree exits and the export is stable, not merely when file size pauses.
+- Prefer allocated size when available. Hard links and nested folder totals can inflate estimated reclaimable space.
+- The Windows Update cleanup candidate is only `SoftwareDistribution\\Download`; never select the entire `SoftwareDistribution` tree.
+- A scan is complete when the selected scanner exits and its export is stable, not merely when file growth pauses.
 
-English workflow details are in the [user guide](../docs/GUIDE.md) and [project overview](../README.md).
+These rules are based on practical cleanup cases. In one case, 28.9 GB was recovered from one computer; roughly two-thirds came from items that required case-by-case review beyond the pattern list. These figures are examples only. Results vary by system and scan.
 
-来源：真实清理案例实战验证（单机一次释放 28.9GB，其中约 2/3 来自模式库覆盖不到、需逐案研判的项目）。所有大小仅为参考量级，以实际扫描为准。
+See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for the workflow.
 
-## 安全红线（绝不动，写进每份清理方案）
+## Protected paths and data
 
-| 对象 | 原因 |
+| Path or data | Why it is protected |
 |---|---|
-| `C:\$MFT`、`$Extend`、`$Recycle.Bin` 结构本身 | NTFS 文件系统元数据 |
-| `C:\System Volume Information\` | 系统还原点（后悔药）。缩减只能走系统接口，不直接删 |
-| `pagefile.sys` / `swapfile.sys` / `hiberfil.sys` | 虚拟内存/休眠。休眠只能 `powercfg /h off` 关闭，不能删文件 |
-| `C:\Windows\Installer\` | 已装软件的修复/卸载依赖，删了软件卸不掉 |
-| `C:\ProgramData\Package Cache\`、各软件 `InstallerCache`（如 VMware） | 同上 |
-| `C:\Windows\System32\config\`（含 `.bak`） | 注册表及其备份 |
-| `C:\Windows\System32\DriverStore\FileRepository\` | 现役驱动库（旧驱动清理属高级操作 pnputil，默认不做） |
-| WinSxS 本体 | 只能经 DISM 清理，**`WinSxS\Temp` 也绝不手删** |
-| `Documents`/`Desktop`/`Pictures`、`Tencent Files`、`xwechat_files` | 个人文件与微信/QQ数据 |
-| `.ssh`、`.gnupg`、证书、各工具配置目录 | 凭据与配置 |
-| **用户说不认识的任何东西** | 先问清，问不清 = 红线 |
+| `C:\$MFT`, `$Extend`, and the `$Recycle.Bin` structure | NTFS file-system metadata |
+| `C:\System Volume Information\` | System restore points; manage only through Windows tools |
+| `pagefile.sys`, `swapfile.sys`, and `hiberfil.sys` | Virtual memory and hibernation; change through Windows settings, never by deleting the files |
+| `C:\Windows\Installer\` | Repair and uninstall data required by installed software |
+| `C:\ProgramData\Package Cache\` and application `InstallerCache` folders | Installer repair data |
+| `C:\Windows\System32\config\` and its `.bak` files | Registry data and backups |
+| `C:\Windows\System32\DriverStore\FileRepository\` | Active driver packages; driver maintenance is an advanced operation |
+| The WinSxS component store, including `WinSxS\Temp` | Use DISM for supported maintenance; do not delete files directly |
+| `Documents`, `Desktop`, `Pictures`, `Tencent Files`, and `xwechat_files` | Personal files and messaging data |
+| `.ssh`, `.gnupg`, certificates, and application settings folders | Credentials and configuration |
+| Anything the user does not recognize | Ask first; leave it untouched if its purpose is still unclear |
 
-## Tier 0 · 零风险惯犯（纯垃圾/可自动重建）
+## Tier 0: Lower-risk, recreatable data
 
-| 项目 | 典型路径 | 说明 |
+| Item | Example paths | Notes |
 |---|---|---|
-| 内核转储 | `C:\Windows\LiveKernelReports\*.dmp`、`C:\Windows\MEMORY.DMP`、`Minidump` | 蓝屏/卡死诊断快照，动辄数GB，系统不依赖 |
-| 临时目录 | `C:\Windows\Temp`、`C:\Windows\SystemTemp`、`%TEMP%` | 占用中的文件自动跳过；**%TEMP% 里排除 `claude*`（AI 会话自用）** |
-| 更新恢复暂存 | `C:\$WinREAgent\` | 仅当系统更新成功已超过 10 天 |
-| 回收站 | `Clear-RecycleBin -DriveLetter C -Force` | **必须先请用户确认无需找回** |
-| 驱动/下载器残留 | `MyDrivers\update\*.td`、`KDubaSoftDownloads` 等 | 半成品安装包 |
-| 包管理器缓存 | `npm cache clean --force`、`pip cache purge`、scoop `cache\*`、`electron\Cache` | 官方命令优先 |
+| Crash dumps | `C:\Windows\LiveKernelReports\*.dmp`, `C:\Windows\MEMORY.DMP`, `Minidump` | Diagnostic snapshots that can occupy several gigabytes; review before removal |
+| Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | In-use files may be skipped. Preserve every `claude*` item and subtree under `%TEMP%`. |
+| Update recovery staging | `C:\$WinREAgent\` | Consider only after an update has worked successfully for more than 10 days |
+| Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
+| Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
+| Package-manager caches | npm, pip, Scoop, and Electron caches | Prefer each package manager's own cleanup command |
 
-## Tier 1 · 低风险（有副作用，逐条向用户说明）
+## Tier 1: Review the side effects
 
-| 项目 | 典型大小 | 副作用与要点 |
-|---|---|---|
-| Chrome 端侧AI模型 `...\Chrome\User Data\OptGuideOnDeviceModel` | **≈4GB** | 关 Chrome 后删；同时让用户在 `chrome://flags` 禁用 `optimization-guide-on-device-model`，否则会重新下载 |
-| DISM 组件清理 `DISM /Online /Cleanup-Image /StartComponentCleanup` | 2–4GB | 微软官方机制，10–30分钟；**禁用 `/ResetBase`**（保留卸载更新能力）。WinSxS 与 System32 硬链接，实得远小于表面大小 |
-| VS Code 缓存 `%APPDATA%\Code\{CachedExtensionVSIXs,CachedData,Cache,Crashpad}` | 1–2GB | 关 VS Code 后删；**不动 `WebStorage` 和 `User`**（含扩展状态/用户配置） |
-| 构建缓存 | `.gradle\caches`、`go clean -modcache`、`.nuget\packages`、`.m2` | 下次构建重新下载（变慢一次）；确认无构建进程 |
-| 更新器缓存 | `GoogleUpdater\crx_cache` | 自动重建（需管理员） |
-| 错误报告 | `ProgramData\...\WER\{ReportQueue,ReportArchive}` | 诊断历史 |
-| 传递优化缓存 | `Delete-DeliveryOptimizationCache -Force` | 官方 cmdlet（需管理员） |
+| Item | Typical size | Side effects and notes |
+|---|---:|---|
+| Chrome on-device AI model at `...\Chrome\User Data\OptGuideOnDeviceModel` | About 4 GB | Close Chrome first. Consider disabling `optimization-guide-on-device-model` in `chrome://flags` to avoid a re-download. |
+| DISM component cleanup | 2–4 GB | Use `DISM /Online /Cleanup-Image /StartComponentCleanup`. Never add `/ResetBase`; that removes the ability to uninstall updates. WinSxS and System32 share hard links, so apparent size can exceed recovered space. |
+| VS Code caches at `%APPDATA%\Code\{CachedExtensionVSIXs,CachedData,Cache,Crashpad}` | 1–2 GB | Close VS Code first. Preserve `WebStorage` and `User`, which hold extension state and settings. |
+| Build caches such as `.gradle\caches`, Go modules, `.nuget\packages`, and `.m2` | Varies | Builds may need to download the data again. Confirm no build is running. |
+| Updater cache at `GoogleUpdater\crx_cache` | Varies | Usually recreated automatically; may require administrator rights. |
+| Error reports at `ProgramData\...\WER\{ReportQueue,ReportArchive}` | Varies | Removes diagnostic history. |
+| Delivery Optimization cache | Varies | Use the supported `Delete-DeliveryOptimizationCache -Force` cmdlet. |
 
-## Tier 2 · 必须用户逐条拍板
+## Tier 2: Require an item-by-item user decision
 
-- **驱动备份**（如 `C:\MyDrivers\backup`）：与现役驱动重复 → 建议移数据盘保存而非删
-- **开发工具链**：VS BuildTools / Windows Kits / `.rustup`（先问是否编译原生代码；npm 原生模块依赖 BuildTools）
-- **同一软件多重安装**（商店版+独立CLI+npm全局版并存）：留用户常用的一种
-- **商店应用**：PowerAutomate、Skype（已停服）、GamingApp、Clipchamp 等，走"设置→应用"或 winget 卸载
-- **国产应用**：⚠️ **剪映 `User Data` 含草稿，绝不手删**，只在应用内清缓存；微信/QQ 用应用内"存储空间"清理，聊天记录不动
-- **npm 全局包**：`npm ls -g` 列清单后用户勾选
-- **测试浏览器内核**：`ms-playwright`（可 `npx playwright install` 重下）
+- **Driver backups**, such as `C:\MyDrivers\backup`: consider moving them to a data drive instead of deleting them.
+- **Development toolchains**, such as VS Build Tools, Windows Kits, and `.rustup`: ask whether the user builds native software. Native npm modules can depend on Build Tools.
+- **Multiple installations of the same application**, such as a Store app, standalone CLI, and global npm package: ask which installation the user uses.
+- **Store apps**, such as Power Automate, Skype, GamingApp, or Clipchamp: remove through Windows Settings or `winget`, not by deleting their folders.
+- **Jianying and other editing apps**: Jianying's `User Data` may contain drafts. Do not delete it directly; clear caches in the app. Clear WeChat or QQ data from their own storage controls, and preserve chat history.
+- **Global npm packages**: show `npm ls -g` and let the user choose packages.
+- **Test browser runtimes**, such as `ms-playwright`: they can be reinstalled with `npx playwright install`, but require a deliberate choice.
 
-## 惯犯定位正则表（对文件夹排行逐类核查）
+## Path patterns to review
 
+```text
+Temporary folders       \\Temp\\$
+Windows Update cache    SoftwareDistribution|DeliveryOptimization
+Crash dumps             LiveKernelReports|CrashDumps|Minidump
+Installer caches        Package Cache|Downloaded Installations|InstallerCache|crx_cache
+Driver utilities        MyDrivers|DriverGenius|Driver
+Development toolchains  \.rustup|\.cargo|\.nuget|\.gradle|\.m2|go\\pkg|\.ollama|huggingface|conda
+Package caches          npm-cache|pip\\cache|\.cache\\
+Messaging data          Tencent|WeChat|WXWork|QQ
+Browsers                Chrome|Edge|360se|Firefox
+Testing and virtual     ms-playwright|wsl|\.vhdx?$
+Large applications      Jianying|SodaMusic|BaiduNetdisk|Thunder|Kingsoft|DingTalk|Feishu
+Apple backups            Apple|MobileSync
+Error reports            \\WER\\|CrashReports
+Large caches             Cache\\$|cache\\$
 ```
-临时目录        \\Temp\\$
-Windows更新缓存 SoftwareDistribution|DeliveryOptimization
-崩溃转储        LiveKernelReports|CrashDumps|Minidump
-安装包缓存      Package Cache|Downloaded Installations|InstallerCache|crx_cache   ← 前三个是红线，列出仅为提醒不可删
-驱动工具        MyDrivers|DriverGenius|驱动
-开发工具链      \.rustup|\.cargo|\.nuget|\.gradle|\.m2|go\\pkg|\.ollama|huggingface|conda
-包缓存          npm-cache|pip\\cache|\.cache\\
-腾讯系          Tencent|WeChat|WXWork|QQ                                          ← 涉及聊天数据，默认红线
-浏览器          Chrome|Edge|360se|Firefox
-测试/虚拟化     ms-playwright|wsl|\.vhdx?$
-国产大户        Jianying|SodaMusic|BaiduNetdisk|Thunder|Kingsoft|DingTalk|Feishu
-苹果备份        Apple|MobileSync
-错误报告        \\WER\\|CrashReports
-大缓存兜底      Cache\\$|cache\\$
-```
 
-## 执行守则
+The installer-cache patterns are shown as reminders of protected data; their presence in a path does not make them cleanup candidates. Messaging folders also contain personal data and remain protected.
 
-1. **备份/移动优先于删除**：非纯缓存类先备份再删；带系统/隐藏属性的目录用 `robocopy 源 目标 /E /R:1 /W:1`——注意隐藏属性会带到目标，核对备份时要 `Get-ChildItem -Force`。
-2. **删应用缓存前查进程**：`Get-Process chrome,msedge,Code,java` 等，运行中则顺延该项。
-3. **逐项计量**：步骤前后取 `(Get-Volume C).SizeRemaining` 差值记录释放量，全程留日志。
-4. **权限分批**：用户级一批、管理员级一批；管理员批用 `Start-Process pwsh -Verb RunAs -File 脚本` + `Start-Transcript` 留记录。
-5. **WizTree CSV 解析注意**：GUI 导出首行是 "Generated by..." 说明行需跳过（analyze.py 已兼容）；路径字段有引号包裹（文件名不含 `"`，可用 `",` 定位边界）；文件夹行路径以 `\` 结尾且大小为累计值；一律流式解析，禁一次性载入整个大 CSV。
-6. **方案里的预估要保守**，并向用户解释硬链接（目录合计大于实际占用是正常现象）。
-7. **观察期默认 7 天**：备份到期且用户确认无异常后才删除。
+## Execution rules
+
+1. **Back up or move before deleting.** Back up non-cache data first. For hidden or system folders, preserve attributes and inspect the backup with `Get-ChildItem -Force`.
+2. **Check running processes before removing application caches.** For example, check Chrome, Edge, VS Code, and Java processes; defer affected items while those apps are running.
+3. **Measure actual space reclaimed.** Compare `(Get-Volume C).SizeRemaining` before and after cleanup and keep a log.
+4. **Handle permissions in separate steps.** Use user-level access first. Elevate only for items that require it and keep an operation log.
+5. **Parse scanner exports as data.** WizTree GUI exports may start with a `Generated by...` note. Paths may be quoted, directory rows may end in `\\`, and folder sizes are cumulative. Parse large exports as a stream.
+6. **Keep reclaimable-space estimates conservative.** Explain hard links and overlapping folder totals; the displayed sum can exceed the space actually recovered.
+7. **Keep backups through an observation period.** The default is seven days; remove a backup only after the user confirms everything still works.

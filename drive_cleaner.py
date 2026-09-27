@@ -119,7 +119,7 @@ def main_menu():
         print("\nDrive Cleanr")
         print("=" * 48)
         print("1) Scan a drive (choose WizTree or WinDirStat)")
-        print("2) Review or analyze an existing scan")
+        print("2) Use a previous scan")
         print("3) Manage backups")
         print("0) Exit")
         try:

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-WizTree CSV 分析工具
-分析扫描结果，识别可清理的目录
-"""
+"""Analyze WizTree and WinDirStat CSV exports and find cleanup candidates."""
 
 import csv
 import ntpath
@@ -20,7 +17,7 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(errors="backslashreplace")
 
-# 可清理目录的模式定义
+# Patterns used to identify potential cleanup candidates.
 CLEANABLE_PATTERNS = {
     "high": {
         "name": "High Priority (Safe to Clean)",
@@ -67,39 +64,39 @@ CLEANABLE_PATTERNS = {
     }
 }
 
-# 安全红线：绝不列入清理建议（宁可漏清，不可错删）
+# Safety exclusions: never recommend these paths for cleanup.
 EXCLUDE_PATTERNS = [
-    # 系统关键
+    # Critical Windows data
     "\\windows\\winsxs",
     "\\windows\\system32",
     "\\windows\\syswow64",
-    "\\windows\\installer",              # 已装软件的修复/卸载依赖
+    "\\windows\\installer",              # Repair/uninstall data for installed software
     "\\program files\\",
     "\\program files (x86)\\",
     "\\programdata\\microsoft\\windows\\",
-    "system volume information",         # 系统还原点
-    "\\driverstore\\",                   # 现役驱动库
+    "system volume information",         # System restore points
+    "\\driverstore\\",                   # Active driver store
     "$recycle.bin",
-    # 安装修复缓存（删了软件将无法修复/卸载）
+    # Installer repair caches
     "package cache",
     "installercache",
-    # 个人数据
+    # Personal data
     "\\documents\\",
     "\\desktop\\",
     "\\pictures\\",
     "\\videos\\",
     "\\onedrive",
-    "tencent files",                     # QQ 接收的文件
-    "xwechat_files",                     # 微信接收的文件
+    "tencent files",                     # Files received through QQ
+    "xwechat_files",                     # WeChat files
     "wechat files",
-    # 凭据与配置
+    # Credentials and application settings
     "\\.ssh\\",
     "\\.gnupg\\",
 ]
 
 
 def format_size(size_bytes):
-    """格式化文件大小"""
+    """Format a byte count for display."""
     if size_bytes >= 1024 ** 3:
         return f"{size_bytes / (1024 ** 3):.2f} GB"
     elif size_bytes >= 1024 ** 2:
@@ -110,7 +107,7 @@ def format_size(size_bytes):
 
 
 def classify_path(path):
-    """判断扫描项更像文件还是目录"""
+    """Classify a scan row as a file or directory from its path."""
     if path.endswith("\\") or path.endswith("/"):
         return "Directory"
     return "File"
@@ -154,7 +151,7 @@ def _non_overlapping_items(items):
 
 
 def analyze_csv(csv_path, min_size_mb=50):
-    """分析 CSV 文件"""
+    """Analyze a scanner CSV export."""
     results = {
         "scan_file": csv_path,
         "scan_time": datetime.now().isoformat(),
@@ -177,7 +174,7 @@ def analyze_csv(csv_path, min_size_mb=50):
         # formats are accepted; WinDirStat 2.x uses Name/Logical Size/Physical Size.
         pos = f.tell()
         first_line = f.readline()
-        if any(header in first_line for header in ('文件名称', 'File Name', 'Name,', '"Name"')):
+        if any(header in first_line for header in ('\u6587\u4ef6\u540d\u79f0', 'File Name', 'Name,', '"Name"')):
             f.seek(pos)
         reader = csv.DictReader(f)
 
@@ -187,12 +184,12 @@ def analyze_csv(csv_path, min_size_mb=50):
                 # English/Chinese labels without depending on column order.
                 fields = {str(key or '').strip().casefold().replace(' ', ''): value
                           for key, value in row.items()}
-                path = (fields.get('文件名称') or fields.get('filename') or
+                path = (fields.get('\u6587\u4ef6\u540d\u79f0') or fields.get('filename') or
                         fields.get('name') or '')
-                logical_size = int(fields.get('大小') or fields.get('size') or
-                                   fields.get('logical size'.replace(' ', '')) or 0)
-                allocated_raw = (fields.get('allocated') or fields.get('已分配') or
-                                 fields.get('分配大小') or fields.get('占用空间') or
+                logical_size = int(fields.get('\u5927\u5c0f') or fields.get('size') or
+                                   fields.get('logicalsize') or 0)
+                allocated_raw = (fields.get('allocated') or fields.get('\u5df2\u5206\u914d') or
+                                 fields.get('\u5206\u914d\u5927\u5c0f') or fields.get('\u5360\u7528\u7a7a\u95f4') or
                                  fields.get('physicalsize'))
                 # WinDirStat encodes directory rows in its Attributes column;
                 # the cleaner needs a trailing separator to preserve type checks.
@@ -207,11 +204,12 @@ def analyze_csv(csv_path, min_size_mb=50):
                     # WizTree prefixes hard-link allocated values with 0. Its
                     # Physical Size counterpart is a regular decimal byte count.
                     is_wiztree_allocated = fields.get('allocated') is not None or any(
-                        fields.get(label) is not None for label in ('已分配', '分配大小', '占用空间'))
+                        fields.get(label) is not None for label in
+                        ('\u5df2\u5206\u914d', '\u5206\u914d\u5927\u5c0f', '\u5360\u7528\u7a7a\u95f4'))
                     size = (0 if is_wiztree_allocated and len(allocated_raw) > 1 and
                             allocated_raw.startswith("0") else int(allocated_raw or 0))
 
-                # 获取驱动器信息（只有根目录有）
+                # Read drive capacity when the export provides it.
                 if path.rstrip("\\/").endswith(":"):
                     results["total_size"] = int(fields.get('drivecapacity', 0) or 0)
                     results["free_space"] = int(fields.get('freespace', 0) or 0)
@@ -223,27 +221,27 @@ def analyze_csv(csv_path, min_size_mb=50):
                 if not _is_local_drive_path(path):
                     continue
 
-                # 跳过小文件和排除目录
+                # Skip small entries and excluded paths.
                 if size <= 0 or size < min_size:
                     continue
 
                 path_lower = path.replace("/", "\\").lower()
 
-                # 检查是否在排除列表中
+                # Apply the safety exclusion list.
                 is_excluded = any(os.path.normcase(exc) in _path_key(path) for exc in EXCLUDE_PATTERNS)
                 if is_excluded:
                     continue
 
-                # 检查匹配的清理类别
+                # Match the path against cleanup categories.
                 for priority, category in CLEANABLE_PATTERNS.items():
                     for pattern_info in category["patterns"]:
                         if pattern_info["pattern"] in path_lower:
-                            # 检查是否已经有父目录在列表中
+                            # Avoid double-counting an entry under a selected parent.
                             existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
                             is_subdir = any(_is_under(path, p) for p in existing_paths)
 
                             if not is_subdir:
-                                # 移除已有的子目录
+                                # Replace selected children with this outer directory.
                                 results["categories"][priority]["items"] = [
                                     item for item in results["categories"][priority]["items"]
                                     if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
@@ -264,7 +262,7 @@ def analyze_csv(csv_path, min_size_mb=50):
             except (ValueError, KeyError):
                 continue
 
-    # 计算每个类别的总大小并排序
+    # Calculate category totals and sort candidates by size.
     for priority in results["categories"]:
         items = results["categories"][priority]["items"]
         items.sort(key=lambda x: x["size"], reverse=True)
@@ -277,22 +275,22 @@ def analyze_csv(csv_path, min_size_mb=50):
 
 
 def print_category_items(category, show_all=False, item_limit=10):
-    """打印单个类别下的候选项"""
+    """Print candidate items for a cleanup category."""
     items = category["items"]
     if not items:
         return
 
     visible_items = items if show_all else items[:item_limit]
     for item in visible_items:
-        print(f"  {item['size_formatted']:>10}  {item.get('kind', '项目')}  {item['name']}")
+        print(f"  {item['size_formatted']:>10}  {item.get('kind', 'item')}  {item['name']}")
         print(f"             {item['path']}")
 
     if not show_all and len(items) > item_limit:
-        print(f"  ... 还有 {len(items) - item_limit} 个项目")
+        print(f"  ... and {len(items) - item_limit} more items")
 
 
 def print_report(results, show_all_items=False, item_limit=10):
-    """打印分析报告"""
+    """Print the analysis report."""
     print("=" * 60)
     print("           Disk Cleanup Analysis Report")
     print("=" * 60)
@@ -328,12 +326,12 @@ def print_report(results, show_all_items=False, item_limit=10):
 
 
 def generate_clean_script(results, output_path, priority="high"):
-    """生成清理脚本"""
+    """Generate a reviewed PowerShell cleanup script."""
     if priority == "all":
         items = []
         for key in ["high", "medium", "low"]:
             items.extend(results["categories"][key]["items"])
-        # 去重并按大小排序，避免同一路径在不同优先级下重复进入脚本
+        # Deduplicate paths and sort by size before writing the script.
         deduped = {}
         for item in items:
             deduped[_path_key(item["path"])] = item
@@ -499,7 +497,7 @@ Write-Host "Cleanup complete! Total: $([math]::Round($totalCleaned / 1024, 2)) G
 Write-Host "========================================" -ForegroundColor Cyan
 '''
 
-    # 生成目标列表
+    # Build the target list.
     targets_str = ""
     for item in items:
         path = _ps_literal(item["path"])
@@ -507,7 +505,7 @@ Write-Host "========================================" -ForegroundColor Cyan
         Name = {_ps_literal(item['name'])}
         Path = {path}
         Size = {_ps_literal(item['size_formatted'])}
-        IsDirectory = ${str(item.get('kind', '').lower() in ('directory', 'folder', '目录')).lower()}
+        IsDirectory = ${str(item.get('kind', '').lower() in ('directory', 'folder', '\u76ee\u5f55')).lower()}
     }},
 '''
 
@@ -526,7 +524,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 
 
 def write_item_list_report(results, output_path):
-    """把按类别整理的候选项写成文本文件"""
+    """Write candidates grouped by category to a text file."""
     lines = []
     lines.append("Disk Cleanup Candidate List")
     lines.append(f"Generated at: {datetime.now().isoformat()}")
@@ -559,12 +557,12 @@ def write_item_list_report(results, output_path):
 
 
 def clear_screen():
-    """清屏，给 TUI 用"""
+    """Clear the terminal screen for the interactive UI."""
     os.system("cls" if os.name == "nt" else "clear")
 
 
 def prompt_choice(prompt, choices, default=None):
-    """读取一个带默认值的菜单选择"""
+    """Read a menu choice, optionally using a default value."""
     suffix = f" [{default}]" if default is not None else ""
     while True:
         value = input(f"{prompt}{suffix}: ").strip()
@@ -576,7 +574,7 @@ def prompt_choice(prompt, choices, default=None):
 
 
 def prompt_existing_csv(initial_csv=None):
-    """选择或输入一个可用的 CSV 文件"""
+    """Choose a scan CSV or enter its path."""
     if initial_csv and os.path.exists(initial_csv):
         return initial_csv
 
@@ -615,7 +613,7 @@ def prompt_existing_csv(initial_csv=None):
 
 
 def run_tui(initial_csv=None, min_size_mb=50):
-    """交互式终端界面"""
+    """Run the interactive terminal interface."""
     csv_file = prompt_existing_csv(initial_csv)
     if not csv_file:
         return

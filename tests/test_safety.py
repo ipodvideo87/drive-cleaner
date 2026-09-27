@@ -77,11 +77,28 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(items[0]["size"], 120_000_000)
         self.assertEqual(items[0]["kind"], "Directory")
 
+    def test_chinese_wiztree_headers_remain_supported_without_non_english_ui(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "localized.csv"
+            path_header = "\u6587\u4ef6\u540d\u79f0"
+            size_header = "\u5927\u5c0f"
+            allocated_header = "\u5df2\u5206\u914d"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=[path_header, size_header, allocated_header])
+                writer.writeheader()
+                writer.writerow({
+                    path_header: r"C:\Users\A\AppData\Local\Temp\cache.bin",
+                    size_header: "120000000", allocated_header: "120000000",
+                })
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+        items = results["categories"]["high"]["items"]
+        self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
+
     def test_generated_script_quotes_untrusted_path_and_backs_up_first(self):
         path = "C:\\Users\\O'Brien\\$(not-a-command)\\AppData\\Local\\Temp\\"
         results = {"categories": {"high": {"name": "High", "items": [{
             "path": path, "name": "Temporary files", "size": 100,
-            "size_formatted": "100 B", "kind": "目录",
+            "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "clean.ps1"
@@ -98,8 +115,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         if not powershell:
             self.skipTest("PowerShell is not installed")
         results = {"categories": {"high": {"name": "High", "items": [{
-            "path": "C:\\Users\\名\\AppData\\Local\\Temp\\", "name": "Temporary files",
-            "size": 100, "size_formatted": "100 B", "kind": "目录",
+            "path": "C:\\Users\\Jordan\\AppData\\Local\\Temp\\", "name": "Temporary files",
+            "size": 100, "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "clean.ps1"
@@ -274,6 +291,11 @@ class ScanSafetyTests(unittest.TestCase):
     def test_guided_entry_point_has_simple_exit(self):
         with mock.patch("builtins.input", return_value="0"):
             drive_cleaner.main_menu()
+
+    def test_main_menu_opens_the_previous_scan_picker(self):
+        with mock.patch("builtins.input", side_effect=["2", "0"]), mock.patch.object(analyze, "run_tui") as review_scan:
+            drive_cleaner.main_menu()
+        review_scan.assert_called_once_with()
 
     def test_scan_does_not_delete_reviewed_scripts_as_a_side_effect(self):
         with tempfile.TemporaryDirectory() as temp_dir:

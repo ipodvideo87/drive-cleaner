@@ -76,7 +76,7 @@ python analyze.py .\data\scan.csv --output clean_review.ps1 --priority low
 python analyze.py .\data\scan.csv --output clean_review.ps1 --priority all
 ```
 
-The analysis supports WizTree English/Chinese CSV and WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. Drive Cleanr requires an elevated terminal for any WizTree scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
+All menus, prompts, reports, and documentation are in English. The analyzer also accepts WizTree CSV files with Chinese column headings for compatibility, as well as WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. Drive Cleanr requires an elevated terminal for any WizTree scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
 
 Scans retain previous exports and reviewed scripts. To prune old scan files and generated plans intentionally, run `python scan.py --cleanup --keep-latest 1`.
 
