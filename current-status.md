@@ -2,6 +2,8 @@
 
 Updated: 2026-09-27
 
+GitHub repository: https://github.com/ipodvideo87/drive-cleaner (public; local scan exports and generated plans are ignored).
+
 ## Project shape
 
 This is a Python command-line utility for Windows that uses WizTree CSV exports. It is not yet a signed installer or desktop GUI. The primary user flow is scan → review report → generate PowerShell plan → confirm → backup → cleanup → observe/restore if needed.

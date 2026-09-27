@@ -4,6 +4,13 @@ Drive Cleanr helps Windows users find reclaimable disk space with WizTree, revie
 
 **Nothing is deleted during scanning or analysis.** Generated PowerShell plans ask for confirmation, create and verify a backup, then clean only the listed targets. Backups are kept until the user removes them.
 
+## Get the project
+
+```powershell
+git clone https://github.com/ipodvideo87/drive-cleaner.git
+cd drive-cleaner
+```
+
 ## Requirements
 
 - Windows 10 or newer
