@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Move Windows crash dumps from the lower-risk tier to caution and explain their troubleshooting and privacy value.
 - Recognize Git project files and `.idea`/`.vs` workspace directories as project markers, while ignoring a shared root-level `.editorconfig` when checking the user profile.
 - Preview a bounded set of direct folder contents before the typed cleanup confirmation so users can spot unexpected files before backup or removal.
 - Handle Ctrl+C and closed input as cancellation at interactive analyzer, restore, and backup-delete confirmations.

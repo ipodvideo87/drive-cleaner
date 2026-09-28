@@ -433,20 +433,23 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 {"File Name": r"C:\Users\A\Projects\Minidump\sample.dmp", "Size": "104857600"},
                 {"File Name": r"C:\Users\A\Archives\CrashDump.dmp", "Size": "104857600"},
             ])
-        high = results["categories"]["high"]["items"]
-        self.assertEqual({item["path"] for item in high}, {
+        medium = results["categories"]["medium"]["items"]
+        self.assertEqual({item["path"] for item in medium}, {
             r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp",
             r"C:\Windows\Minidump\memory.dmp",
         })
+        self.assertTrue(all(not item["safe"] for item in medium))
+        self.assertTrue(all("memory data" in item["name"] for item in medium))
         self.assertFalse(analyze._matches_cleanup_rule(
-            r"C:\Users\A\Archives\CrashDumps\customer-data.zip", ("high",), "Windows crash dumps"
+            r"C:\Users\A\Archives\CrashDumps\customer-data.zip", ("medium",),
+            "Windows crash diagnostics (keep if troubleshooting; may contain memory data)"
         ))
         arbitrary_dump = {
             "categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
         }
         arbitrary_dump["categories"]["high"]["items"] = [{
             "path": r"C:\Users\A\Archives\CrashDumps\customer-data.zip",
-            "name": "Windows crash dumps", "size": 104857600,
+            "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "size": 104857600,
             "size_formatted": "100 MB", "kind": "File",
         }]
         with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(

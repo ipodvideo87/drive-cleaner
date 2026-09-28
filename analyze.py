@@ -26,13 +26,6 @@ CLEANABLE_PATTERNS = {
     "high": {
         "name": "High Priority (Lower Risk)",
         "patterns": [
-            {"pattern": "livekernelreports", "root": "windows", "name": "Kernel crash dumps (diagnostic snapshots; system does not depend on them)", "safe": True},
-            {"pattern": "crashdump", "root": "windows", "name": "Windows crash dumps", "safe": True},
-            {"pattern": "crashdumps", "root": "windows", "name": "Windows crash dumps", "safe": True},
-            {"pattern": "crashdump.dmp", "root": "windows", "name": "Windows crash dump file", "safe": True},
-            {"pattern": "minidump.dmp", "root": "windows", "name": "Windows blue screen mini dump file", "safe": True},
-            {"pattern": "memory.dmp", "root": "windows", "name": "Windows memory dump", "safe": True},
-            {"pattern": "minidump", "root": "windows", "name": "Windows blue screen mini dumps", "safe": True},
             {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
             {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
             {"pattern": "\\.cache\\puppeteer", "name": "Puppeteer cache", "safe": True},
@@ -46,6 +39,13 @@ CLEANABLE_PATTERNS = {
     "medium": {
         "name": "Medium Priority (Use Caution)",
         "patterns": [
+            {"pattern": "livekernelreports", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdump", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdumps", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdump.dmp", "root": "windows", "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "minidump.dmp", "root": "windows", "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "memory.dmp", "root": "windows", "name": "Windows memory dump (may contain memory data; keep if troubleshooting)", "safe": False},
+            {"pattern": "minidump", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\logs\\", "name": "Logs data (review contents; may include user or diagnostic history)", "safe": False},

@@ -47,7 +47,6 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 | Item | Example paths | Notes |
 |---|---|---|
-| Crash dumps | `C:\Windows\LiveKernelReports`, `C:\Windows\Minidump`, `C:\Windows\MEMORY.DMP` | Diagnostic snapshots that can occupy several gigabytes; only these Windows-root locations match automatically, and each target still needs review |
 | Known temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%`, `%TMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. Other folders merely named `Temp` or `Tmp` stay in the caution tier. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
@@ -58,6 +57,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Item | Typical size | Side effects and notes |
 |---|---:|---|
 | Chrome on-device AI model at `...\Chrome\User Data\OptGuideOnDeviceModel` | About 4 GB | Close Chrome first. Consider disabling `optimization-guide-on-device-model` in `chrome://flags` to avoid a re-download. |
+| Windows crash dumps under `C:\Windows\LiveKernelReports`, `C:\Windows\CrashDumps`, `C:\Windows\Minidump`, or `C:\Windows\MEMORY.DMP` | Varies; can be several GB | Keep while troubleshooting or waiting on support. Dump types can contain memory data; review privacy before copying or sharing. Only these Windows-root locations match automatically, and each target still needs review. |
 | DISM component cleanup | 2–4 GB | Use `DISM /Online /Cleanup-Image /StartComponentCleanup`. Never add `/ResetBase`; that removes the ability to uninstall updates. WinSxS and System32 share hard links, so apparent size can exceed recovered space. |
 | VS Code caches at `%APPDATA%\Code\{CachedExtensionVSIXs,CachedData,Cache,Crashpad}` | 1–2 GB | Close VS Code first. Preserve `WebStorage` and `User`, which hold extension state and settings. |
 | Build caches such as `.gradle\caches`, Go modules, `.nuget\packages`, and `.m2` | Varies | Builds may need to download the data again. Confirm no build is running. |
