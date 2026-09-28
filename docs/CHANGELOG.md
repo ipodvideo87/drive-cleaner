@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Treat selected paths literally throughout cleanup checks, so legal wildcard characters such as brackets in Windows names do not change path matching.
 - Restrict automatic crash-dump labels to known locations under the drive's Windows directory.
 - Prefer the most specific matching cleanup rule so package-manager caches are not labeled by generic cache rules.
 - Skip ambiguous WinDirStat candidate rows rather than defaulting them to files; report how many were omitted.

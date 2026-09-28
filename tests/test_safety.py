@@ -735,6 +735,40 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(backup_log.read_text(encoding="utf-8"), str(selected) + "\\")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_treats_wildcard_characters_in_paths_literally(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected[1]"
+            selected.mkdir()
+            marker = selected / "remove-me.bin"
+            marker.write_bytes(b"temporary fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)",
+                "size": marker.stat().st_size, "size_formatted": "17 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, sys\n"
+                "if sys.argv[1] == 'verify': sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertFalse(marker.exists(), result.stdout + result.stderr)
+            self.assertIn("[Done -", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_cancelling_generated_plan_performs_no_backup_or_deletion(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

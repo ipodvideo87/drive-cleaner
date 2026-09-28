@@ -904,7 +904,7 @@ $totalCleaned = 0
 $cleanupFailed = $false
 foreach ($target in $cleanTargets) {{
     Write-Host "Cleaning: $($target.Name)..." -NoNewline
-    if (-not (Test-Path $target.Path)) {{
+    if (-not (Test-Path -LiteralPath $target.Path)) {{
         Write-Host " [Skipped]" -ForegroundColor Gray
         continue
     }}
