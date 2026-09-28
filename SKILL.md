@@ -1,11 +1,11 @@
 ---
 name: clean-c-drive
-description: Safe C drive cleanup for Windows. Use when the user wants to free space on C:, the system drive is full, or they want to analyze and remove junk files safely. Workflow: WizTree scan -> two-layer analysis with pattern library and knowledge base -> user-approved cleanup plan -> backup -> execution -> observation period. Safety first; do nothing when uncertain.
+description: Safe Windows drive cleanup. Use when the user wants to find reclaimable disk space or review cleanup candidates. Workflow: WizTree or WinDirStat scan -> conservative analysis with the pattern library and knowledge base -> user-approved item selection -> verified backup -> cleanup -> observation period. Safety first; do nothing when uncertain.
 ---
 
 # /clean-c-drive Skill
 
-Use WizTree's fast scanning and AI analysis to safely clean junk files from the C drive.
+Use WizTree or WinDirStat scans and conservative analysis to review cleanup candidates on a Windows drive.
 
 **Safety rules that must never be broken:**
 
@@ -18,33 +18,18 @@ Use WizTree's fast scanning and AI analysis to safely clean junk files from the 
 
 ### Stage 1: Check permissions and scan data
 
-1. **Check administrator privileges**
+1. Check administrator privileges only to decide whether WizTree fast MFT mode is available. Standard WizTree scanning and WinDirStat scans can run without elevation.
+2. Use a recent scan only if the user agrees it is suitable. Otherwise start the guided flow so the user can select the scanner and scan settings:
    ```bash
-   powershell -Command "([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"
+   python "<project directory>/drive_cleaner.py"
    ```
-
-2. **If administrator privileges are available (`True`)**
-   - Check whether the skill's `data/` directory already contains a scan file from the last 24 hours.
-   - If not, automatically run a scan. WizTree path detection order:
-     - `WIZTREE_PATH`
-     - `WizTree\` inside the skill directory
-     - `Program Files`
-     - `PATH`
+   Automatic WizTree mode uses fast MFT for a whole-drive scan when elevated and standard scanning otherwise. Standard scans may miss files the current account cannot access. WinDirStat 2.6.0 or newer exports through `/SaveTo`; review WinDirStat's saved filters before a whole-drive scan.
+3. Direct scan commands are also available:
    ```bash
-   python "<skill directory>/scan.py" C:
+   python "<project directory>/scan.py" C: --app wiztree --wiztree-mode standard
+   python "<project directory>/scan.py" C: --app windirstat
    ```
-   WizTree scanning now waits for the process to exit, displays export progress, and allows 30 minutes by default. Increase with `--timeout` for a large volume; a pause in CSV growth alone does not mean scanning finished.
-
-3. **If administrator privileges are not available (`False`)**
-   - Use existing data from `data/` if available.
-   - Otherwise tell the user:
-     ```
-     Administrator privileges are not available, so automatic scanning cannot run.
-     Choose one:
-     1. Restart Claude Code as Administrator (recommended: scan and execution become fully automatic)
-     2. Run WizTree manually as Administrator, export data to the data directory, and then run this command again
-        (when exporting, enable both folders and files; do not save the CSV on C:)
-     ```
+   Fast WizTree MFT scans require administrator privileges. Scans wait for the scanner process to exit, show export progress, and allow 30 minutes by default. Increase `--timeout` for a large volume; a pause in CSV growth alone does not mean scanning finished.
 
 ### Stage 2: Analyze the scan data
 
@@ -72,7 +57,7 @@ Show the user:
 
 **Before any cleanup action, you must back up first.**
 
-1. Check backup drives. Automatically choose the non-C drive with the most free space, with at least 5 GB required:
+1. Check backup drives. The utility automatically chooses an eligible local drive that is different from every selected source drive, has the most free space, and has at least 5 GB available:
    ```bash
    python "<skill directory>/backup.py" drive
    ```
@@ -86,11 +71,11 @@ Show the user:
 
 ### Stage 5: Execute cleanup
 
-- **With administrator privileges**: execute the approved plan, show progress, and report reclaimed space item by item.
-- **Without administrator privileges**: generate `clean_<level>.ps1` in the skill directory and tell the user to run it as Administrator.
-- Before execution, check for running processes. The generated script already warns about browsers, VS Code, and Java/Gradle daemon processes, because they can leave some caches in use.
-- The generated script preserves the directory itself when clearing contents, excludes `claude*` entries and their subtrees at any depth, rejects reparse points and stale file/folder type changes, and supports single-file targets.
-- Do not use `-Force` unless the exact generated plan has already been reviewed.
+- Execute only the exact plan and item selection the user approved. The generated script asks the user to select numbered items, all items, or cancel, and backs up selected items before removing anything.
+- Elevate PowerShell only if Windows denies access to a selected target; scanner elevation does not authorize cleanup.
+- Before execution, check for running processes. The generated script warns about browsers, editors, build tools, and package managers that may be using candidate files.
+- The generated script preserves nested protected paths and project roots, rejects reparse points and stale file/folder type changes, and supports single-file targets.
+- Do not use `-Force` unless the exact generated plan and selected targets have already been reviewed.
 
 ### Stage 6: Verify and confirm
 
@@ -114,13 +99,13 @@ After cleanup finishes, ask whether to delete the scan data and generated script
 python "<skill directory>/scan.py" --cleanup
 ```
 
-This removes `data/*.csv` and `clean_*.ps1`.
+This removes older scan CSVs while keeping the newest scan by default, and removes generated `clean_*.ps1` plans. Use `--keep-latest` to keep more scan exports.
 
 ## Core scripts
 
 | Script | Responsibility | Common commands |
 |---|---|---|
-| `scan.py` | Automatic WizTree scanning with path detection; exports files by default | `python scan.py C:`, `--latest`, `--cleanup`, `--folders-only` |
+| `scan.py` | WizTree or WinDirStat scans with path detection; exports files by default | `python scan.py C: --app wiztree`, `--app windirstat`, `--wiztree-mode standard`, `--latest`, `--cleanup`, `--folders-only` |
 | `analyze.py` | Stream CSV parsing, pattern-based tiers, cleanup script generation, item listing by category, interactive TUI | `python analyze.py "<csv>" --min-size 50`, `--json`, `--list-items`, `--list-output items.txt`, `--tui`, `--output clean.ps1 --priority high` |
 | `backup.py` | Backup and restore with `manifest.json` | `drive` / `create` / `list` / `restore` / `delete` |
 
@@ -136,8 +121,10 @@ WizTree allocated size is preferred for reclaimable-space estimates; hard-linked
 ## WizTree command-line reference
 
 ```bash
-WizTree64.exe <drive> /export="<path>" /admin=1 /exportfolders=1 /exportfiles=1 /sortby=2 /exportdrivecapacity=1 /exportmaxdepth=0
+WizTree64.exe <drive> /export="<path>" /admin=0|1 /exportfolders=1 /exportfiles=1 /sortby=2 /exportdrivecapacity=1 /exportmaxdepth=0
 ```
+
+Use `/admin=1` for elevated fast MFT scanning; `/admin=0` selects standard file-system scanning. WinDirStat cleanup scans use `WinDirStat.exe /SaveTo <path.csv> <drive-or-folder>`.
 
 **Why export file rows by default (`/exportfiles=1`):**
 The biggest cleanup wins often come from single large files such as 4.7 GB crash dumps, 4 GB Chrome on-device AI models, or multi-gigabyte partial downloads. If you export folders only, those files disappear from the report. The CSV may become large, but `analyze.py` streams it efficiently. Use `--folders-only` only when you truly need the older smaller export behavior.

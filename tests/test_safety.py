@@ -171,6 +171,24 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive - Contoso\\AppData\\Local\\Temp\\file.dat"))
         self.assertFalse(analyze._is_excluded_path("C:\\Users\\A\\OneDriveBackup\\Temp\\file.dat"))
 
+    def test_codex_store_package_and_roaming_state_are_protected(self):
+        report_paths = [
+            "C:\\Users\\Jordan\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\npm-cache",
+            "C:\\Users\\Jordan\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
+            "C:\\Users\\Jordan\\AppData\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
+            "C:\\Users\\Jordan\\.codex\\plugins\\cache\\openai-curated-remote",
+        ]
+        for path in report_paths:
+            with self.subTest(path=path):
+                self.assertTrue(analyze._is_excluded_path(path))
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "104857600"} for path in report_paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        self.assertFalse(analyze._is_excluded_path(
+            "C:\\Users\\Jordan\\AppData\\Local\\Temp\\OpenAI.CodexBackup\\build.tmp"
+        ))
+
     def test_scan_paths_reject_windows_devices_streams_and_invalid_names(self):
         for path in (
             r"C:\Temp\cache:alternate-stream", r"C:\Temp\CON.txt",
@@ -348,6 +366,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "nested" / ".codex" / "extensions").mkdir(parents=True)
             onedrive_cache = selected / "nested" / "OneDrive - Contoso" / "Cache"
             onedrive_cache.mkdir(parents=True)
+            codex_package_cache = (
+                selected / "nested" / "Packages" / "OpenAI.Codex_2p2nqsd0c76g0"
+                / "LocalCache" / "Local" / "npm-cache"
+            )
+            codex_package_cache.mkdir(parents=True)
+            codex_roaming_cache = selected / "nested" / "AppData" / "Roaming" / "Codex" / "web" / "Cache"
+            codex_roaming_cache.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
             unselected.mkdir()
@@ -355,6 +380,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "nested" / "claude-session" / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / ".codex" / "extensions" / "keep.bin").write_bytes(b"keep")
             (onedrive_cache / "keep.bin").write_bytes(b"keep")
+            (codex_package_cache / "keep.bin").write_bytes(b"keep")
+            (codex_roaming_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "regular-cache").mkdir()
@@ -387,6 +414,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((selected / "nested" / "claude-session" / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((selected / "nested" / ".codex" / "extensions" / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((onedrive_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((codex_package_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertFalse((selected / "nested" / "regular-cache" / "remove.bin").exists())
             self.assertEqual((unselected / "keep.bin").read_bytes(), b"untouched")

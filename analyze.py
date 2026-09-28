@@ -98,6 +98,7 @@ EXCLUDE_PATTERNS = [
     "\\service worker\\",               # May contain offline site data and user state
     "\\.codex\\",                       # Codex settings, extensions, and task data
     "\\.agents\\",                      # User-installed agent skills and configuration
+    "\\appdata\\roaming\\codex\\",    # Codex app state and browser profile data
     "\\.local\\share\\containers\\",  # Container or Podman machine state
     "\\onedrive",
     "tencent files",                     # Files received through QQ
@@ -107,7 +108,7 @@ EXCLUDE_PATTERNS = [
     "\\.ssh\\",
     "\\.gnupg\\",
 ]
-EXCLUDE_COMPONENT_PREFIXES = ("onedrive -",)
+EXCLUDE_COMPONENT_PREFIXES = ("onedrive - ", "openai.codex_")
 
 ANALYSIS_PROGRESS_INTERVAL = 100_000
 PROJECT_MARKERS = (
