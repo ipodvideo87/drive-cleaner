@@ -99,7 +99,7 @@ After cleanup finishes, ask whether to delete the scan data and generated script
 python "<skill directory>/scan.py" --cleanup
 ```
 
-This removes older scan CSVs while keeping the newest scan by default, and removes generated `clean_*.ps1` plans. Use `--keep-latest` to keep more scan exports.
+This removes older scan CSVs while keeping the newest scan by default. It removes a default `.clean.ps1` plan only when its matching scan CSV is pruned; custom output paths and unrelated PowerShell files are kept. Use `--keep-latest` to keep more scan exports.
 
 ## Core scripts
 

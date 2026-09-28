@@ -2047,21 +2047,69 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=True)
 
-    def test_scan_does_not_delete_reviewed_scripts_as_a_side_effect(self):
+    def test_scan_cleanup_deletes_only_plans_paired_with_pruned_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
             scan.DATA_DIR = str(Path(temp_dir) / "data")
             data = Path(scan.DATA_DIR)
             data.mkdir()
-            (data / "old.csv").write_text("x")
-            (data / "new.csv").write_text("x")
-            script = Path(temp_dir) / "clean_reviewed.ps1"
-            script.write_text("reviewed")
+            old_export = data / "scan_older.csv"
+            new_export = data / "scan_newer.csv"
+            old_export.write_text("old")
+            new_export.write_text("new")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
+            new_plan = Path(temp_dir) / "scan_newer.clean.ps1"
+            unrelated_plan = Path(temp_dir) / "clean_reviewed.ps1"
+            custom_plan = Path(temp_dir) / "manual-review.ps1"
+            for script in (old_plan, new_plan, unrelated_plan, custom_plan):
+                script.write_text("reviewed")
             try:
                 scan.cleanup_old_scans(keep_latest=1)
-                self.assertTrue(script.exists())
+                self.assertTrue(old_plan.exists())
+                self.assertTrue(unrelated_plan.exists())
+                # The default helper call does not delete plans. Restore its
+                # old CSV fixture to model the explicit CLI cleanup action,
+                # which prunes the export and its paired plan together.
+                old_export.write_text("old")
+                os.utime(old_export, (1, 1))
                 scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
-                self.assertFalse(script.exists())
+                self.assertFalse(old_export.exists())
+                self.assertFalse(old_plan.exists())
+                self.assertTrue(new_export.exists())
+                self.assertTrue(new_plan.exists())
+                self.assertTrue(unrelated_plan.exists())
+                self.assertTrue(custom_plan.exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_cleanup_keeps_plan_when_its_export_cannot_be_pruned(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            data = Path(scan.DATA_DIR)
+            data.mkdir()
+            old_export = data / "scan_older.csv"
+            new_export = data / "scan_newer.csv"
+            old_export.write_text("old")
+            new_export.write_text("new")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
+            old_plan.write_text("reviewed")
+            original_unlink = Path.unlink
+
+            def fail_old_export(path, *args, **kwargs):
+                if path == old_export:
+                    raise OSError("simulated export deletion failure")
+                return original_unlink(path, *args, **kwargs)
+
+            try:
+                with mock.patch.object(Path, "unlink", autospec=True, side_effect=fail_old_export):
+                    scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
+                self.assertTrue(old_export.exists())
+                self.assertTrue(old_plan.exists())
             finally:
                 scan.DATA_DIR = old_data_dir
 

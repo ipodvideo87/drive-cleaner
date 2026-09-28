@@ -490,15 +490,20 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
         return 0
     deleted = 0
 
-    # Clean CSV data files
+    # Identify the exports that are outside the retention window. Only delete
+    # the default review plan paired with one of these exports; a broad glob
+    # such as clean_*.ps1 can match unrelated user-authored PowerShell files.
+    old_exports = []
+    pruned_exports = []
     if data_path.exists():
         csv_files = list(data_path.glob("*.csv"))
         if len(csv_files) > keep_latest:
             # Sort by modification time (newest first)
             csv_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+            old_exports = csv_files[keep_latest:]
 
             # Delete old files
-            for old_file in csv_files[keep_latest:]:
+            for old_file in old_exports:
                 if _path_has_reparse_component(old_file):
                     print(f"Refusing to prune linked scan file: {old_file.name}")
                     continue
@@ -506,13 +511,18 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
                     old_file.unlink()
                     print(f"Deleted old data file: {old_file.name}")
                     deleted += 1
+                    pruned_exports.append(old_file)
                 except Exception as e:
                     print(f"Failed to delete {old_file.name}: {describe_error(e)}")
 
-    # Script deletion is a separate explicit action; never remove a user's
-    # reviewed cleanup plan as a side effect of creating a new scan.
+    # Script deletion is a separate explicit action; only remove the default
+    # plan named after an export that is itself being pruned. Custom output
+    # paths and unrelated PowerShell files are intentionally left untouched.
     if include_scripts:
-        for script in skill_path.glob("clean_*.ps1"):
+        for old_file in pruned_exports:
+            script = skill_path / f"{old_file.stem}.clean.ps1"
+            if not script.exists():
+                continue
             if _path_has_reparse_component(script):
                 print(f"Refusing to prune linked cleanup plan: {script.name}")
                 continue
@@ -548,9 +558,9 @@ def main():
             parser.error('--keep-latest must be at least 1')
         deleted = cleanup_old_scans(keep_latest=args.keep_latest, include_scripts=True)
         if deleted > 0:
-            print(f"Removed {deleted} old data files")
+            print(f"Removed {deleted} old scan file(s) and/or paired review plan(s).")
         else:
-            print("No old data files needed cleanup")
+            print("No old scan files or paired review plans needed cleanup.")
         return
 
     if args.latest:
