@@ -837,7 +837,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "preserve")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_scan_csv_candidate_flows_to_reviewed_cleanup_with_mock_backup(self):
+    def test_mocked_scan_candidate_flows_through_cleanup_and_real_restore(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -894,22 +894,17 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             script_path = Path(plan_temp) / "reviewed-cleanup.ps1"
             backup_root = Path(plan_temp) / "mock-backups"
-            backup_id = "backup_20260928_123456_123456"
             backup_helper = Path(plan_temp) / "backup.py"
+            repository_root = Path(backup.__file__).resolve().parent
             helper_contents = (
-                "import hashlib, json, shutil, sys\nfrom pathlib import Path\n"
-                f"backup_root = Path({str(backup_root)!r})\n"
-                f"backup_id = {backup_id!r}\n"
-                "source = Path(sys.argv[sys.argv.index('--paths') + 1])\n"
-                "payload = backup_root / backup_id / 'payload.bin'\n"
-                "if sys.argv[1] == 'create':\n"
-                "    payload.parent.mkdir(parents=True, exist_ok=True)\n"
-                "    shutil.copy2(source, payload)\n"
-                "    print(json.dumps({'status':'completed','id':backup_id,'backup_root':str(backup_root),'items':[{}]}))\n"
-                "elif sys.argv[1] == 'verify':\n"
-                "    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()\n"
-                "    if not payload.is_file() or digest(source) != digest(payload): sys.exit(1)\n"
-                "    print('Backup and selected source contents match.')\n"
+                "import sys\n"
+                f"sys.path.insert(0, {str(repository_root)!r})\n"
+                "import backup as implementation\n"
+                f"backup_root = {str(backup_root)!r}\n"
+                "implementation.find_backup_drive = lambda exclude_drives=None, required_space_bytes=0: backup_root\n"
+                "implementation._existing_backup_roots = lambda: [backup_root]\n"
+                "implementation._get_drive_free_space = lambda _root: 10**10\n"
+                "implementation.main()\n"
             )
             with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
                 analyze.generate_clean_script(results, str(script_path))
@@ -922,9 +917,17 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertEqual((backup_root / backup_id / "payload.bin").read_bytes(), b"synthetic cache data")
             self.assertIn("Backup created:", result.stdout)
             self.assertIn("Cleanup complete!", result.stdout)
+            backup_dirs = list(backup_root.glob("backup_*"))
+            self.assertEqual(len(backup_dirs), 1)
+            backup_id = backup_dirs[0].name
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                self.assertTrue(backup.restore_backup(backup_id))
+            self.assertEqual(target.read_bytes(), b"synthetic cache data")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_nested_protected_and_project_data(self):
