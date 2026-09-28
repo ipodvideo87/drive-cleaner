@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Expand project-root detection to common manifests, lockfiles, Visual Studio solution/project files, and build metadata; omit candidates when a directory cannot be checked for markers.
 - Protect legacy `.codex-old` profiles that may contain credentials and task state, and warn when Conda, Mamba, or Pixi is active before package-cache cleanup.
 - Revalidate cleanup-plan targets against the selected priority and exact rule label so edited or malformed candidate data cannot turn an unrelated path into a deletion target.
 - Match automated cleanup and protection patterns on complete Windows path components, preventing embedded names such as `CacheInspector` and `OneDriveBackup` from inheriting unrelated classifications.

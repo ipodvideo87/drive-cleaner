@@ -70,6 +70,43 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["project_candidate_count"], 1)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_solution_project_and_requirements_files_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = ("DriveCleanr.sln", "Worker.csproj", "dev-requirements.txt")
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"project-{index}"
+                cache = project / "pip" / "cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+            results = self.analyze_rows(rows)
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_project_marker_at_user_profile_root_is_checked_before_walking_stops(self):
+        profile = r"C:\Users\Jordan"
+        cache_path = profile + r"\AppData\Local\Temp\pip\cache"
+        is_profile = lambda path: os.path.normcase(path) == os.path.normcase(profile)
+        with mock.patch.object(analyze, "_directory_has_project_marker", side_effect=is_profile):
+            self.assertTrue(analyze._inside_project_tree(cache_path, True, {}))
+
+    def test_node_tool_metadata_at_profile_root_does_not_hide_other_cleanup_locations(self):
+        entries = []
+        for name in ("package.json", "package-lock.json", "bun.lock"):
+            entry = mock.Mock()
+            entry.name = name
+            entry.is_file.return_value = True
+            entries.append(entry)
+        scan_context = mock.MagicMock()
+        scan_context.__enter__.return_value = entries
+        with mock.patch.object(analyze.os, "scandir", return_value=scan_context):
+            self.assertFalse(analyze._directory_has_project_marker(r"C:\Users\Jordan"))
+
+    def test_project_marker_lookup_failure_is_conservative(self):
+        with mock.patch.object(analyze.os, "scandir", side_effect=PermissionError):
+            self.assertTrue(analyze._directory_has_project_marker(r"C:\Users\PrivateProject"))
+
     def test_custom_project_protection_marker_hides_unrecognized_project_trees(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "personal-project"
@@ -379,6 +416,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             codex_roaming_cache.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
+            visual_project_cache = selected / "nested" / "visual-studio-project" / "packages" / "cache"
+            visual_project_cache.mkdir(parents=True)
+            (visual_project_cache.parents[1] / "DriveCleanrSample.csproj").touch()
             unselected.mkdir()
             (selected / "remove-me.bin").write_bytes(b"remove")
             (selected / "nested" / "claude-session" / "keep.bin").write_bytes(b"keep")
@@ -389,6 +429,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (codex_roaming_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
+            (visual_project_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "regular-cache").mkdir()
             (selected / "nested" / "regular-cache" / "remove.bin").write_bytes(b"remove")
             (unselected / "keep.bin").write_bytes(b"untouched")
@@ -423,6 +464,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((codex_package_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((visual_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertFalse((selected / "nested" / "regular-cache" / "remove.bin").exists())
             self.assertEqual((unselected / "keep.bin").read_bytes(), b"untouched")
             self.assertEqual(backup_log.read_text(encoding="utf-8"), str(selected) + "\\")

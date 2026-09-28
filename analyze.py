@@ -114,9 +114,23 @@ EXCLUDE_COMPONENT_PREFIXES = ("onedrive - ", "openai.codex_")
 ANALYSIS_PROGRESS_INTERVAL = 100_000
 PROJECT_MARKERS = (
     ".drive-cleanr-protect", ".git", ".hg", ".svn", "pyproject.toml", "package.json", "cargo.toml",
-    "go.mod", "cmakelists.txt", "makefile", "setup.py", "pom.xml",
-    "build.gradle", "composer.json",
+    "go.mod", "go.work", "cmakelists.txt", "cmakepresets.json", "makefile", "meson.build",
+    "build.ninja", "setup.py", "setup.cfg", "requirements.txt", "pipfile", "pipfile.lock",
+    "poetry.lock", "uv.lock", "tox.ini", "pytest.ini", "environment.yml", "environment.yaml",
+    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json",
+    "deno.jsonc", "cargo.lock", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
+    "settings.gradle.kts", "gradlew", "gradlew.bat", "composer.json", "composer.lock", "gemfile",
+    "gemfile.lock", "rakefile", "dockerfile", "containerfile", "docker-compose.yml",
+    "docker-compose.yaml", "build.sbt", "mix.exs", "pubspec.yaml",
 )
+PROJECT_MARKER_SUFFIXES = (
+    ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj", "-requirements.txt",
+)
+_PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
+_PROFILE_ROOT_IGNORED_MARKERS = frozenset({
+    "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock",
+    "bun.lockb", "pnpm-lock.yaml", "yarn.lock",
+})
 WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{index}" for index in range(1, 10)),
@@ -269,13 +283,12 @@ def _inside_project_tree(path, directory, cache):
             break
         _, tail = ntpath.splitdrive(current)
         top_level = [part for part in tail.strip("\\").split("\\") if part]
+        visited.append(key)
+        if _directory_has_project_marker(current):
+            project_found = True
+            break
         if (len(top_level) <= 2 and top_level and
                 top_level[0].casefold() in {"users", "documents and settings"}):
-            break
-        visited.append(key)
-        if any(os.path.isdir(os.path.join(current, marker)) or
-               os.path.isfile(os.path.join(current, marker)) for marker in PROJECT_MARKERS):
-            project_found = True
             break
         parent = ntpath.dirname(current)
         if parent == current:
@@ -284,6 +297,35 @@ def _inside_project_tree(path, directory, cache):
     for key in visited:
         cache[key] = project_found
     return project_found
+
+
+def _directory_has_project_marker(directory):
+    """Check common exact project markers and Windows project-file suffixes."""
+    _, tail = ntpath.splitdrive(str(directory).replace("/", "\\"))
+    parts = [part for part in tail.strip("\\").split("\\") if part]
+    is_profile_root = (len(parts) == 2 and
+                       parts[0].casefold() in {"users", "documents and settings"})
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                name = entry.name.casefold()
+                # Developer tools often place their own Node metadata directly
+                # in a user profile. Treating that as a project root would hide
+                # every otherwise eligible cleanup location in the profile.
+                if is_profile_root and name in _PROFILE_ROOT_IGNORED_MARKERS:
+                    continue
+                if name in _PROJECT_MARKER_NAMES:
+                    return True
+                if (entry.is_file(follow_symlinks=False) and
+                        name.endswith(PROJECT_MARKER_SUFFIXES)):
+                    return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        # If a directory cannot be inspected for project markers, leave its
+        # contents out of cleanup recommendations until it can be checked.
+        return True
+    return False
 
 
 def _is_local_drive_path(path, drive=None, drive_tail=None):
@@ -738,6 +780,7 @@ $protectedPathPattern = [regex]::new({protected_pattern}, [System.Text.RegularEx
 $projectMarkers = @(
 {project_markers}
 )
+$projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
 
 $available = @()
 Write-Host "Choose exactly which items to clean:" -ForegroundColor White
@@ -840,6 +883,9 @@ foreach ($target in $cleanTargets) {{
                 if ($projectMarkers -contains $entry.Name) {{
                     $protectedRoot = [System.IO.Directory]::GetParent($entry.FullName).FullName
                 }}
+                if (-not $entry.PSIsContainer -and $projectMarkerSuffixPattern.IsMatch($entry.Name)) {{
+                    $protectedRoot = [System.IO.Directory]::GetParent($entry.FullName).FullName
+                }}
                 $normalizedPath = $entry.FullName.TrimEnd('\\') + '\\'
                 if ($protectedPathPattern.IsMatch($normalizedPath)) {{ $protectedRoot = $entry.FullName }}
                 if ($protectedRoot) {{
@@ -917,6 +963,9 @@ Write-Host "========================================" -ForegroundColor Cyan
     protected_fragments.extend(re.escape(prefix) + r"[^\\]*" for prefix in EXCLUDE_COMPONENT_PREFIXES)
     protected_pattern = r"(?:^|\\)(?:" + "|".join(protected_fragments) + r")(?:\\|$)"
     project_markers_str = ",\n".join(f"        {_ps_literal(marker)}" for marker in PROJECT_MARKERS)
+    project_suffix_pattern = r"(?:" + "|".join(
+        re.escape(suffix) for suffix in PROJECT_MARKER_SUFFIXES
+    ) + r")$"
 
     script = script.format(
         priority_name=priority_name,
@@ -924,6 +973,7 @@ Write-Host "========================================" -ForegroundColor Cyan
         targets=targets_str.rstrip(",\n"),
         protected_pattern=_ps_literal(protected_pattern),
         project_markers=project_markers_str,
+        project_marker_suffix_pattern=_ps_literal(project_suffix_pattern),
         priority_arg=priority if priority != "all" else "low"
     )
 
