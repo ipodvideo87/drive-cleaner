@@ -280,6 +280,31 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(items[0]["name"], "Temporary files (check for installers or builds in progress)")
         self.assertEqual(results["categories"]["medium"]["items"], [])
 
+    def test_equal_specificity_cache_labels_override_broad_known_temp_label(self):
+        rows = [
+            {"File Name": r"C:\Users\A\AppData\Local\Temp\Cache" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\AppData\Local\Temp\Logs" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\AppData\Local\Temp\GPUCache" + "\\", "Size": "104857600"},
+        ]
+        results = self.analyze_rows(rows)
+        self.assertEqual(results["categories"]["high"]["items"], [])
+        labels = {item["path"]: item["name"] for item in results["categories"]["medium"]["items"]}
+        self.assertEqual(labels, {
+            r"C:\Users\A\AppData\Local\Temp\Cache" + "\\": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+            r"C:\Users\A\AppData\Local\Temp\Logs" + "\\": "Logs data (review contents; may include user or diagnostic history)",
+            r"C:\Users\A\AppData\Local\Temp\GPUCache" + "\\": "GPU cache data (review which application owns it before cleanup)",
+        })
+        mislabeled = dict(results["categories"]["medium"]["items"][0])
+        mislabeled["name"] = "Temporary files (check for installers or builds in progress)"
+        invalid_plan = {"categories": {
+            "high": {"name": "High", "items": [mislabeled]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(invalid_plan, str(Path(temp_dir) / "mislabelled-temp-cache.ps1"))
+
     def test_known_temp_root_is_skipped_so_nested_items_can_be_selected(self):
         temp_root = "C:\\Users\\A\\AppData\\Local\\Temp\\"
         work_folder = temp_root + "cargo-install\\"
@@ -1874,13 +1899,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target = Path(temp_dir) / "cache"
             target.mkdir()
             results = {"categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}}
-            results["categories"]["high"]["items"] = [{
+            results["categories"]["medium"]["items"] = [{
                 "path": str(target) + "\\", "size": 100, "size_formatted": "100 B",
-                "name": "Temporary files (check for installers or builds in progress)",
-                "kind": "Directory", "safe": True,
+                "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+                "kind": "Directory", "safe": False,
             }]
             with self.assertRaisesRegex(ValueError, "outside the selected cleanup targets"):
-                analyze.generate_clean_script(results, str(target / "plan.ps1"))
+                analyze.generate_clean_script(results, str(target / "plan.ps1"), priority="medium")
             with self.assertRaisesRegex(ValueError, "outside the selected cleanup targets"):
                 analyze.write_item_list_report(results, str(target / "items.txt"))
 

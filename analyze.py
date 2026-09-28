@@ -275,11 +275,14 @@ _CLEANABLE_COMPONENTS = {
                     for pattern_info in category["patterns"])
     for priority, category in CLEANABLE_PATTERNS.items()
 }
+_CLEANUP_TIE_BREAK_RANK = {"low": 0, "medium": 1, "high": 2}
 _CLEANABLE_RULES = tuple(sorted(
     ((priority, pattern_info, pattern_components)
      for priority, patterns in _CLEANABLE_COMPONENTS.items()
      for pattern_info, pattern_components in patterns),
-    key=lambda rule: len(rule[2]), reverse=True,
+    # Prefer the more cautious tier when equally specific rules overlap. A
+    # broad Temp match must not hide a caution label such as Cache or Logs.
+    key=lambda rule: (-len(rule[2]), _CLEANUP_TIE_BREAK_RANK[rule[0]]),
 ))
 _EXCLUDE_SINGLE_COMPONENTS = frozenset(
     pattern[0] for pattern in _EXCLUDE_COMPONENTS if len(pattern) == 1

@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Prefer the more cautious cleanup tier when equally specific rules overlap, so Cache, Logs, or GPUCache labels are not downgraded by a broad Temp match.
 - Reopen each selected folder descendant and recheck its nested parent paths immediately before removal, so a junction introduced after backup verification stops cleanup; preserve files whose size or last-write time changes after the backup check.
 - Recognize Unreal, Godot, and Unity project roots so their generic cache folders stay out of cleanup candidates.
 - Move Windows crash dumps from the lower-risk tier to caution and explain their troubleshooting and privacy value.
