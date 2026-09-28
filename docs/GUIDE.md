@@ -30,7 +30,7 @@ Choose the latest scan or enter a CSV path. Review the disk summary, candidate t
 
 The report shows when the scan export was last modified. Candidate paths and contents can change after a scan; rescan before generating a cleanup plan if the system has changed since then.
 
-High, medium, and low are review tiers, not a guarantee of safety. Only standard Windows/user temp roots and the configured `TEMP`/`TMP` locations receive the lower-risk temporary-files label; folders merely named `Temp` or `Tmp` elsewhere stay in the caution tier. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
+High, medium, and low are review tiers, not a guarantee of safety. Only standard Windows/user temp roots and the configured `TEMP`/`TMP` locations receive the lower-risk temporary-files label. The recognized temp root itself is omitted so qualifying items inside it can be reviewed and selected individually; folders merely named `Temp` or `Tmp` elsewhere stay in the caution tier. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
 
 Drive Cleanr checks candidate file/folder types against the current filesystem. If WinDirStat did not include reliable type metadata, the current path type is used. If a row's exported type conflicts with the current path, it is skipped and counted in the report; rescan to refresh it.
 

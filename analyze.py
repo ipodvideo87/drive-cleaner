@@ -386,6 +386,15 @@ def _is_known_temp_location(path, components):
     return False
 
 
+def _is_known_temp_root(path, components=None):
+    """Recognize the root of a configured or standard temporary folder."""
+    components = components if components is not None else _path_components(path)
+    if not _is_known_temp_location(path, components):
+        return False
+    parent = ntpath.dirname(str(path).rstrip("\\/"))
+    return bool(parent and not _is_known_temp_location(parent, _path_components(parent)))
+
+
 def _matches_cleanup_rule(path, priorities, name):
     """Require cleanup plans to preserve the analyzer's priority and label."""
     components = _path_components(path)
@@ -393,6 +402,9 @@ def _matches_cleanup_rule(path, priorities, name):
     for priority in priorities:
         for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
             if pattern_info["name"] != name:
+                continue
+            if (pattern_info.get("known_temp_location") and
+                    _is_known_temp_root(path, components)):
                 continue
             if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=path):
                 return True
@@ -521,6 +533,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         "space_source": None,
         "stale_candidate_count": 0,
         "project_candidate_count": 0,
+        "temp_root_candidate_count": 0,
         "unclassified_candidate_count": 0,
         "type_mismatch_count": 0,
         "reparse_candidate_count": 0,
@@ -695,6 +708,13 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                                     path += '\\'
                                 if _inside_project_tree(path, row_is_directory, project_path_cache):
                                     results["project_candidate_count"] += 1
+                                elif (row_is_directory and pattern_info.get("known_temp_location") and
+                                      _is_known_temp_root(path, path_components)):
+                                    # Offer qualifying contents inside a known
+                                    # temp root individually, so selecting the
+                                    # root cannot sweep up unrelated installers
+                                    # or work in progress as one broad target.
+                                    results["temp_root_candidate_count"] += 1
                                 else:
                                     # Avoid double-counting an entry under a selected parent.
                                     existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
@@ -814,6 +834,8 @@ def print_report(results, show_all_items=False, item_limit=10):
         print(f"Skipped {results['stale_candidate_count']} candidate paths that no longer exist.")
     if results.get("project_candidate_count", 0):
         print(f"Skipped {results['project_candidate_count']} candidate entries inside detected project folders.")
+    if results.get("temp_root_candidate_count", 0):
+        print(f"Skipped {results['temp_root_candidate_count']} known temporary folder roots; qualifying items inside them are listed separately.")
     if results.get("unclassified_candidate_count", 0):
         print(f"Skipped {results['unclassified_candidate_count']} candidate rows with no reliable file or folder type; rescan to get complete item details.")
     if results.get("type_mismatch_count", 0):
@@ -1292,6 +1314,9 @@ def write_item_list_report(results, output_path):
     lines.append("")
     if results.get("reparse_candidate_count", 0):
         lines.append(f"Skipped {results['reparse_candidate_count']} candidate paths that cross a junction, symbolic link, or path with unreadable metadata.")
+        lines.append("")
+    if results.get("temp_root_candidate_count", 0):
+        lines.append(f"Skipped {results['temp_root_candidate_count']} known temporary folder roots; qualifying items inside them are listed separately.")
         lines.append("")
     lines.append("Tier subtotals may overlap when folders contain candidates from another tier; the overall estimate deduplicates them.")
     lines.append("")

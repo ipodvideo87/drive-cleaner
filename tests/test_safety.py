@@ -280,6 +280,47 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(items[0]["name"], "Temporary files (check for installers or builds in progress)")
         self.assertEqual(results["categories"]["medium"]["items"], [])
 
+    def test_known_temp_root_is_skipped_so_nested_items_can_be_selected(self):
+        temp_root = "C:\\Users\\A\\AppData\\Local\\Temp\\"
+        work_folder = temp_root + "cargo-install\\"
+        large_file = work_folder + "payload.bin"
+        results = self.analyze_rows([
+            {"File Name": large_file, "Size": "200000000"},
+            {"File Name": work_folder, "Size": "250000000"},
+            {"File Name": temp_root, "Size": "300000000"},
+        ])
+        items = results["categories"]["high"]["items"]
+        self.assertEqual([item["path"] for item in items], [work_folder])
+        self.assertEqual(results["temp_root_candidate_count"], 1)
+
+        report_output = io.StringIO()
+        with redirect_stdout(report_output):
+            analyze.print_report(results)
+        self.assertIn("Skipped 1 known temporary folder roots", report_output.getvalue())
+        self.assertIn("qualifying items inside them are listed separately", report_output.getvalue())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_report = Path(temp_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_report))
+            report_text = candidate_report.read_text(encoding="utf-8")
+            self.assertIn("Skipped 1 known temporary folder roots", report_text)
+            plan_path = Path(temp_dir) / "selected-child.ps1"
+            analyze.generate_clean_script(results, str(plan_path))
+            plan = plan_path.read_text(encoding="utf-8-sig")
+        self.assertIn(work_folder, plan)
+
+        imported_root = {
+            "path": temp_root,
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 300_000_000, "size_formatted": "286.10 MB", "kind": "Directory",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(
+                {"categories": {"high": {"name": "High", "items": [imported_root]}}},
+                str(Path(temp_dir) / "unsafe-temp-root.ps1"),
+            )
+
     def test_configured_temp_root_remains_a_lower_risk_candidate(self):
         with mock.patch.dict(os.environ, {"TEMP": r"D:\Scratch\Session"}):
             results = self.analyze_rows([{
