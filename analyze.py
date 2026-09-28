@@ -49,6 +49,10 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (close Chrome first; it may be downloaded again; consider disabling optimization-guide-on-device-model in chrome://flags)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
+            {"pattern": "\\appdata\\roaming\\code\\cachedextensionvsixs", "name": "VS Code cached extensions (close VS Code first; may be useful for offline reinstalls)", "safe": False},
+            {"pattern": "\\appdata\\roaming\\code\\cacheddata", "name": "VS Code cache (close VS Code first; review exact contents)", "safe": False},
+            {"pattern": "\\appdata\\roaming\\code\\cache", "name": "VS Code cache (close VS Code first; review exact contents)", "safe": False},
+            {"pattern": "\\appdata\\roaming\\code\\crashpad", "name": "VS Code crash reports (keep while troubleshooting; review before cleanup)", "safe": False},
             {"pattern": "\\logs\\", "name": "Logs data (review contents; may include user or diagnostic history)", "safe": False},
             {"pattern": "gpucache", "name": "GPU cache data (review which application owns it before cleanup)", "safe": False},
             {"pattern": "shadercache", "name": "Shader cache data (review which application owns it before cleanup)", "safe": False},
@@ -396,18 +400,15 @@ def _is_known_temp_root(path, components=None):
 
 
 def _matches_cleanup_rule(path, priorities, name):
-    """Require cleanup plans to preserve the analyzer's priority and label."""
+    """Require the analyzer's most-specific cleanup rule, priority, and label."""
     components = _path_components(path)
     component_set, sequences = _path_match_index(components)
-    for priority in priorities:
-        for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
-            if pattern_info["name"] != name:
-                continue
-            if (pattern_info.get("known_temp_location") and
-                    _is_known_temp_root(path, components)):
-                continue
-            if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=path):
-                return True
+    for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+        if (pattern_info.get("known_temp_location") and
+                _is_known_temp_root(path, components)):
+            continue
+        if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=path):
+            return priority in priorities and pattern_info["name"] == name
     return False
 
 

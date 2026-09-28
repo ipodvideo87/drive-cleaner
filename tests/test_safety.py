@@ -467,6 +467,45 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "Application cache",
         ))
 
+    def test_known_vscode_cache_paths_get_specific_caution_labels(self):
+        known_paths = [
+            r"C:\Users\A\AppData\Roaming\Code\CachedExtensionVSIXs",
+            r"C:\Users\A\AppData\Roaming\Code\CachedData",
+            r"C:\Users\A\AppData\Roaming\Code\Cache",
+            r"C:\Users\A\AppData\Roaming\Code\Crashpad",
+        ]
+        other_paths = [
+            r"C:\Users\A\Projects\Code\Cache",
+            r"C:\Users\A\AppData\Roaming\Code\User",
+            r"C:\Users\A\AppData\Roaming\Code\WebStorage",
+            r"C:\Users\A\AppData\Roaming\Code\User\globalStorage\Cache",
+        ]
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "104857600"}
+            for path in known_paths + other_paths
+        ])
+        candidates = results["categories"]["medium"]["items"]
+        by_path = {item["path"].rstrip("\\"): item for item in candidates}
+        for path in known_paths:
+            with self.subTest(path=path):
+                item = by_path[path.rstrip("\\")]
+                self.assertIn("VS Code", item["name"])
+                self.assertFalse(item["safe"])
+        self.assertIn("Cache-named data", by_path[other_paths[0].rstrip("\\")]["name"])
+        self.assertNotIn(other_paths[1].rstrip("\\"), by_path)
+        self.assertNotIn(other_paths[2].rstrip("\\"), by_path)
+        self.assertIn("Cache-named data", by_path[other_paths[3].rstrip("\\")]["name"])
+        outdated = {"categories": {"medium": {"name": "Medium", "items": [{
+            "path": known_paths[2],
+            "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+            "size": 100, "size_formatted": "100 B", "kind": "Directory",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(
+                outdated, str(Path(temp_dir) / "old-cache-label.ps1"), priority="medium"
+            )
+
     def test_chrome_and_nvidia_labels_require_their_known_parent_paths(self):
         results = self.analyze_rows([
             {"File Name": r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel" + "\\", "Size": "104857600"},
