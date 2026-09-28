@@ -732,11 +732,20 @@ def get_backup(backup_id: str) -> Optional[Dict]:
         return None
     manifest_path = os.path.join(backup_dir, "manifest.json")
 
-    if os.path.exists(manifest_path):
+    if (_path_has_reparse_component(manifest_path) or
+            not os.path.isfile(manifest_path)):
+        return None
+    try:
         with open(manifest_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            manifest = json.load(f)
+    except (OSError, ValueError):
+        return None
 
-    return None
+    if (not isinstance(manifest, dict) or manifest.get("id") != backup_id or
+            not isinstance(manifest.get("timestamp"), str) or
+            not isinstance(manifest.get("items"), list)):
+        return None
+    return manifest
 
 
 def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:

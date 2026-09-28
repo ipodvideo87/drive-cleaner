@@ -1674,6 +1674,25 @@ class BackupSafetyTests(unittest.TestCase):
             with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), mock.patch.object(backup, "_path_has_reparse_component", side_effect=is_redirected):
                 self.assertEqual([], backup.list_backups())
 
+    def test_get_backup_rejects_corrupt_and_mismatched_manifests(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_id = "backup_20260928_123456_123456"
+            manifest_path = Path(temp_dir) / "manifest.json"
+            invalid_manifests = (
+                "{invalid json",
+                "[]",
+                json.dumps({
+                    "id": "backup_20260928_123456_000001",
+                    "timestamp": "2026-09-28T12:34:56",
+                    "items": [],
+                }),
+            )
+            with mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir):
+                for contents in invalid_manifests:
+                    with self.subTest(contents=contents):
+                        manifest_path.write_text(contents, encoding="utf-8")
+                        self.assertIsNone(backup.get_backup(backup_id))
+
     def test_backup_list_shows_the_restore_location(self):
         manifest = {
             "id": "backup_20260928_123456_123456",
