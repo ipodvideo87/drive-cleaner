@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Keep folders merely named `Temp` or `Tmp` in the caution tier unless they are standard Windows/user temp roots or the configured `TEMP`/`TMP` location.
 - Avoid forcing ZIP64 headers for known-small backup members; Python 3.10 writes nonconforming local headers when ZIP64 is forced unnecessarily. Large known members still use ZIP64.
 - Label Scoop's downloaded installer cache explicitly in the confirm-first tier and point users to Scoop's cache controls.
 - Exclude common cloud, container, and GitHub CLI profile directories from generic cache candidates because they can contain credentials and environment settings.

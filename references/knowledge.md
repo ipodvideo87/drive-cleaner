@@ -48,7 +48,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Item | Example paths | Notes |
 |---|---|---|
 | Crash dumps | `C:\Windows\LiveKernelReports`, `C:\Windows\Minidump`, `C:\Windows\MEMORY.DMP` | Diagnostic snapshots that can occupy several gigabytes; only these Windows-root locations match automatically, and each target still needs review |
-| Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. |
+| Known temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%`, `%TMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. Other folders merely named `Temp` or `Tmp` stay in the caution tier. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
 | Package-manager caches | npm, pip, and Electron caches | Prefer each package manager's own cleanup command. |
@@ -64,6 +64,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Updater cache at `GoogleUpdater\crx_cache` | Varies | Usually recreated automatically; may require administrator rights. |
 | Error reports at `ProgramData\...\WER\{ReportQueue,ReportArchive}` | Varies | Removes diagnostic history. |
 | Delivery Optimization cache | Varies | Use the supported `Delete-DeliveryOptimizationCache -Force` cmdlet. |
+| Folders named `Temp` or `Tmp` outside known Windows and user temp locations | — | The name alone does not establish that contents are temporary; inspect the owner and contents before considering cleanup. |
 
 ## Tier 2: Require an item-by-item user decision
 

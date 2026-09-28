@@ -180,6 +180,49 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with mock.patch.object(analyze.os, "scandir", return_value=scan_context):
             self.assertFalse(analyze._directory_has_project_marker(r"C:\Users\Jordan"))
 
+    def test_temp_named_paths_outside_known_temp_roots_are_caution_candidates(self):
+        results = self.analyze_rows([{
+            "File Name": "C:\\Games\\Temp\\game-assets\\", "Size": "104857600",
+        }])
+        self.assertEqual(results["categories"]["high"]["items"], [])
+        items = results["categories"]["medium"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Folder named Temp (inspect its owner and contents; the name alone does not prove it is temporary)")
+
+        imported_item = dict(items[0])
+        promoted = {"categories": {
+            "high": {"name": "High", "items": [imported_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(ValueError, "does not match its priority and cleanup label"):
+                analyze.generate_clean_script(promoted, str(Path(temp_dir) / "unsafe.ps1"))
+            safe_plan = Path(temp_dir) / "caution.ps1"
+            analyze.generate_clean_script({"categories": {
+                "high": {"name": "High", "items": []},
+                "medium": {"name": "Medium", "items": items},
+                "low": {"name": "Low", "items": []},
+            }}, str(safe_plan), priority="medium")
+            self.assertIn("Folder named Temp", safe_plan.read_text(encoding="utf-8-sig"))
+
+    def test_standard_windows_temp_root_remains_a_lower_risk_candidate(self):
+        results = self.analyze_rows([{
+            "File Name": r"C:\Users\A\AppData\Local\Temp\cache.bin", "Size": "104857600",
+        }])
+        items = results["categories"]["high"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["name"], "Temporary files (check for installers or builds in progress)")
+        self.assertEqual(results["categories"]["medium"]["items"], [])
+
+    def test_configured_temp_root_remains_a_lower_risk_candidate(self):
+        with mock.patch.dict(os.environ, {"TEMP": r"D:\Scratch\Session"}):
+            results = self.analyze_rows([{
+                "File Name": "D:\\Scratch\\Session\\build-output\\", "Size": "104857600",
+            }])
+        self.assertEqual(len(results["categories"]["high"]["items"]), 1)
+        self.assertEqual(results["categories"]["medium"]["items"], [])
+
     def test_project_marker_lookup_failure_is_conservative(self):
         with mock.patch.object(analyze.os, "scandir", side_effect=PermissionError):
             self.assertTrue(analyze._directory_has_project_marker(r"C:\Users\PrivateProject"))
@@ -696,7 +739,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
 
     def test_generated_script_quotes_untrusted_path_and_backs_up_first(self):
-        path = "C:\\Users\\O'Brien\\$(not-a-command)\\AppData\\Local\\Temp\\"
+        path = "C:\\Users\\O'Brien\\AppData\\Local\\Temp\\$(not-a-command)\\"
         results = {"categories": {"high": {"name": "High", "items": [{
             "path": path, "name": "Temporary files (check for installers or builds in progress)", "size": 100,
             "size_formatted": "100 B", "kind": "Directory",
@@ -705,7 +748,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             output = Path(temp_dir) / "clean.ps1"
             analyze.generate_clean_script(results, str(output))
             script = output.read_text(encoding="utf-8-sig")
-        self.assertIn("'C:\\Users\\O''Brien\\$(not-a-command)\\AppData\\Local\\Temp\\'", script)
+        self.assertIn("'C:\\Users\\O''Brien\\AppData\\Local\\Temp\\$(not-a-command)\\'", script)
         self.assertIn("--json", script)
         self.assertIn("A Rust/Cargo process is running", script)
         self.assertIn("A Conda, Mamba, or Pixi operation is running", script)

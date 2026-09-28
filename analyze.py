@@ -9,6 +9,7 @@ import shutil
 import sys
 import json
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -38,8 +39,8 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\electron\\cache", "name": "Electron cache", "safe": True},
             {"pattern": "\\npm-cache", "name": "npm cache", "safe": True},
             {"pattern": "\\yarn\\cache", "name": "Yarn cache", "safe": True},
-            {"pattern": "\\temp\\", "name": "Temporary files (check for installers or builds in progress)", "safe": True},
-            {"pattern": "\\tmp\\", "name": "Temporary files (check for installers or builds in progress)", "safe": True},
+            {"pattern": "temp", "known_temp_location": True, "name": "Temporary files (check for installers or builds in progress)", "safe": True},
+            {"pattern": "tmp", "known_temp_location": True, "name": "Temporary files (check for installers or builds in progress)", "safe": True},
         ]
     },
     "medium": {
@@ -51,6 +52,8 @@ CLEANABLE_PATTERNS = {
             {"pattern": "gpucache", "name": "GPU cache data (review which application owns it before cleanup)", "safe": False},
             {"pattern": "shadercache", "name": "Shader cache data (review which application owns it before cleanup)", "safe": False},
             {"pattern": "code cache", "name": "Code cache data (review which application owns it before cleanup)", "safe": False},
+            {"pattern": "temp", "unknown_temp_location": True, "name": "Folder named Temp (inspect its owner and contents; the name alone does not prove it is temporary)", "safe": False},
+            {"pattern": "tmp", "unknown_temp_location": True, "name": "Folder named Tmp (inspect its owner and contents; the name alone does not prove it is temporary)", "safe": False},
         ]
     },
     "low": {
@@ -297,19 +300,25 @@ def _is_excluded_path(path, components=None, component_set=None, sequences=None)
                for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
 
 
-def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences):
+def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=None):
     """Match a rule's component pattern and any required path-root prefix."""
     root = pattern_info.get("root")
     if root:
         root_components = tuple(_path_components(root))
         if tuple(components[:len(root_components)]) != root_components:
             return False
-    matches = (
+    component_match = (
         (len(pattern_components) == 1 and pattern_components[0] in component_set) or
         (len(pattern_components) > 1 and
          pattern_components in sequences.get(len(pattern_components), ()))
     )
-    if not matches:
+    if pattern_info.get("known_temp_location"):
+        if not _is_known_temp_location(path, components):
+            return False
+    elif pattern_info.get("unknown_temp_location"):
+        if not component_match or _is_known_temp_location(path, components):
+            return False
+    elif not component_match:
         return False
     if pattern_info.get("browser_profile"):
         indexeddb_index = components.index("indexeddb")
@@ -322,6 +331,38 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
     return True
 
 
+def _is_known_temp_location(path, components):
+    """Recognize Windows temp roots and explicitly configured TEMP/TMP paths."""
+    if any(
+            tuple(components[:len(root)]) == root
+            for root in (
+                ("windows", "temp"),
+                ("windows", "systemtemp"),
+            )
+    ):
+        return True
+    if len(components) >= 5 and components[0] in {"users", "documents and settings"}:
+        if components[2:5] == ["appdata", "local", "temp"]:
+            return True
+
+    roots = [os.environ.get("TEMP"), os.environ.get("TMP"), tempfile.gettempdir()]
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        roots.append(ntpath.join(local_app_data, "Temp"))
+    windows_dir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
+    if windows_dir:
+        roots.extend((ntpath.join(windows_dir, "Temp"), ntpath.join(windows_dir, "SystemTemp")))
+    else:
+        roots.extend((r"C:\Windows\Temp", r"C:\Windows\SystemTemp"))
+
+    for root in roots:
+        if not root:
+            continue
+        if path and (_path_key(path) == _path_key(root) or _is_under(path, root)):
+            return True
+    return False
+
+
 def _matches_cleanup_rule(path, priorities, name):
     """Require cleanup plans to preserve the analyzer's priority and label."""
     components = _path_components(path)
@@ -330,7 +371,7 @@ def _matches_cleanup_rule(path, priorities, name):
         for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
             if pattern_info["name"] != name:
                 continue
-            if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences):
+            if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=path):
                 return True
     return False
 
@@ -588,7 +629,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                 # Match the path against cleanup categories.
                 for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
                     if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
-                                             path_component_set, path_sequences):
+                                             path_component_set, path_sequences, path=path):
                         # Type metadata is only needed for candidates; most
                         # scanner rows are ordinary files we can skip here.
                         if scan._path_has_reparse_component(path.rstrip("\\/")):
