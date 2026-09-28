@@ -843,6 +843,37 @@ $projectMarkers = @(
 {project_markers}
 )
 $projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$profileRootIgnoredMarkers = @('package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
+
+function Test-DirectoryHasProjectMarker([string]$Directory) {{
+    try {{
+        $entries = @(Get-ChildItem -LiteralPath $Directory -Force -EA Stop)
+    }} catch {{
+        # A directory that cannot be checked must not be treated as disposable.
+        return $true
+    }}
+    $normalizedDirectory = $Directory.TrimEnd('\\')
+    $isProfileRoot = $normalizedDirectory -match '^[A-Za-z]:\\\\(?:Users|Documents and Settings)\\\\[^\\\\]+$'
+    foreach ($entry in $entries) {{
+        if ($isProfileRoot -and $profileRootIgnoredMarkers -contains $entry.Name) {{ continue }}
+        if ($projectMarkers -contains $entry.Name) {{ return $true }}
+        if (-not $entry.PSIsContainer -and $projectMarkerSuffixPattern.IsMatch($entry.Name)) {{ return $true }}
+    }}
+    return $false
+}}
+
+function Test-PathInsideProject([string]$Path, [bool]$IsDirectory) {{
+    $current = if ($IsDirectory) {{ $Path }} else {{ [System.IO.Path]::GetDirectoryName($Path) }}
+    while ($current) {{
+        if (Test-DirectoryHasProjectMarker $current) {{ return $true }}
+        $normalizedCurrent = $current.TrimEnd('\\')
+        if ($normalizedCurrent -match '^[A-Za-z]:\\\\(?:Users|Documents and Settings)(?:\\\\[^\\\\]+)?$') {{ break }}
+        $parent = [System.IO.Directory]::GetParent($current)
+        if (-not $parent) {{ break }}
+        $current = $parent.FullName
+    }}
+    return $false
+}}
 
 $available = @()
 Write-Host "Choose exactly which items to clean:" -ForegroundColor White
@@ -889,6 +920,12 @@ if ($Select.Count -gt 0) {{
     }}
 }}
 
+foreach ($target in $cleanTargets) {{
+    if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
+        throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
+    }}
+}}
+
 Write-Host "`nOnly these selected items will be cleaned:" -ForegroundColor Cyan
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.Path) - $($target.Size)" }}
 if (-not $Force) {{
@@ -924,6 +961,9 @@ foreach ($target in $cleanTargets) {{
         continue
     }}
     try {{
+        if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
+            throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+        }}
         $item = Get-Item -LiteralPath $target.Path -Force -EA Stop
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
             throw "Refusing to remove a reparse point or junction"
@@ -992,6 +1032,9 @@ foreach ($target in $cleanTargets) {{
             $before = ($deletable | Where-Object {{ -not $_.PSIsContainer }} | Measure-Object -Property Length -Sum).Sum
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
+            if (Test-PathInsideProject $target.Path $true) {{
+                throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+            }}
             $deletable | Sort-Object {{ $_.FullName.Length }} -Descending | Remove-Item -Force -EA Stop
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
@@ -1004,6 +1047,9 @@ foreach ($target in $cleanTargets) {{
             $before = $item.Length
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
+            if (Test-PathInsideProject $target.Path $false) {{
+                throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+            }}
             Remove-Item -LiteralPath $target.Path -Force -EA Stop
         }}
         $cleanedMB = [math]::Round($before / 1MB, 2)

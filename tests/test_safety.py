@@ -796,6 +796,44 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(marker.read_bytes(), b"changed after backup")
             self.assertIn("refusing cleanup", result.stdout)
 
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_rechecks_file_project_marker_after_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "new-project"
+            project.mkdir()
+            selected = project / "build.tmp"
+            selected.write_bytes(b"keep once project marker appears")
+            marker = project / ".drive-cleanr-protect"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
+                "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, os, pathlib, sys\n"
+                "if sys.argv[1] == 'verify':\n"
+                "    pathlib.Path(os.environ['CLEANR_TEST_PROJECT_MARKER']).touch()\n"
+                "    sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ, CLEANR_TEST_PROJECT_MARKER=str(marker))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90, env=env,
+            )
+            self.assertTrue(marker.exists(), result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(selected.read_bytes(), b"keep once project marker appears")
+            self.assertIn("inside a project", result.stdout + result.stderr)
+
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_selection_indices_do_not_shift_when_target_disappears(self):
