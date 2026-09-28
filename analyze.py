@@ -31,8 +31,7 @@ CLEANABLE_PATTERNS = {
             {"pattern": "minidump.dmp", "root": "windows", "name": "Windows blue screen mini dump file", "safe": True},
             {"pattern": "memory.dmp", "root": "windows", "name": "Windows memory dump", "safe": True},
             {"pattern": "minidump", "root": "windows", "name": "Windows blue screen mini dumps", "safe": True},
-            {"pattern": "optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
-            {"pattern": "ota-artifacts", "name": "NVIDIA update cache", "safe": True},
+            {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
             {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
             {"pattern": "\\.cache\\puppeteer", "name": "Puppeteer cache", "safe": True},
             {"pattern": "\\electron\\cache", "name": "Electron cache", "safe": True},
@@ -61,6 +60,8 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\.cargo\\registry", "name": "Cargo cache", "safe": False},
             {"pattern": "\\.nuget\\packages", "name": "NuGet cache", "safe": False},
             {"pattern": "\\go\\pkg\\mod", "name": "Go modules cache", "safe": False},
+            {"pattern": "\\programdata\\nvidia corporation\\nvidia app\\updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
+            {"pattern": "\\programdata\\nvidia corporation\\nvapp-updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\ms-playwright", "name": "Playwright test browsers (can be reinstalled with `npx playwright install`)", "safe": False},
             {"pattern": "indexeddb", "name": "Browser site data IndexedDB (offline web app data / login state; deleting it can sign you out or lose data)", "safe": False},
         ]

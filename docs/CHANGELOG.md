@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Restrict Chrome model labels to Chrome User Data and NVIDIA update artifact labels to known updater paths; show NVIDIA update data as a caution candidate rather than disposable cache.
 - Treat selected paths literally throughout cleanup checks, so legal wildcard characters such as brackets in Windows names do not change path matching.
 - Restrict automatic crash-dump labels to known locations under the drive's Windows directory.
 - Prefer the most specific matching cleanup rule so package-manager caches are not labeled by generic cache rules.

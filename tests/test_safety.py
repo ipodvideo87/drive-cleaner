@@ -240,6 +240,27 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_chrome_and_nvidia_labels_require_their_known_parent_paths(self):
+        results = self.analyze_rows([
+            {"File Name": r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\BuildArtifacts\OptGuideOnDeviceModel" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\ProgramData\NVIDIA Corporation\NVIDIA App\UpdateFramework\ota-artifacts" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\ProgramData\NVIDIA Corporation\NvApp-UpdateFramework\ota-artifacts" + "\\", "Size": "104857600"},
+            {"File Name": r"D:\Archive\ota-artifacts" + "\\", "Size": "104857600"},
+        ])
+        high = results["categories"]["high"]["items"]
+        low = results["categories"]["low"]["items"]
+        self.assertEqual([item["path"] for item in high], [
+            r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel" + "\\",
+        ])
+        self.assertIn("Chrome on-device AI model", high[0]["name"])
+        self.assertEqual({item["path"] for item in low}, {
+            r"C:\ProgramData\NVIDIA Corporation\NVIDIA App\UpdateFramework\ota-artifacts" + "\\",
+            r"C:\ProgramData\NVIDIA Corporation\NvApp-UpdateFramework\ota-artifacts" + "\\",
+        })
+        self.assertTrue(all(not item["safe"] for item in low))
+        self.assertTrue(all("driver-update files" in item["name"] for item in low))
+
     def test_crash_dump_rules_are_limited_to_windows_locations(self):
         with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
             results = self.analyze_rows([
