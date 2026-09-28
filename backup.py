@@ -52,14 +52,24 @@ def format_size(size_bytes: int) -> str:
 
 
 def _is_reparse_point(path: str) -> bool:
-    if os.path.islink(path):
-        return True
-    if hasattr(os.path, "isjunction") and os.path.isjunction(path):
-        return True
     try:
-        attributes = os.stat(path, follow_symlinks=False).st_file_attributes
-    except (AttributeError, OSError):
+        metadata = os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
         return False
+    except OSError:
+        # Unknown path state must not be treated as safe for backup, restore,
+        # or deletion checks.
+        return True
+
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    if hasattr(os.path, "isjunction"):
+        try:
+            if os.path.isjunction(path):
+                return True
+        except OSError:
+            return True
+    attributes = getattr(metadata, "st_file_attributes", 0)
     return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
@@ -72,7 +82,7 @@ def _path_has_reparse_component(path: str) -> bool:
         if not part:
             continue
         current = os.path.join(current, part)
-        if os.path.lexists(current) and _is_reparse_point(current):
+        if _is_reparse_point(current):
             return True
     return False
 

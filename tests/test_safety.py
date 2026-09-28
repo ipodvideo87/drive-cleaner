@@ -1495,6 +1495,14 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_reparse_point_lookup_fails_closed_but_allows_missing_paths(self):
+        with mock.patch.object(backup.os, "lstat", side_effect=PermissionError("access denied")):
+            self.assertTrue(backup._is_reparse_point("unreadable-path"))
+            self.assertTrue(backup._path_has_reparse_component("unreadable-path"))
+
+        with mock.patch.object(backup.os, "lstat", side_effect=FileNotFoundError("missing")):
+            self.assertFalse(backup._is_reparse_point("missing-path"))
+
     def test_backup_creation_rejects_drive_roots_and_unc_before_creating_storage(self):
         for unsafe_path in ("C:\\", "\\\\server\\share\\folder", "C:relative"):
             with self.subTest(path=unsafe_path), mock.patch.object(backup, "get_backup_root") as get_root:
