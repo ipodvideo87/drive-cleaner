@@ -34,6 +34,8 @@ Drive Cleanr uses WinDirStat's item type and count fields to distinguish files f
 
 When a path matches both a broad cache rule and a recognized package-manager rule, Drive Cleanr uses the more specific package-manager category and caution tier.
 
+Crash-dump rules only apply under the drive's `Windows` directory, not to user archives or project folders with similar names.
+
 ## 3. Generate and inspect a cleanup plan
 
 ```powershell

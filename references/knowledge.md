@@ -14,7 +14,7 @@
 - Do not suggest recovered previous-installation data, `$WinREAgent`, Windows Update logs, or Service Worker storage for direct cleanup.
 - A scan is complete when the selected scanner exits and its export is stable, not merely when file growth pauses.
 - Automated cleanup patterns match complete Windows path components; multi-component patterns must appear as adjacent components. Similar names embedded in larger words are not sufficient to label a path. Generated plans revalidate every target against the selected tier and exact cleanup label before writing the script.
-- Known memory dump files are listed explicitly (`MEMORY.DMP`, `CrashDump.dmp`, and `Minidump.dmp`); a dotted suffix alone does not turn an unrelated name into a cleanup candidate.
+- Dump folders and filenames are candidates only under the drive's `Windows` directory; similarly named user archives and project folders stay untouched.
 - Protect OneDrive's standard organization-root form (`OneDrive - <organization>`) while leaving unrelated sibling names such as `OneDriveBackup` to normal path review.
 
 These rules are based on practical cleanup cases. In one case, 28.9 GB was recovered from one computer; roughly two-thirds came from items that required case-by-case review beyond the pattern list. These figures are examples only. Results vary by system and scan.
@@ -45,7 +45,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 | Item | Example paths | Notes |
 |---|---|---|
-| Crash dumps | `C:\Windows\LiveKernelReports\*.dmp`, `C:\Windows\MEMORY.DMP`, `Minidump` | Diagnostic snapshots that can occupy several gigabytes; review before removal |
+| Crash dumps | `C:\Windows\LiveKernelReports`, `C:\Windows\Minidump`, `C:\Windows\MEMORY.DMP` | Diagnostic snapshots that can occupy several gigabytes; only these Windows-root locations match automatically, and each target still needs review |
 | Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
@@ -78,7 +78,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 ```text
 Temporary folders       \\Temp\\$
 Windows Update cache    SoftwareDistribution|DeliveryOptimization
-Crash dumps             LiveKernelReports|CrashDumps|Minidump
+Crash dumps             Windows\LiveKernelReports|Windows\CrashDumps|Windows\Minidump|Windows\MEMORY.DMP
 Installer caches        Package Cache|Downloaded Installations|InstallerCache|crx_cache
 Driver utilities        MyDrivers|DriverGenius|Driver
 Development toolchains  \.rustup|\.cargo|\.nuget|\.gradle|\.m2|go\\pkg|\.ollama|huggingface|conda

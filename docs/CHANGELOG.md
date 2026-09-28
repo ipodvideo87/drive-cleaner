@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Restrict automatic crash-dump labels to known locations under the drive's Windows directory.
 - Prefer the most specific matching cleanup rule so package-manager caches are not labeled by generic cache rules.
 - Skip ambiguous WinDirStat candidate rows rather than defaulting them to files; report how many were omitted.
 - Verify backup payloads and selected source contents immediately before cleanup; stop and leave changed targets in place.

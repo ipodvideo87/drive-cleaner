@@ -24,13 +24,13 @@ CLEANABLE_PATTERNS = {
     "high": {
         "name": "High Priority (Lower Risk)",
         "patterns": [
-            {"pattern": "livekernelreports", "name": "Kernel crash dumps (diagnostic snapshots; system does not depend on them)", "safe": True},
-            {"pattern": "crashdump", "name": "Crash dumps", "safe": True},
-            {"pattern": "crashdumps", "name": "Crash dumps", "safe": True},
-            {"pattern": "crashdump.dmp", "name": "Crash dump file", "safe": True},
-            {"pattern": "minidump.dmp", "name": "Blue screen mini dump file", "safe": True},
-            {"pattern": "memory.dmp", "name": "Windows memory dump", "safe": True},
-            {"pattern": "minidump", "name": "Blue screen mini dumps", "safe": True},
+            {"pattern": "livekernelreports", "root": "windows", "name": "Kernel crash dumps (diagnostic snapshots; system does not depend on them)", "safe": True},
+            {"pattern": "crashdump", "root": "windows", "name": "Windows crash dumps", "safe": True},
+            {"pattern": "crashdumps", "root": "windows", "name": "Windows crash dumps", "safe": True},
+            {"pattern": "crashdump.dmp", "root": "windows", "name": "Windows crash dump file", "safe": True},
+            {"pattern": "minidump.dmp", "root": "windows", "name": "Windows blue screen mini dump file", "safe": True},
+            {"pattern": "memory.dmp", "root": "windows", "name": "Windows memory dump", "safe": True},
+            {"pattern": "minidump", "root": "windows", "name": "Windows blue screen mini dumps", "safe": True},
             {"pattern": "optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
             {"pattern": "ota-artifacts", "name": "NVIDIA update cache", "safe": True},
             {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
@@ -263,6 +263,20 @@ def _is_excluded_path(path, components=None, component_set=None, sequences=None)
                for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
 
 
+def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences):
+    """Match a rule's component pattern and any required path-root prefix."""
+    root = pattern_info.get("root")
+    if root:
+        root_components = tuple(_path_components(root))
+        if tuple(components[:len(root_components)]) != root_components:
+            return False
+    return (
+        (len(pattern_components) == 1 and pattern_components[0] in component_set) or
+        (len(pattern_components) > 1 and
+         pattern_components in sequences.get(len(pattern_components), ()))
+    )
+
+
 def _matches_cleanup_rule(path, priorities, name):
     """Require cleanup plans to preserve the analyzer's priority and label."""
     components = _path_components(path)
@@ -271,9 +285,7 @@ def _matches_cleanup_rule(path, priorities, name):
         for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
             if pattern_info["name"] != name:
                 continue
-            if ((len(pattern_components) == 1 and pattern_components[0] in component_set) or
-                    (len(pattern_components) > 1 and
-                     pattern_components in sequences.get(len(pattern_components), ()))):
+            if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences):
                 return True
     return False
 
@@ -527,10 +539,8 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
 
                 # Match the path against cleanup categories.
                 for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
-                    if ((len(pattern_components) == 1 and
-                         pattern_components[0] in path_component_set) or
-                            (len(pattern_components) > 1 and
-                             pattern_components in path_sequences.get(len(pattern_components), ()))):
+                    if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
+                                             path_component_set, path_sequences):
                         # Type metadata is only needed for candidates; most
                         # scanner rows are ordinary files we can skip here.
                         if not os.path.exists(path.rstrip("\\/")):

@@ -204,6 +204,35 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_crash_dump_rules_are_limited_to_windows_locations(self):
+        with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows([
+                {"File Name": r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Windows\Minidump\memory.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Users\A\Archives\CrashDumps\customer-data.zip", "Size": "104857600"},
+                {"File Name": r"C:\Users\A\Projects\Minidump\sample.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Users\A\Archives\CrashDump.dmp", "Size": "104857600"},
+            ])
+        high = results["categories"]["high"]["items"]
+        self.assertEqual({item["path"] for item in high}, {
+            r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp",
+            r"C:\Windows\Minidump\memory.dmp",
+        })
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Users\A\Archives\CrashDumps\customer-data.zip", ("high",), "Windows crash dumps"
+        ))
+        arbitrary_dump = {
+            "categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
+        }
+        arbitrary_dump["categories"]["high"]["items"] = [{
+            "path": r"C:\Users\A\Archives\CrashDumps\customer-data.zip",
+            "name": "Windows crash dumps", "size": 104857600,
+            "size_formatted": "100 MB", "kind": "File",
+        }]
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(arbitrary_dump, str(Path(temp_dir) / "unsafe.ps1"))
+
     def test_specific_package_cache_rules_beat_generic_cache_rules(self):
         results = self.analyze_rows([
             {"File Name": r"C:\Users\A\.gradle\caches" + "\\", "Size": "100000000"},
