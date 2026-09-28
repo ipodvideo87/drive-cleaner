@@ -1,10 +1,12 @@
 import csv
+import io
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -1332,15 +1334,19 @@ class ScanSafetyTests(unittest.TestCase):
                 self.assertIn("supported only by WizTree", " ".join(str(c) for c in output.call_args_list))
 
     def test_guided_scan_runs_chosen_scanner_then_opens_review(self):
+        output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui") as run_review, \
-             mock.patch("builtins.input", side_effect=["D:", "", ""]) as input_mock:
+             mock.patch("builtins.input", side_effect=["D:", "", ""]) as input_mock, \
+             redirect_stdout(output):
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(drive="D:", include_files=True, max_depth=0, timeout=1800, app="windirstat")
         run_review.assert_called_once_with(initial_csv="data/scan_test.csv")
         prompts = [call.args[0] for call in input_mock.call_args_list]
         self.assertFalse(any("individual files" in prompt for prompt in prompts))
+        self.assertNotIn("python scan.py", output.getvalue())
+        self.assertNotIn("python analyze.py", output.getvalue())
 
     def test_guided_wiztree_scan_keeps_the_file_rows_choice(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
