@@ -147,6 +147,24 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertFalse(results["categories"]["medium"]["items"])
         self.assertEqual(results["total_size"], 1000)
 
+    def test_cleanup_patterns_match_path_components_not_embedded_names(self):
+        results = self.analyze_rows([
+            {"File Name": "C:\\Users\\A\\AppData\\Local\\CacheInspector\\large.bin", "Size": "104857600"},
+            {"File Name": "C:\\Users\\A\\AppData\\Local\\GPUCache\\large.bin", "Size": "104857600"},
+            {"File Name": "C:\\Users\\A\\Projects\\CrashDumpManager\\large.bin", "Size": "104857600"},
+            {"File Name": "C:\\Users\\A\\OneDriveBackup\\AppData\\Local\\Temp\\build.tmp", "Size": "104857600"},
+        ])
+        candidates = [item["path"] for category in results["categories"].values()
+                      for item in category["items"]]
+        self.assertEqual(set(candidates), {
+            "C:\\Users\\A\\AppData\\Local\\GPUCache\\large.bin",
+            "C:\\Users\\A\\OneDriveBackup\\AppData\\Local\\Temp\\build.tmp",
+        })
+
+    def test_exclusions_match_complete_path_components(self):
+        self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive\\Documents\\file.dat"))
+        self.assertFalse(analyze._is_excluded_path("C:\\Users\\A\\OneDriveBackup\\Temp\\file.dat"))
+
     def test_scan_paths_reject_windows_devices_streams_and_invalid_names(self):
         for path in (
             r"C:\Temp\cache:alternate-stream", r"C:\Temp\CON.txt",

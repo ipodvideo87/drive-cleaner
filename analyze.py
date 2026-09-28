@@ -171,12 +171,44 @@ def _path_key(path):
     return ntpath.normcase(ntpath.normpath(path.replace("/", "\\")))
 
 
-def _is_excluded_path(path):
+def _path_components(path):
+    """Return case-insensitive Windows path components without drive/root syntax."""
+    normalized = str(path).replace("/", "\\").casefold()
+    _drive, tail = ntpath.splitdrive(normalized)
+    return [part for part in tail.split("\\") if part]
+
+
+def _contains_component_sequence(components, wanted):
+    """Match pre-split path fragments on component boundaries."""
+    if not wanted or len(wanted) > len(components):
+        return False
+    return any(components[index:index + len(wanted)] == wanted
+               for index in range(len(components) - len(wanted) + 1))
+
+
+def _matches_cleanup_pattern(components, wanted):
+    if not wanted:
+        return False
+    if len(wanted) > 1:
+        return _contains_component_sequence(components, wanted)
+    # Accept a suffix such as CrashDump.dmp while excluding similarly named
+    # tools and project folders such as CrashDumpManager.
+    return any(component == wanted[0] or component.startswith(wanted[0] + ".")
+               for component in components)
+
+
+_EXCLUDE_COMPONENTS = tuple(_path_components(pattern) for pattern in EXCLUDE_PATTERNS)
+_CLEANABLE_COMPONENTS = {
+    priority: tuple((pattern_info, _path_components(pattern_info["pattern"]))
+                    for pattern_info in category["patterns"])
+    for priority, category in CLEANABLE_PATTERNS.items()
+}
+
+
+def _is_excluded_path(path, components=None):
     """Return whether a path matches a protected-path fragment."""
-    # Add a trailing separator so an exact protected directory (for example,
-    # Downloads itself) is covered without matching similarly named siblings.
-    normalized = _path_key(path).rstrip("\\") + "\\"
-    return any(os.path.normcase(fragment) in normalized for fragment in EXCLUDE_PATTERNS)
+    components = components if components is not None else _path_components(path)
+    return any(_contains_component_sequence(components, pattern) for pattern in _EXCLUDE_COMPONENTS)
 
 
 def _inside_project_tree(path, directory, cache):
@@ -388,16 +420,15 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                 if size <= 0 or size < min_size:
                     continue
 
-                path_lower = path.replace("/", "\\").lower()
-
                 # Apply the safety exclusion list.
-                if _is_excluded_path(path):
+                path_components = _path_components(path)
+                if _is_excluded_path(path, path_components):
                     continue
 
                 # Match the path against cleanup categories.
                 for priority, category in CLEANABLE_PATTERNS.items():
-                    for pattern_info in category["patterns"]:
-                        if pattern_info["pattern"] in path_lower:
+                    for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
+                        if _matches_cleanup_pattern(path_components, pattern_components):
                             # Type metadata is only needed for candidates; most
                             # scanner rows are ordinary files we can skip here.
                             row_is_directory = path.endswith(('\\', '/')) or _is_directory_row({
