@@ -71,6 +71,42 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing required columns"):
                 analyze.analyze_csv(str(csv_path), min_size_mb=0)
 
+    def test_reports_disclose_when_the_scan_export_was_last_modified(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            fixed_timestamp = 1_767_325_445
+            os.utime(csv_path, (fixed_timestamp, fixed_timestamp))
+            expected = datetime.fromtimestamp(fixed_timestamp).astimezone().isoformat(timespec="seconds")
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+            report = io.StringIO()
+            with redirect_stdout(report):
+                analyze.print_report(results)
+            self.assertIn(f"Scan export last modified: {expected}", report.getvalue())
+            self.assertIn("rescan before cleanup", report.getvalue())
+
+            candidate_list = Path(temp_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_list))
+            self.assertIn(f"Source scan last modified: {expected}", candidate_list.read_text(encoding="utf-8"))
+
+    def test_generated_cleanup_script_discloses_normalized_scan_timestamp(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = {
+                "scan_file_time": "2026-01-02T03:04:05-08:00\nWrite-Host 'not a timestamp'",
+                "categories": {"high": {"name": "High", "items": [{
+                    "path": r"C:\Users\A\AppData\Local\Temp\cache.bin",
+                    "name": "Temporary files (check for installers or builds in progress)",
+                    "size": 100, "size_formatted": "100 B", "kind": "File",
+                }]}, "medium": {"name": "Medium", "items": []}, "low": {"name": "Low", "items": []}},
+            }
+            output_path = Path(temp_dir) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(result, str(output_path))
+            script = output_path.read_text(encoding="utf-8-sig")
+        self.assertIn("# Source scan last modified: Unknown", script)
+        self.assertNotIn("Write-Host 'not a timestamp'", script)
+
     def test_wiztree_export_with_generated_note_line_is_analyzed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "gui-export.csv"

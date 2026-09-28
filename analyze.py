@@ -175,6 +175,26 @@ def _scan_mode_from_filename(csv_path):
     return None
 
 
+def _scan_file_timestamp(csv_path):
+    """Return the export's last-modified time, or None if metadata is unavailable."""
+    try:
+        modified = os.path.getmtime(csv_path)
+        return datetime.fromtimestamp(modified).astimezone().isoformat(timespec="seconds")
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _safe_scan_timestamp(results):
+    """Normalize scan timestamp metadata before embedding it in generated text."""
+    value = results.get("scan_file_time")
+    if not isinstance(value, str):
+        return "Unknown"
+    try:
+        return datetime.fromisoformat(value).isoformat(timespec="seconds")
+    except ValueError:
+        return "Unknown"
+
+
 def classify_path(path):
     """Classify a scan row as a file or directory from its path."""
     if path.endswith("\\") or path.endswith("/"):
@@ -429,6 +449,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         "scan_file": csv_path,
         "scan_mode": _scan_mode_from_filename(csv_path),
         "scan_time": datetime.now().isoformat(),
+        "scan_file_time": _scan_file_timestamp(csv_path),
         "total_size": 0,
         "free_space": 0,
         "used_space": 0,
@@ -675,6 +696,9 @@ def print_report(results, show_all_items=False, item_limit=10):
     print("           Disk Cleanup Analysis Report")
     print("=" * 60)
     print()
+    scan_file_time = _safe_scan_timestamp(results)
+    print(f"Scan export last modified: {scan_file_time}")
+    print("Candidate paths may have changed since this scan; rescan before cleanup if the system has changed.")
 
     if results.get("scan_mode") == "wiztree_standard":
         print("Scan mode: WizTree standard file-system scan; files inaccessible to this account may be missing.")
@@ -785,6 +809,7 @@ def generate_clean_script(results, output_path, priority="high"):
 
     script = '''# Disk Cleanup Script - {priority_name}
 # Auto-generated: {timestamp}
+# Source scan last modified: {scan_file_time}
 # Run with administrator privileges
 
 param(
@@ -1100,6 +1125,7 @@ if ($cleanupFailed) {{ exit 1 }}
     script = script.format(
         priority_name=priority_name,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        scan_file_time=_safe_scan_timestamp(results),
         targets=targets_str.rstrip(",\n"),
         protected_pattern=_ps_literal(protected_pattern),
         project_markers=project_markers_str,
@@ -1123,6 +1149,7 @@ def write_item_list_report(results, output_path):
     lines = []
     lines.append("Disk Cleanup Candidate List")
     lines.append(f"Generated at: {datetime.now().isoformat()}")
+    lines.append(f"Source scan last modified: {_safe_scan_timestamp(results)}")
     lines.append("")
     lines.append("Tier subtotals may overlap when folders contain candidates from another tier; the overall estimate deduplicates them.")
     lines.append("")

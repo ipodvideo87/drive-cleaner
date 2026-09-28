@@ -28,6 +28,8 @@ python analyze.py --tui
 
 Choose the latest scan or enter a CSV path. Review the disk summary, candidate tier, exact path, size, and description. You can list all candidates, export a text report, change the minimum size, or generate a plan. To use a fixed CSV instead, run `python analyze.py .\data\scan.csv --min-size 50 --list-items`.
 
+The report shows when the scan export was last modified. Candidate paths and contents can change after a scan; rescan before generating a cleanup plan if the system has changed since then.
+
 High, medium, and low are review tiers, not a guarantee of safety. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
 
 Drive Cleanr checks candidate file/folder types against the current filesystem. If WinDirStat did not include reliable type metadata, the current path type is used. If a row's exported type conflicts with the current path, it is skipped and counted in the report; rescan to refresh it.
