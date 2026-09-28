@@ -9,6 +9,7 @@
 - Allow guided and direct scans of an existing local folder as well as a drive root.
 - Expose WizTree export depth in the guided scan setup and clarify that WinDirStat exports use its saved scan filters/settings.
 - Reject WizTree-only export settings when WinDirStat is selected instead of silently ignoring them.
+- Add non-admin standard WizTree scans alongside fast MFT mode, with automatic mode selection and access warnings carried into scan review.
 - Reject scan CSVs that lack required path/size columns and let the review menu return cleanly to scan selection.
 - Omit cleanup candidates beneath detected project roots, remove unreachable `$WinREAgent` candidate labeling, and describe risk tiers without promising an item is safe.
 - Honor an empty `.drive-cleanr-protect` file as a user-defined project-root exclusion marker.

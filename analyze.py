@@ -123,6 +123,18 @@ def format_size(size_bytes):
     return f"{size_bytes} B"
 
 
+def _scan_mode_from_filename(csv_path):
+    """Read scan-mode hints encoded by Drive Cleanr without altering scanner CSVs."""
+    name = Path(csv_path).name.casefold()
+    if name.startswith("scan_wiztree_standard_"):
+        return "wiztree_standard"
+    if name.startswith("scan_wiztree_fast_"):
+        return "wiztree_fast"
+    if name.startswith("scan_windirstat_"):
+        return "windirstat"
+    return None
+
+
 def classify_path(path):
     """Classify a scan row as a file or directory from its path."""
     if path.endswith("\\") or path.endswith("/"):
@@ -251,6 +263,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
     """Analyze a scanner CSV export."""
     results = {
         "scan_file": csv_path,
+        "scan_mode": _scan_mode_from_filename(csv_path),
         "scan_time": datetime.now().isoformat(),
         "total_size": 0,
         "free_space": 0,
@@ -471,6 +484,13 @@ def print_report(results, show_all_items=False, item_limit=10):
     print("           Disk Cleanup Analysis Report")
     print("=" * 60)
     print()
+
+    if results.get("scan_mode") == "wiztree_standard":
+        print("Scan mode: WizTree standard file-system scan; files inaccessible to this account may be missing.")
+    elif results.get("scan_mode") == "wiztree_fast":
+        print("Scan mode: WizTree fast MFT scan.")
+    elif results.get("scan_mode") == "windirstat":
+        print("Scan mode: WinDirStat; saved filters and access permissions apply.")
 
     if results["total_size"] > 0:
         if results.get("space_source") == "current":

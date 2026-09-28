@@ -21,6 +21,9 @@ def _scan_flow():
     if not app:
         return
     try:
+        wiztree_mode = scan.choose_wiztree_mode() if app == "wiztree" else "auto"
+        if not wiztree_mode:
+            return
         target = input("Drive or folder to scan [C:]: ").strip() or "C:"
         if target.lower() in {"q", "quit", "cancel"}:
             print("Scan cancelled.")
@@ -41,8 +44,16 @@ def _scan_flow():
         print(f"Scan setup cancelled: {exc}")
         return
 
-    csv_path = scan.scan(drive=target, include_files=include_files, max_depth=max_depth,
-                         timeout=timeout, app=app)
+    scan_options = {
+        "drive": target,
+        "include_files": include_files,
+        "max_depth": max_depth,
+        "timeout": timeout,
+        "app": app,
+    }
+    if app == "wiztree":
+        scan_options["wiztree_mode"] = wiztree_mode
+    csv_path = scan.scan(**scan_options)
     if not csv_path:
         _pause()
         return

@@ -49,7 +49,7 @@ def find_windirstat():
 def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
     print("Choose a disk usage scanner:")
-    print("  1. WizTree (fast NTFS scan; administrator rights recommended)")
+    print("  1. WizTree (fast MFT or standard scan)")
     print("  2. WinDirStat 2.6+ (standard scan; administrator rights optional)")
     while True:
         try:
@@ -62,6 +62,27 @@ def choose_scanner():
         if choice in ("2", "windirstat", "win", "wds"):
             return "windirstat"
         print("Enter 1 for WizTree or 2 for WinDirStat.")
+
+
+def choose_wiztree_mode():
+    """Ask which WizTree scan mode to use; auto balances speed and access."""
+    print("Choose a WizTree scan mode:")
+    print("  1. Automatic (fast MFT for a whole drive when elevated; standard otherwise)")
+    print("  2. Fast MFT (requires administrator rights; recommended for a whole drive)")
+    print("  3. Standard file-system scan (no elevation required; inaccessible files may be missed)")
+    while True:
+        try:
+            choice = input("Mode [1/2/3]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\nScan cancelled.")
+            return None
+        if choice in ("", "1", "auto", "automatic"):
+            return "auto"
+        if choice in ("2", "fast", "mft"):
+            return "fast"
+        if choice in ("3", "standard", "normal"):
+            return "standard"
+        print("Enter 1 for automatic, 2 for fast MFT, or 3 for standard scanning.")
 
 
 def check_admin():
@@ -190,7 +211,7 @@ def _normalize_scan_target(target):
     return os.path.normpath(target)
 
 
-def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree"):
+def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree", wiztree_mode="auto"):
     """
     Run a WizTree scan
 
@@ -200,6 +221,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
                        are only visible in file rows and often provide the biggest cleanup win)
         max_depth: maximum export depth; 0 means unlimited
         app: scanner to invoke ("wiztree" or "windirstat")
+        wiztree_mode: "auto", "fast" (MFT/elevated), or "standard" (Windows API scan)
 
     Returns:
         str: exported CSV file path, or None on failure
@@ -223,13 +245,27 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     if app == "windirstat" and not include_files:
         print("Error: WinDirStat exports files and folders together; --folders-only is supported only by WizTree")
         return None
-
-    # WizTree's MFT-based scan requires elevation. WinDirStat can scan as a
-    # regular user, though protected paths may be missing from its results.
-    if app == "wiztree" and not check_admin():
-        print("Error: administrator privileges are required to scan")
-        print("Please run this script as administrator")
+    if wiztree_mode not in {"auto", "fast", "standard"}:
+        print("Error: WizTree mode must be 'auto', 'fast', or 'standard'")
         return None
+    if app == "windirstat" and wiztree_mode != "auto":
+        print("Error: --wiztree-mode is supported only by WizTree")
+        return None
+
+    elevated = check_admin() if app == "wiztree" else False
+    is_whole_drive = bool(re.fullmatch(r"[A-Za-z]:", drive))
+    if app == "wiztree":
+        effective_wiztree_mode = wiztree_mode
+        if effective_wiztree_mode == "auto":
+            effective_wiztree_mode = "fast" if (elevated and is_whole_drive) else "standard"
+        if effective_wiztree_mode == "fast" and not elevated:
+            print("Error: fast MFT scanning requires administrator privileges")
+            print("Run this script as administrator, or choose standard scanning with --wiztree-mode standard")
+            return None
+        if effective_wiztree_mode == "standard":
+            print("WizTree standard scan selected; it may be slower and can miss files the current account cannot access.")
+        else:
+            print("WizTree fast MFT scan selected.")
 
     executable = find_wiztree() if app == "wiztree" else find_windirstat()
     app_name = "WizTree" if app == "wiztree" else "WinDirStat"
@@ -247,11 +283,14 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
 
     # Generate output filename
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    output_file = os.path.join(DATA_DIR, f"scan_{timestamp}.csv")
+    mode_label = f"wiztree_{effective_wiztree_mode}" if app == "wiztree" else "windirstat"
+    output_file = os.path.join(DATA_DIR, f"scan_{mode_label}_{timestamp}.csv")
 
     if app == "wiztree":
-        # /admin=1 enables the fast NTFS MFT scan; export files as well as folders.
-        cmd = [executable, drive, f'/export={output_file}', '/admin=1',
+        # Admin mode enables MFT scanning. Standard mode uses normal filesystem
+        # access and remains available to non-administrator users.
+        admin_flag = "/admin=1" if effective_wiztree_mode == "fast" else "/admin=0"
+        cmd = [executable, drive, f'/export={output_file}', admin_flag,
                '/exportfolders=1', f'/exportfiles={1 if include_files else 0}',
                '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
     else:
@@ -368,6 +407,8 @@ def main():
     parser.add_argument('drive', nargs='?', default='C:', help='Drive or existing absolute local folder to scan (default: C:)')
     parser.add_argument('--folders-only', action='store_true', help='Export folders only (default also includes file rows so large single files stay visible)')
     parser.add_argument('--max-depth', type=int, default=0, help='WizTree maximum export depth; 0 means unlimited (default: 0)')
+    parser.add_argument('--wiztree-mode', choices=['auto', 'fast', 'standard'], default='auto',
+                        help='WizTree scan mode: fast MFT when elevated, standard otherwise (default: auto)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
     parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')
@@ -398,12 +439,17 @@ def main():
     if not app:
         sys.exit(1)
 
+    wiztree_mode = choose_wiztree_mode() if app == "wiztree" and args.wiztree_mode == "auto" and sys.stdin.isatty() else args.wiztree_mode
+    if wiztree_mode is None:
+        sys.exit(1)
+
     result = scan(
         drive=args.drive,
         include_files=not args.folders_only,
         max_depth=args.max_depth,
         timeout=args.timeout,
         app=app,
+        wiztree_mode=wiztree_mode,
     )
 
     if result:

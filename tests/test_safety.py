@@ -109,6 +109,17 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("Risk level: caution; review carefully", report)
         self.assertNotIn("Safe: yes", report)
 
+    def test_standard_wiztree_report_discloses_possible_access_gaps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan_wiztree_standard_mock.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            with mock.patch("builtins.print") as output:
+                analyze.print_report(results)
+        report_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertEqual(results["scan_mode"], "wiztree_standard")
+        self.assertIn("files inaccessible to this account may be missing", report_text)
+
     def test_review_menu_returns_cleanly_after_an_invalid_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "bad.csv"
@@ -633,6 +644,44 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=["x", "2"]):
             self.assertEqual(scan.choose_scanner(), "windirstat")
 
+    def test_wiztree_mode_picker_accepts_automatic_fast_and_standard(self):
+        for answer, expected in (("", "auto"), ("2", "fast"), ("standard", "standard")):
+            with self.subTest(answer=answer), mock.patch("builtins.input", return_value=answer):
+                self.assertEqual(scan.choose_wiztree_mode(), expected)
+
+    def test_wiztree_auto_mode_uses_mft_only_for_elevated_drive_scans(self):
+        for elevated, expected_flag in ((False, "/admin=0"), (True, "/admin=1")):
+            with self.subTest(elevated=elevated), tempfile.TemporaryDirectory() as temp_dir:
+                old_data_dir = scan.DATA_DIR
+                scan.DATA_DIR = str(Path(temp_dir) / "data")
+                captured = {}
+
+                def fake_popen(command, **_kwargs):
+                    captured["command"] = command
+                    return object()
+
+                try:
+                    with mock.patch.object(scan, "check_admin", return_value=elevated), \
+                         mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
+                         mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                         mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                         mock.patch("builtins.print"):
+                        result = scan.scan("D:", app="wiztree")
+                finally:
+                    scan.DATA_DIR = old_data_dir
+                self.assertTrue(result.endswith(".csv"))
+                self.assertIn(expected_flag, captured["command"])
+                expected_mode = "standard" if expected_flag == "/admin=0" else "fast"
+                self.assertTrue(Path(result).name.startswith(f"scan_wiztree_{expected_mode}_"))
+
+    def test_wiztree_fast_mode_refuses_non_admin_before_launch(self):
+        with mock.patch.object(scan, "check_admin", return_value=False), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             mock.patch("builtins.print") as output:
+            self.assertIsNone(scan.scan("D:", app="wiztree", wiztree_mode="fast"))
+        launch.assert_not_called()
+        self.assertIn("requires administrator privileges", " ".join(str(c) for c in output.call_args_list))
+
     def test_windirstat_launches_documented_save_to_csv_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
@@ -661,7 +710,7 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertIn("Previous scans and cleanup plans were kept.", output_text)
 
     def test_windirstat_rejects_wiztree_only_export_options(self):
-        for options in ({"max_depth": 3}, {"include_files": False}):
+        for options in ({"max_depth": 3}, {"include_files": False}, {"wiztree_mode": "standard"}):
             with self.subTest(options=options), mock.patch("builtins.print") as output, \
                  mock.patch.object(scan.subprocess, "Popen") as launch:
                 self.assertIsNone(scan.scan("D:", app="windirstat", **options))
@@ -683,19 +732,20 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["D:", "n", "0", "30", "n"]) as input_mock:
+             mock.patch("builtins.input", side_effect=["1", "D:", "n", "0", "30", "n"]) as input_mock:
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=False, max_depth=0, timeout=1800, app="wiztree")
+        run_scan.assert_called_once_with(drive="D:", include_files=False, max_depth=0, timeout=1800,
+                                         app="wiztree", wiztree_mode="auto")
         self.assertTrue(any("individual files" in call.args[0] for call in input_mock.call_args_list))
 
     def test_guided_wiztree_scan_passes_requested_export_depth(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["C:\\Users", "", "4", "30", "n"]):
+             mock.patch("builtins.input", side_effect=["", "C:\\Users", "", "4", "30", "n"]):
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(drive="C:\\Users", include_files=True, max_depth=4,
-                                         timeout=1800, app="wiztree")
+                                         timeout=1800, app="wiztree", wiztree_mode="auto")
 
     def test_guided_entry_point_has_simple_exit(self):
         with mock.patch("builtins.input", return_value="0"):

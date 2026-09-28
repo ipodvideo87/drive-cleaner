@@ -16,22 +16,22 @@ cd drive-cleaner
 - Windows 10 or newer
 - Python 3.10+
 - [WizTree](https://diskanalyzer.com/) or [WinDirStat](https://github.com/windirstat/windirstat), installed or available through `WIZTREE_PATH` / `WINDIRSTAT_PATH`
-- Administrator rights for MFT scanning
+- Administrator rights for fast MFT scanning (standard WizTree scans do not require elevation)
 - A non-system drive with at least 5 GB free for backups; the backup also needs enough room for the selected data
 
 ### Portable versions
 
-Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. WizTree scans require an elevated terminal. If automatic discovery misses either executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
+Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. WizTree's fast MFT mode requires an elevated terminal; its standard file-system scan can run without elevation but may miss files the current account cannot access. If automatic discovery misses either executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
 
 ## Quick start
 
-Open PowerShell in this folder (use an elevated terminal when choosing WizTree):
+Open PowerShell in this folder. Use an elevated terminal for fast, full-drive WizTree scans; standard scans are available without elevation.
 
 ```powershell
 python drive_cleaner.py
 ```
 
-The guided command-line menu lets you scan with WizTree or WinDirStat, review a new or existing scan, and manage backups. During a scan it asks for the scanner, a drive or existing local folder, applicable scan options, and timeout. For WizTree, you can choose whether to export individual file rows and set a maximum export depth (0 means unlimited). WinDirStat always exports its scan tree and applies its saved filters and exclusions. Press Ctrl+C to stop the active scanner; Drive Cleanr removes only that interrupted run's incomplete export and keeps previous scans. After the scan it can open the results in the review menu. Existing scripts remain available for direct commands and automation.
+The guided command-line menu lets you scan with WizTree or WinDirStat, review a new or existing scan, and manage backups. During a scan it asks for the scanner, a drive or existing local folder, applicable scan options, and timeout. For WizTree, automatic mode uses fast MFT scanning for whole drives when elevated and standard scanning otherwise; you can choose either mode explicitly, whether to export individual file rows, and the maximum export depth (0 means unlimited). Standard scans can miss files the current account cannot access, and the review report carries that warning forward. WinDirStat always exports its scan tree and applies its saved filters and exclusions. Press Ctrl+C to stop the active scanner; Drive Cleanr removes only that interrupted run's incomplete export and keeps previous scans. After the scan it can open the results in the review menu. Existing scripts remain available for direct commands and automation.
 
 Both scanners have native command-line options. Drive Cleanr uses a safety-focused subset for cleanup scans: WizTree gets explicit file/folder export, allocated-size sorting, capacity, and depth options; WinDirStat gets `/SaveTo` with a CSV destination and scan target. WinDirStat also offers other modes such as loading saved scans and exporting duplicate or permission reports, but those are separate workflows and are not treated as cleanup candidate scans. Its filters and scan exclusions come from WinDirStat's saved settings, so review those before scanning. See the official [WizTree command-line guide](https://www.diskanalyzer.com/guide) and [WinDirStat command-line and export reference](https://github.com/windirstat/windirstat/wiki/Command-Line-and-CSV) for their complete native options.
 
@@ -59,6 +59,12 @@ python scan.py D:
 # Choose the scanner directly (WinDirStat 2.6+ required for automated export)
 python scan.py C: --app windirstat
 python scan.py C: --app wiztree
+
+# Run WizTree without elevation (slower; protected files may be missing)
+python scan.py C: --app wiztree --wiztree-mode standard
+
+# Request fast MFT scanning; run PowerShell as administrator first
+python scan.py C: --app wiztree --wiztree-mode fast
 
 # Scan a specific folder instead of the whole drive; limit the WizTree export depth
 python scan.py "$env:USERPROFILE\Videos" --app wiztree --max-depth 3
