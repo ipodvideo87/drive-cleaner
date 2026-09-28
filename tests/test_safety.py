@@ -838,6 +838,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         items = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
+        output = io.StringIO()
+        with redirect_stdout(output):
+            analyze.print_report(results)
+        report = output.getvalue()
+        self.assertIn("High priority", report)
+        self.assertIn("lower risk (review each path)", report)
+        self.assertIn("Temporary files (check for installers or builds in progress)", report)
+        for localized_header in (path_header, size_header, allocated_header):
+            self.assertNotIn(localized_header, report)
 
     def test_generated_script_quotes_untrusted_path_and_backs_up_first(self):
         path = "C:\\Users\\O'Brien\\AppData\\Local\\Temp\\$(not-a-command)\\"
