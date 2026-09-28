@@ -23,6 +23,6 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Compile project files
-        run: python -m py_compile analyze.py backup.py scan.py drive_cleaner.py tests/test_safety.py
+        run: python -m py_compile analyze.py backup.py scan.py drive_cleaner.py error_messages.py tests/test_safety.py
       - name: Run mock and safety tests
         run: python -m unittest discover -s tests -v

@@ -131,7 +131,7 @@ The project uses the Python standard library:
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m py_compile analyze.py backup.py scan.py
+python -m py_compile analyze.py backup.py scan.py drive_cleaner.py error_messages.py tests/test_safety.py
 ```
 
 Tests use temporary files and mocked scanner processes. Windows integration tests exercise PowerShell cleanup and Robocopy backup/restore only against isolated fixtures, including hidden and system files. An end-to-end test uses a mock WizTree process, real backup creation and verification, explicit PowerShell selection, cleanup, and restore. Tests do not run WizTree or touch real user data.

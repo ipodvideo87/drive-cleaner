@@ -97,7 +97,7 @@ python backup.py verify --id backup_YYYYMMDD_HHMMSS_microseconds
 
 ```powershell
 python -m unittest discover -s tests -v
-python -m py_compile analyze.py backup.py scan.py
+python -m py_compile analyze.py backup.py scan.py drive_cleaner.py error_messages.py tests/test_safety.py
 ```
 
 Tests use temporary fixtures and mocked scanner processes. They do not run scans against user drives or remove user data.

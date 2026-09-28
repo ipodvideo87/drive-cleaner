@@ -15,6 +15,7 @@ from pathlib import Path
 
 import scan
 from scan import get_latest_scan
+from error_messages import describe_error
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
@@ -1215,14 +1216,28 @@ foreach ($target in $cleanTargets) {{
         Write-Host " [Done - $cleanedMB MB]" -ForegroundColor Green
     }} catch {{
         $cleanupFailed = $true
-        Write-Host " [Failed] $($_.Exception.Message)" -ForegroundColor Red
+        $exception = $_.Exception
+        while ($exception.InnerException) {{ $exception = $exception.InnerException }}
+        if ($exception -is [System.UnauthorizedAccessException]) {{
+            $failureReason = "Access was denied"
+        }} elseif ($exception -is [System.IO.IOException]) {{
+            $failureReason = "The file or folder is unavailable, in use, or changed"
+        }} elseif ($exception -is [System.Management.Automation.RuntimeException]) {{
+            $failureReason = $exception.Message
+        }} else {{
+            $failureReason = "The operation failed; check the target and available permissions"
+        }}
+        Write-Host " [Failed: $failureReason. Backup $($backup.id) is retained.]" -ForegroundColor Red
     }}
 }}
 
 Write-Host "`n========================================" -ForegroundColor Cyan
+if ($cleanupFailed) {{
+    Write-Host "Cleanup finished with errors. Removed about $([math]::Round($totalCleaned / 1024, 2)) GB; some items may remain. Backup $($backup.id) is retained for recovery." -ForegroundColor Yellow
+    exit 1
+}}
 Write-Host "Cleanup complete! Total: $([math]::Round($totalCleaned / 1024, 2)) GB" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
-if ($cleanupFailed) {{ exit 1 }}
 '''
 
     # Build the target list.
@@ -1392,7 +1407,7 @@ def run_tui(initial_csv=None, min_size_mb=50):
         try:
             results = analyze_csv(csv_file, current_min_size, progress_callback=show_analysis_progress)
         except (ValueError, csv.Error) as exc:
-            print(f"\nCould not analyze this scan export: {exc}")
+            print(f"\nCould not analyze this scan export: {describe_error(exc)}")
             input("Press Enter to choose another scan...")
             csv_file = prompt_existing_csv()
             if not csv_file:
@@ -1431,7 +1446,7 @@ def run_tui(initial_csv=None, min_size_mb=50):
                     write_item_list_report(results, output_path)
                     print(f"Candidate list written to: {output_path}")
                 except (ValueError, OSError) as exc:
-                    print(f"Could not write candidate list: {exc}")
+                    print(f"Could not write candidate list: {describe_error(exc)}")
                 input("Press Enter to continue...")
             elif choice == "3":
                 default_name = f"{Path(csv_file).stem}.clean.ps1"
@@ -1441,7 +1456,7 @@ def run_tui(initial_csv=None, min_size_mb=50):
                     generate_clean_script(results, output_path, priority)
                     print(f"Cleanup script written to: {output_path}")
                 except (ValueError, OSError) as exc:
-                    print(f"Could not create cleanup script: {exc}")
+                    print(f"Could not create cleanup script: {describe_error(exc)}")
                 input("Press Enter to continue...")
             elif choice == "4":
                 new_size = input(f"New minimum file size MB [{current_min_size}]: ").strip()
@@ -1501,7 +1516,7 @@ def main():
     try:
         results = analyze_csv(args.csv_file, args.min_size)
     except (ValueError, csv.Error) as exc:
-        parser.error(f"could not analyze scan export: {exc}")
+        parser.error(f"could not analyze scan export: {describe_error(exc)}")
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
@@ -1512,14 +1527,14 @@ def main():
         try:
             generate_clean_script(results, args.output, args.priority)
         except (ValueError, OSError) as exc:
-            parser.error(f"could not create cleanup script: {exc}")
+            parser.error(f"could not create cleanup script: {describe_error(exc)}")
         print(f"\nCleanup script written to: {args.output}")
 
     if args.list_output:
         try:
             write_item_list_report(results, args.list_output)
         except (ValueError, OSError) as exc:
-            parser.error(f"could not write candidate list: {exc}")
+            parser.error(f"could not write candidate list: {describe_error(exc)}")
         print(f"\nCandidate list written to: {args.list_output}")
 
 

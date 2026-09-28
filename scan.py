@@ -12,6 +12,8 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+from error_messages import describe_error
+
 # Configuration: resolve relative to this script's directory instead of hardcoding an absolute path
 SKILL_DIR = Path(__file__).resolve().parent
 DATA_DIR = str(SKILL_DIR / "data")
@@ -209,7 +211,7 @@ def validate_scan_export(filepath):
                 return True, None
             return False, "CSV is missing a recognized path and size header"
     except (OSError, UnicodeError, csv.Error) as exc:
-        return False, f"CSV could not be read: {exc}"
+        return False, f"CSV could not be read: {describe_error(exc)}"
 
 
 def _stop_scan_process(process):
@@ -438,7 +440,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     except Exception as e:
         _stop_scan_process(process)
         _remove_partial_scan_export(output_file)
-        print(f"Scan error: {e}")
+        print(f"Scan error: {describe_error(e)}")
         return None
 
 
@@ -496,7 +498,7 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
                     print(f"Deleted old data file: {old_file.name}")
                     deleted += 1
                 except Exception as e:
-                    print(f"Failed to delete {old_file.name}: {e}")
+                    print(f"Failed to delete {old_file.name}: {describe_error(e)}")
 
     # Script deletion is a separate explicit action; never remove a user's
     # reviewed cleanup plan as a side effect of creating a new scan.
@@ -510,7 +512,7 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
                 print(f"Deleted cleanup script: {script.name}")
                 deleted += 1
             except Exception as e:
-                print(f"Failed to delete {script.name}: {e}")
+                print(f"Failed to delete {script.name}: {describe_error(e)}")
 
     return deleted
 

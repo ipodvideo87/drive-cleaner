@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Dict, Optional
 
+from error_messages import describe_error
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
 if hasattr(sys.stderr, "reconfigure"):
@@ -564,7 +566,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         try:
             dir_size = get_dir_size(path)
         except (PermissionError, OSError, RuntimeError) as exc:
-            manifest["errors"].append(f"Could not fully read {path}: {exc}")
+            manifest["errors"].append(f"Could not fully read {path}: {describe_error(exc)}")
             continue
         if dir_size == 0:
             manifest["errors"].append(f"Path is empty and could not be verified by backup: {path}")
@@ -589,8 +591,8 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             try:
                 shutil.copy2(path, backup_path)
             except Exception as e:
-                print(f"        [Failed] {e}")
-                manifest["errors"].append(f"File backup failed for {path}: {e}")
+                print(f"        [Failed] {describe_error(e)}")
+                manifest["errors"].append(f"File backup failed for {path}: {describe_error(e)}")
                 continue
         elif dir_size < SIZE_THRESHOLD:
             # Copy directories smaller than 1 GB.
@@ -619,8 +621,8 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                     raise RuntimeError(f"Robocopy failed with exit code {result.returncode}")
                 print(f"        [Done]")
             except Exception as e:
-                print(f"        [Failed] {e}")
-                manifest["errors"].append(f"Directory copy backup failed for {path}: {e}")
+                print(f"        [Failed] {describe_error(e)}")
+                manifest["errors"].append(f"Directory copy backup failed for {path}: {describe_error(e)}")
                 continue
         else:
             # Compress directories of 1 GB or larger.
@@ -637,8 +639,8 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                     continue
                 print(f"        [Done]")
             except Exception as e:
-                print(f"        [Failed] {e}")
-                manifest["errors"].append(f"Directory archive backup failed for {path}: {e}")
+                print(f"        [Failed] {describe_error(e)}")
+                manifest["errors"].append(f"Directory archive backup failed for {path}: {describe_error(e)}")
                 continue
 
         if backup_format == "copy":
@@ -650,7 +652,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                     continue
                 source_integrity_sha256 = _fingerprint_entries_sha256(source_entries)
             except (OSError, RuntimeError) as exc:
-                manifest["errors"].append(f"Could not verify backup output for {path}: {exc}")
+                manifest["errors"].append(f"Could not verify backup output for {path}: {describe_error(exc)}")
                 continue
         if backup_format == "file":
             try:
@@ -660,7 +662,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                     manifest["errors"].append(f"Backup output is incomplete or has different file contents for {path}")
                     continue
             except OSError as exc:
-                manifest["errors"].append(f"Could not verify backup output for {path}: {exc}")
+                manifest["errors"].append(f"Could not verify backup output for {path}: {describe_error(exc)}")
                 continue
         if backup_format == "zip":
             try:
@@ -672,7 +674,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                     manifest["errors"].append(f"Backup archive is damaged or incomplete for {path}")
                     continue
             except (OSError, zipfile.BadZipFile) as exc:
-                manifest["errors"].append(f"Could not verify backup archive for {path}: {exc}")
+                manifest["errors"].append(f"Could not verify backup archive for {path}: {describe_error(exc)}")
                 continue
 
         try:
@@ -683,7 +685,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             else:
                 integrity_sha256 = _sha256_file(backup_path)
         except (OSError, RuntimeError) as exc:
-            manifest["errors"].append(f"Could not fingerprint backup output for {path}: {exc}")
+            manifest["errors"].append(f"Could not fingerprint backup output for {path}: {describe_error(exc)}")
             continue
 
         manifest["items"].append({
@@ -914,7 +916,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 current_source_digest = _directory_fingerprint_sha256(original_path)
                 current_payload_digest = _sha256_file(backup_path)
         except (OSError, RuntimeError) as exc:
-            print(f"Could not verify source or backup contents for {original_path}: {exc}")
+            print(f"Could not verify source or backup contents for {original_path}: {describe_error(exc)}")
             return False
 
         if current_payload_digest.lower() != payload_digest.lower():
@@ -1006,7 +1008,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 else:
                     actual_digest = _sha256_file(backup_path)
             except (OSError, RuntimeError) as exc:
-                print(f"Refusing to restore an unreadable backup payload: {exc}")
+                print(f"Refusing to restore an unreadable backup payload: {describe_error(exc)}")
                 return False
             if actual_digest.lower() != expected_digest.lower():
                 print("Refusing to restore: backup contents changed after verification")
@@ -1108,7 +1110,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
             success_count += 1
         except Exception as e:
             failure_count += 1
-            print(f"        [Failed] {e}")
+            print(f"        [Failed] {describe_error(e)}")
 
     print("-" * 50)
     if conflict_count or failure_count:
@@ -1146,7 +1148,7 @@ def delete_backup(backup_id: str) -> bool:
             print("Refusing to delete a backup containing a reparse point or junction")
             return False
     except OSError as exc:
-        print(f"Could not safely inspect backup before deletion: {exc}")
+        print(f"Could not safely inspect backup before deletion: {describe_error(exc)}")
         return False
 
     try:
@@ -1154,7 +1156,7 @@ def delete_backup(backup_id: str) -> bool:
         print(f"Deleted backup: {backup_id}")
         return True
     except Exception as e:
-        print(f"Backup deletion failed: {e}")
+        print(f"Backup deletion failed: {describe_error(e)}")
         return False
 
 
@@ -1261,7 +1263,7 @@ def main():
             if manifest.get("status") != "completed":
                 sys.exit(1)
         except (RuntimeError, ValueError) as e:
-            print(f"Error: {e}")
+            print(f"Error: {describe_error(e)}")
             sys.exit(1)
 
     elif args.command == 'list':

@@ -18,6 +18,30 @@ import analyze
 import backup
 import scan
 import drive_cleaner
+from error_messages import describe_error
+
+
+class ErrorMessageTests(unittest.TestCase):
+    def test_localized_os_error_text_is_replaced_with_english_summary(self):
+        error = PermissionError(13, "localized access-denied text", "private-path")
+        message = describe_error(error)
+        self.assertIn("Access was denied", message)
+        self.assertNotIn("localized access-denied text", message)
+        self.assertNotIn("private-path", message)
+
+    def test_unknown_os_errors_keep_a_stable_error_code(self):
+        message = describe_error(OSError(12345, "localized operating-system text"))
+        self.assertIn("error code 12345", message)
+        self.assertNotIn("localized operating-system text", message)
+
+    def test_scan_validation_uses_the_english_os_error_summary(self):
+        with mock.patch("builtins.open", side_effect=PermissionError(
+                13, "localized access-denied text", "private-scan.csv")):
+            valid, message = scan.validate_scan_export("private-scan.csv")
+        self.assertFalse(valid)
+        self.assertIn("CSV could not be read: Access was denied", message)
+        self.assertNotIn("localized access-denied text", message)
+        self.assertNotIn("private-scan.csv", message)
 
 
 class AnalyzeSafetyTests(unittest.TestCase):
@@ -1308,6 +1332,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(selected.read_bytes(), b"keep once project marker appears")
             self.assertIn("inside a project", result.stdout + result.stderr)
+            self.assertIn("Cleanup finished with errors", result.stdout)
+            self.assertIn("Backup mock-backup is retained for recovery", result.stdout)
+            self.assertNotIn("Cleanup complete!", result.stdout)
 
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
@@ -2291,7 +2318,7 @@ class BackupSafetyTests(unittest.TestCase):
                 result = backup.create_backup([str(source)])
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["items"], [])
-        self.assertTrue(any("Directory archive backup failed" in error and "mock archive failure" in error
+        self.assertTrue(any("Directory archive backup failed" in error and "Operating-system error" in error
                             for error in result["errors"]))
 
     def test_zip64_directory_backup_manifest_verification_and_restore_round_trip(self):
