@@ -1476,6 +1476,46 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("reparse point", result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_preserves_file_changed_after_backup_verification(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected"
+            selected.mkdir()
+            changed_file = selected / "cache.tmp"
+            changed_file.write_bytes(b"original fixture")
+            replacement = b"changed fixture!"
+            self.assertEqual(len(replacement), changed_file.stat().st_size)
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": len(b"original fixture"), "size_formatted": "16 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, pathlib, sys\n"
+                f"changed_file = pathlib.Path({str(changed_file)!r})\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify':\n"
+                f"    changed_file.write_bytes({replacement!r})\n"
+                "    sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(changed_file.read_bytes(), replacement)
+            self.assertIn("changed after", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_refuses_target_changed_after_backup(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

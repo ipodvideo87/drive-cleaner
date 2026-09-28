@@ -1045,6 +1045,11 @@ function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
         if ($isEntry -and [bool]$currentItem.PSIsContainer -ne [bool]$Entry.PSIsContainer) {{
             throw "A cleanup entry changed type after review; refusing cleanup: $currentPath"
         }}
+        if ($isEntry -and -not [bool]$Entry.PSIsContainer -and
+            ([long]$currentItem.Length -ne [long]$Entry.CleanupLength -or
+             $currentItem.LastWriteTimeUtc -ne $Entry.CleanupLastWriteTimeUtc)) {{
+            throw "A cleanup file changed after its contents were reviewed; refusing cleanup: $currentPath"
+        }}
         if ($currentPath.Equals($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{ break }}
         $parent = [System.IO.Directory]::GetParent($currentPath)
         if (-not $parent) {{ throw "Could not validate a cleanup entry's parent path: $currentPath" }}
@@ -1240,6 +1245,13 @@ foreach ($target in $cleanTargets) {{
             $deletable = @($entries | Where-Object {{
                 -not $preservePaths.Contains($_.FullName)
             }})
+            foreach ($entry in $deletable) {{
+                if (-not $entry.PSIsContainer) {{
+                    $entry.Refresh()
+                    Add-Member -InputObject $entry -NotePropertyName CleanupLength -NotePropertyValue ([long]$entry.Length) -Force
+                    Add-Member -InputObject $entry -NotePropertyName CleanupLastWriteTimeUtc -NotePropertyValue $entry.LastWriteTimeUtc -Force
+                }}
+            }}
             $before = ($deletable | Where-Object {{ -not $_.PSIsContainer }} | Measure-Object -Property Length -Sum).Sum
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}

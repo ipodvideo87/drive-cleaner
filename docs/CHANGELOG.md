@@ -3,7 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
-- Reopen each selected folder descendant and recheck its nested parent paths immediately before removal, so a junction introduced after backup verification stops cleanup.
+- Reopen each selected folder descendant and recheck its nested parent paths immediately before removal, so a junction introduced after backup verification stops cleanup; preserve files whose size or last-write time changes after the backup check.
 - Recognize Unreal, Godot, and Unity project roots so their generic cache folders stay out of cleanup candidates.
 - Move Windows crash dumps from the lower-risk tier to caution and explain their troubleshooting and privacy value.
 - Recognize Git project files and `.idea`/`.vs` workspace directories as project markers, while ignoring a shared root-level `.editorconfig` when checking the user profile.
