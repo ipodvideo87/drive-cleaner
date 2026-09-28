@@ -1009,6 +1009,12 @@ catch {{ throw "Could not verify the backup result. No cleanup was performed." }
 if ($backup.status -ne 'completed' -or $backup.items.Count -ne $cleanTargets.Count) {{
     throw "Backup was incomplete. No cleanup was performed. Review backup $($backup.id)."
 }}
+foreach ($target in $cleanTargets) {{
+    Assert-TargetMatchesScan $target
+    if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
+        throw "A selected target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+    }}
+}}
 Write-Host "Backup created: $($backup.id)" -ForegroundColor Green
 if ($backup.backup_root) {{
     $backupLocation = Join-Path $backup.backup_root $backup.id
@@ -1026,6 +1032,7 @@ foreach ($target in $cleanTargets) {{
         continue
     }}
     try {{
+        Assert-TargetMatchesScan $target
         if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
             throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
         }}
@@ -1097,6 +1104,7 @@ foreach ($target in $cleanTargets) {{
             $before = ($deletable | Where-Object {{ -not $_.PSIsContainer }} | Measure-Object -Property Length -Sum).Sum
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
+            Assert-TargetMatchesScan $target
             if (Test-PathInsideProject $target.Path $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
@@ -1112,6 +1120,7 @@ foreach ($target in $cleanTargets) {{
             $before = $item.Length
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
+            Assert-TargetMatchesScan $target
             if (Test-PathInsideProject $target.Path $false) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
