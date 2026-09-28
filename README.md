@@ -40,7 +40,7 @@ python analyze.py .\data\scan.csv --min-size 50 --list-items
 python analyze.py .\data\scan.csv --min-size 50 --output clean_review.ps1 --priority high
 ```
 
-Review every path in the report and script. Then run the script from PowerShell:
+Review every path in the report and script. Run the script from a normal PowerShell session first; use an administrator session only when a reviewed target requires elevated access:
 
 ```powershell
 & .\clean_review.ps1

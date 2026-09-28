@@ -44,7 +44,7 @@ Crash-dump rules only apply under the drive's `Windows` directory, not to user a
 python analyze.py .\data\scan.csv --min-size 50 --output clean_review.ps1 --priority high
 ```
 
-Use `--priority medium`, `low`, or `all` for a different reviewed scope. Inspect the script and verify every exact path before running it. At runtime, select individual numbered targets, choose all, or cancel. The script backs up only the selected paths and asks for `CLEAN` before acting. `-Select 1,3 -Force` supplies an explicit reviewed selection and skips only the final confirmation prompt.
+Use `--priority medium`, `low`, or `all` for a different reviewed scope. Inspect the script and verify every exact path before running it. At runtime, select individual numbered targets, choose all, or cancel. The script backs up only the selected paths and asks for `CLEAN` before acting. Run it in a normal PowerShell session first; use an administrator session only when a reviewed target requires elevated access. `-Select 1,3 -Force` supplies an explicit reviewed selection and skips only the final confirmation prompt.
 
 The analyzer rejects UNC/device paths, traversal paths, and drive roots from imported CSVs. Before writing a plan, it also checks that every path matches the selected cleanup priority and exact rule label. The script checks that targets still exist with the same file/folder type and refuses reparse points. Take a new scan if the target changed after analysis.
 

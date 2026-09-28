@@ -810,7 +810,7 @@ def generate_clean_script(results, output_path, priority="high"):
     script = '''# Disk Cleanup Script - {priority_name}
 # Auto-generated: {timestamp}
 # Source scan last modified: {scan_file_time}
-# Run with administrator privileges
+# Run in PowerShell with only the permissions needed for the selected paths.
 
 param(
     [switch]$Force,

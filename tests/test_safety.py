@@ -694,6 +694,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("HashSet[string]", script)
         self.assertIn("$projectMarkers", script)
         self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)
+        self.assertIn("only the permissions needed for the selected paths", script)
+        self.assertNotIn("Run with administrator privileges", script)
 
     def test_generated_script_parses_in_powershell_when_available(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
