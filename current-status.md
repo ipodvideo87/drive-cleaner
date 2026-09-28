@@ -17,6 +17,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 - Automatic crash-dump candidates are restricted to known diagnostic names beneath the drive's `Windows` directory; identically named archive and project paths do not match.
 - When broad and specific cleanup rules both match, the most specific path rule wins so global Gradle, Cargo, NuGet, and Go caches retain their caution-oriented package-manager labels.
 - Chrome on-device model suggestions require a Chrome User Data path; NVIDIA App update artifacts require a known ProgramData updater path and stay in the caution tier.
+- IndexedDB cleanup candidates require a recognized Chrome or Edge User Data profile path; arbitrary IndexedDB folder names are left unclassified.
 - Codex protection covers `.codex`, legacy `.codex-old` profiles, Microsoft Store package folders beginning `OpenAI.Codex_`, and `AppData\Roaming\Codex` profiles discovered in the shared candidate report.
 - WinDirStat CSV parsing using its full path, logical size, physical size, and hexadecimal directory attributes plus file/folder counts.
 - Candidate file/folder types are verified against the current filesystem. Missing WinDirStat type metadata uses the current path type; conflicting exported types are omitted and counted for a rescan.

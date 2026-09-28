@@ -63,7 +63,7 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\programdata\\nvidia corporation\\nvidia app\\updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\programdata\\nvidia corporation\\nvapp-updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\ms-playwright", "name": "Playwright test browsers (can be reinstalled with `npx playwright install`)", "safe": False},
-            {"pattern": "indexeddb", "name": "Browser site data IndexedDB (offline web app data / login state; deleting it can sign you out or lose data)", "safe": False},
+            {"pattern": "indexeddb", "browser_profile": True, "name": "Chrome/Edge profile IndexedDB data (offline web-app data or login state; deleting it can sign you out or lose data)", "safe": False},
         ]
     }
 }
@@ -137,6 +137,10 @@ WINDOWS_RESERVED_NAMES = frozenset({
     *(f"COM{index}" for index in range(1, 10)),
     *(f"LPT{index}" for index in range(1, 10)),
 })
+_BROWSER_PROFILE_MARKERS = (
+    ("chrome", "user data"),
+    ("edge", "user data"),
+)
 INVALID_WINDOWS_PATH_CHARACTERS = re.compile(r'[<>:"|?*\x00-\x1f]')
 
 
@@ -271,11 +275,22 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
         root_components = tuple(_path_components(root))
         if tuple(components[:len(root_components)]) != root_components:
             return False
-    return (
+    matches = (
         (len(pattern_components) == 1 and pattern_components[0] in component_set) or
         (len(pattern_components) > 1 and
          pattern_components in sequences.get(len(pattern_components), ()))
     )
+    if not matches:
+        return False
+    if pattern_info.get("browser_profile"):
+        indexeddb_index = components.index("indexeddb")
+        prefix = components[:indexeddb_index]
+        if not any(
+                any(tuple(prefix[index:index + len(marker)]) == marker
+                    for index in range(len(prefix) - len(marker) + 1))
+                for marker in _BROWSER_PROFILE_MARKERS):
+            return False
+    return True
 
 
 def _matches_cleanup_rule(path, priorities, name):

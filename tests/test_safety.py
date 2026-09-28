@@ -261,6 +261,30 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertTrue(all(not item["safe"] for item in low))
         self.assertTrue(all("driver-update files" in item["name"] for item in low))
 
+    def test_indexeddb_candidates_require_a_browser_profile_parent(self):
+        results = self.analyze_rows([
+            {"File Name": r"C:\Users\A\AppData\Local\Google\Chrome\User Data\Default\IndexedDB\https_example_0.indexeddb.leveldb" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\AppData\Local\Microsoft\Edge\User Data\Profile 1\IndexedDB\https_example_0.indexeddb.leveldb" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\AppData\Local\SomeApp\IndexedDB\store" + "\\", "Size": "104857600"},
+            {"File Name": r"C:\Users\A\IndexedDB\Archive\Chrome\User Data\store" + "\\", "Size": "104857600"},
+        ])
+        candidates = results["categories"]["low"]["items"]
+        self.assertEqual({item["path"] for item in candidates}, {
+            r"C:\Users\A\AppData\Local\Google\Chrome\User Data\Default\IndexedDB\https_example_0.indexeddb.leveldb" + "\\",
+            r"C:\Users\A\AppData\Local\Microsoft\Edge\User Data\Profile 1\IndexedDB\https_example_0.indexeddb.leveldb" + "\\",
+        })
+        self.assertTrue(all("Chrome/Edge profile IndexedDB data" in item["name"] for item in candidates))
+
+    def test_generated_plan_revalidates_indexeddb_browser_path(self):
+        results = {"categories": {"low": {"name": "Low", "items": [{
+            "path": r"C:\Users\A\AppData\Local\SomeApp\IndexedDB\store",
+            "name": "Chrome/Edge profile IndexedDB data (offline web-app data or login state; deleting it can sign you out or lose data)",
+            "size": 100, "size_formatted": "100 B", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"), priority="low")
+
     def test_crash_dump_rules_are_limited_to_windows_locations(self):
         with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
             results = self.analyze_rows([
