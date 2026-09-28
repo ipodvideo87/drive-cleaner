@@ -101,6 +101,9 @@ def choose_scanner():
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
             return None
+        if choice in {"q", "quit", "cancel"}:
+            print("Scan cancelled.")
+            return None
         if choice in ("1", "wiztree", "w"):
             return "wiztree"
         if choice in ("2", "windirstat", "win", "wds"):
@@ -119,6 +122,9 @@ def choose_wiztree_mode():
             choice = input("Mode [1/2/3]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
+            return None
+        if choice in {"q", "quit", "cancel"}:
+            print("Scan cancelled.")
             return None
         if choice in ("", "1", "auto", "automatic"):
             return "auto"

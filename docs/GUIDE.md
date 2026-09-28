@@ -14,7 +14,7 @@ Start the guided workflow with:
 python drive_cleaner.py
 ```
 
-Choose **Scan a drive**, then select WizTree or WinDirStat and answer the drive, export, and timeout prompts. The menu can open the completed scan in the review interface. You can also run `python scan.py --app wiztree C:` or `python scan.py --app windirstat C:` directly. Set `WIZTREE_PATH` or `WINDIRSTAT_PATH` if an executable isn't found automatically.
+Choose **Scan a drive**, then select WizTree or WinDirStat and answer the drive, export, and timeout prompts. Invalid yes/no or numeric answers are re-prompted; enter `Q` at an option prompt to cancel setup. The menu can open the completed scan in the review interface. You can also run `python scan.py --app wiztree C:` or `python scan.py --app windirstat C:` directly. Set `WIZTREE_PATH` or `WINDIRSTAT_PATH` if an executable isn't found automatically.
 
 Scans include file rows so large individual files remain visible. The default timeout is 30 minutes; for a larger or slower volume, increase it with `--timeout 3600`. Progress shows elapsed time and bytes written. The scan is complete only after the selected scanner exits, its CSV is stable, and its path and size headers are recognized. WinDirStat applies its saved filters to command-line scans, so review its filter settings before scanning a whole drive.
 

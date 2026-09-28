@@ -1584,6 +1584,11 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch("builtins.input", side_effect=["x", "2"]):
             self.assertEqual(scan.choose_scanner(), "windirstat")
 
+    def test_scanner_and_mode_prompts_accept_explicit_cancellation(self):
+        with mock.patch("builtins.input", return_value="q"), redirect_stdout(io.StringIO()):
+            self.assertIsNone(scan.choose_scanner())
+            self.assertIsNone(scan.choose_wiztree_mode())
+
     def test_wiztree_mode_picker_accepts_automatic_fast_and_standard(self):
         for answer, expected in (("", "auto"), ("2", "fast"), ("standard", "standard")):
             with self.subTest(answer=answer), mock.patch("builtins.input", return_value=answer):
@@ -1691,6 +1696,33 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(drive="C:\\Users", include_files=True, max_depth=4,
                                          timeout=1800, app="wiztree", wiztree_mode="auto")
+
+    def test_guided_wiztree_prompts_retry_invalid_values(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
+             mock.patch.object(analyze, "run_tui"), \
+             mock.patch("builtins.input", side_effect=["D:", "maybe", "y", "-1", "2", "oops", "0", "30", "n"]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+        run_scan.assert_called_once_with(drive="D:", include_files=True, max_depth=2,
+                                         timeout=1800, app="wiztree", wiztree_mode="auto")
+        self.assertIn("Enter Y or N, or Q to cancel.", output.getvalue())
+        self.assertIn("Enter a whole number, or Q to cancel.", output.getvalue())
+        self.assertIn("Export depth must be zero or greater.", output.getvalue())
+        self.assertIn("Enter a positive number of minutes.", output.getvalue())
+
+    def test_guided_scan_can_cancel_during_option_prompts(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
+             mock.patch.object(scan, "scan") as run_scan, \
+             mock.patch("builtins.input", side_effect=["D:", "q"]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+        run_scan.assert_not_called()
+        self.assertIn("Scan cancelled.", output.getvalue())
 
     def test_guided_entry_point_has_simple_exit(self):
         with mock.patch("builtins.input", return_value="0"):

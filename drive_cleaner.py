@@ -9,6 +9,41 @@ import backup
 import scan
 
 
+def _prompt_yes_no(prompt, default=True):
+    """Read a yes/no answer; return None when the user cancels."""
+    suffix = " [Y/n]" if default else " [y/N]"
+    while True:
+        answer = input(f"{prompt}{suffix}: ").strip().lower()
+        if not answer:
+            return default
+        if answer in {"y", "yes"}:
+            return True
+        if answer in {"n", "no"}:
+            return False
+        if answer in {"q", "quit", "cancel"}:
+            return None
+        print("Enter Y or N, or Q to cancel.")
+
+
+def _prompt_integer(prompt, default, minimum, invalid_message):
+    """Read a bounded whole number; return None when the user cancels."""
+    while True:
+        answer = input(f"{prompt} [{default}]: ").strip().lower()
+        if not answer:
+            return default
+        if answer in {"q", "quit", "cancel"}:
+            return None
+        try:
+            value = int(answer)
+        except ValueError:
+            print("Enter a whole number, or Q to cancel.")
+            continue
+        if value < minimum:
+            print(invalid_message)
+            continue
+        return value
+
+
 def _pause():
     try:
         input("\nPress Enter to return to the main menu...")
@@ -31,17 +66,31 @@ def _scan_flow():
         include_files = True
         max_depth = 0
         if app == "wiztree":
-            include_files = input("Include individual files in the export? [Y/n]: ").strip().lower() not in {"n", "no"}
-            depth_text = input("Maximum export depth (0 = unlimited) [0]: ").strip() or "0"
-            max_depth = int(depth_text)
-            if max_depth < 0:
-                raise ValueError("Export depth must be zero or greater.")
-        timeout_text = input("Maximum scan time in minutes [30]: ").strip() or "30"
-        timeout = int(timeout_text) * 60
-        if timeout <= 0:
-            raise ValueError("Enter a positive number of minutes.")
-    except (ValueError, EOFError) as exc:
-        print(f"Scan setup cancelled: {exc}")
+            include_choice = _prompt_yes_no("Include individual files in the export?", default=True)
+            if include_choice is None:
+                print("Scan cancelled.")
+                return
+            include_files = include_choice
+            max_depth = _prompt_integer(
+                "Maximum export depth (0 = unlimited)", 0, 0,
+                "Export depth must be zero or greater.",
+            )
+            if max_depth is None:
+                print("Scan cancelled.")
+                return
+        timeout_minutes = _prompt_integer(
+            "Maximum scan time in minutes", 30, 1,
+            "Enter a positive number of minutes.",
+        )
+        if timeout_minutes is None:
+            print("Scan cancelled.")
+            return
+        timeout = timeout_minutes * 60
+    except EOFError:
+        print("Scan setup cancelled.")
+        return
+    except KeyboardInterrupt:
+        print("\nScan setup cancelled.")
         return
 
     scan_options = {
