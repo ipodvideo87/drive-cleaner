@@ -30,6 +30,8 @@ Choose the latest scan or enter a CSV path. Review the disk summary, candidate t
 
 High, medium, and low are review tiers, not a guarantee of safety. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
 
+Drive Cleanr uses WinDirStat's item type and count fields to distinguish files from folders. If an imported WinDirStat row lacks reliable type data, it is skipped and counted in the report instead of being guessed as a file.
+
 ## 3. Generate and inspect a cleanup plan
 
 ```powershell

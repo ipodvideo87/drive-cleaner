@@ -304,6 +304,33 @@ class AnalyzeSafetyTests(unittest.TestCase):
             analyze.generate_clean_script(results, str(script_path))
             self.assertIn("IsDirectory = $true", script_path.read_text(encoding="utf-8-sig"))
 
+    def test_windirstat_rows_without_type_metadata_are_not_mislabeled_as_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "windirstat-ambiguous.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Name", "Logical Size", "Physical Size"])
+                writer.writeheader()
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp\known-directory" + "\\",
+                    "Logical Size": "125000000", "Physical Size": "120000000",
+                })
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp\unknown-item",
+                    "Logical Size": "130000000", "Physical Size": "125000000",
+                })
+            with mock.patch("analyze.os.path.exists", return_value=True):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+        candidates = results["categories"]["high"]["items"]
+        self.assertEqual([item["path"] for item in candidates], [
+            r"C:\Users\A\AppData\Local\Temp\known-directory" + "\\",
+        ])
+        self.assertEqual(candidates[0]["kind"], "Directory")
+        self.assertEqual(results["unclassified_candidate_count"], 1)
+        with mock.patch("builtins.print") as output:
+            analyze.print_report(results)
+        report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("no reliable file or folder type", report)
+
     def test_windirstat_without_volume_metadata_uses_labeled_current_space(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "windirstat.csv"

@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Skip ambiguous WinDirStat candidate rows rather than defaulting them to files; report how many were omitted.
 - Verify backup payloads and selected source contents immediately before cleanup; stop and leave changed targets in place.
 - Add `backup.py verify` for checking all or selected backed-up paths.
 - Require scan exports to contain a stable, readable CSV path and size header before reporting success; accept WizTree's optional generated-note line.

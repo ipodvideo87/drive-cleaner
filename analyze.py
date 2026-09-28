@@ -170,7 +170,7 @@ def classify_path(path):
 
 
 def _is_directory_row(fields):
-    """Read WinDirStat's folder indicators when a row becomes a candidate."""
+    """Return a WinDirStat row type, or None when its type is ambiguous."""
     attributes = str(fields.get('attributes') or '').casefold()
     windirstat_attributes = str(fields.get('windirstatattributes') or '')
     try:
@@ -181,10 +181,12 @@ def _is_directory_row(fields):
         has_children = int(fields.get('files') or 0) > 0 or int(fields.get('folders') or 0) > 0
     except (TypeError, ValueError):
         has_children = False
-    return (
-        'directory' in attributes or attributes.strip() == 'd' or
-        windirstat_type == 0x4 or has_children
-    )
+    if windirstat_type == 0x4 or 'directory' in attributes or any(
+            token == 'd' for token in re.findall(r'[a-z]+', attributes)) or has_children:
+        return 'directory'
+    if windirstat_type == 0x8:
+        return 'file'
+    return None
 
 
 def _is_under(child, parent):
@@ -391,6 +393,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         "space_source": None,
         "stale_candidate_count": 0,
         "project_candidate_count": 0,
+        "unclassified_candidate_count": 0,
         "categories": {
             "high": {"name": "High priority — lower risk (review each path)", "items": [], "total_size": 0},
             "medium": {"name": "Medium priority — review carefully", "items": [], "total_size": 0},
@@ -430,6 +433,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
             str(key or '').strip().casefold().replace(' ', ''): index
             for index, key in enumerate(headers)
         }
+        is_windirstat_export = 'logicalsize' in header_keys or 'windirstatattributes' in header_keys
 
         def column(*names):
             return next((header_keys[name] for name in names if name in header_keys), None)
@@ -524,38 +528,49 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                                  pattern_components in path_sequences.get(len(pattern_components), ()))):
                             # Type metadata is only needed for candidates; most
                             # scanner rows are ordinary files we can skip here.
-                            row_is_directory = path.endswith(('\\', '/')) or _is_directory_row({
-                                'attributes': cell(row, attributes_column),
-                                'windirstatattributes': cell(row, windirstat_attributes_column),
-                                'files': cell(row, files_column),
-                                'folders': cell(row, folders_column),
-                            })
-                            if (path and not path.endswith(('\\', '/')) and row_is_directory):
-                                path += '\\'
                             if not os.path.exists(path.rstrip("\\/")):
                                 results["stale_candidate_count"] += 1
-                            elif _inside_project_tree(path, row_is_directory, project_path_cache):
-                                results["project_candidate_count"] += 1
                             else:
-                                # Avoid double-counting an entry under a selected parent.
-                                existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
-                                is_subdir = any(_is_under(path, p) for p in existing_paths)
-
-                                if not is_subdir:
-                                    # Replace selected children with this outer directory.
-                                    results["categories"][priority]["items"] = [
-                                        item for item in results["categories"][priority]["items"]
-                                        if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
-                                    ]
-
-                                    results["categories"][priority]["items"].append({
-                                        "path": path,
-                                        "size": size,
-                                        "size_formatted": format_size(size),
-                                        "name": pattern_info["name"],
-                                        "safe": pattern_info["safe"],
-                                        "kind": classify_path(path),
+                                row_type = 'directory' if path.endswith(('\\', '/')) else None
+                                if row_type is None and is_windirstat_export:
+                                    row_type = _is_directory_row({
+                                        'attributes': cell(row, attributes_column),
+                                        'windirstatattributes': cell(row, windirstat_attributes_column),
+                                        'files': cell(row, files_column),
+                                        'folders': cell(row, folders_column),
                                     })
+                                elif row_type is None:
+                                    # WizTree represents directory rows with a trailing separator.
+                                    row_type = 'file'
+
+                                if row_type is None:
+                                    results['unclassified_candidate_count'] += 1
+                                else:
+                                    row_is_directory = row_type == 'directory'
+                                    if row_is_directory and not path.endswith(('\\', '/')):
+                                        path += '\\'
+                                    if _inside_project_tree(path, row_is_directory, project_path_cache):
+                                        results["project_candidate_count"] += 1
+                                    else:
+                                        # Avoid double-counting an entry under a selected parent.
+                                        existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
+                                        is_subdir = any(_is_under(path, p) for p in existing_paths)
+
+                                        if not is_subdir:
+                                            # Replace selected children with this outer directory.
+                                            results["categories"][priority]["items"] = [
+                                                item for item in results["categories"][priority]["items"]
+                                                if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
+                                            ]
+
+                                            results["categories"][priority]["items"].append({
+                                                "path": path,
+                                                "size": size,
+                                                "size_formatted": format_size(size),
+                                                "name": pattern_info["name"],
+                                                "safe": pattern_info["safe"],
+                                                "kind": classify_path(path),
+                                            })
                             break
                     else:
                         continue
@@ -655,6 +670,8 @@ def print_report(results, show_all_items=False, item_limit=10):
         print(f"Skipped {results['stale_candidate_count']} candidate paths that no longer exist.")
     if results.get("project_candidate_count", 0):
         print(f"Skipped {results['project_candidate_count']} candidate entries inside detected project folders.")
+    if results.get("unclassified_candidate_count", 0):
+        print(f"Skipped {results['unclassified_candidate_count']} candidate rows with no reliable file or folder type; rescan to get complete item details.")
     print("=" * 60)
 
 
