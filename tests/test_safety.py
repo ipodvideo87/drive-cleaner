@@ -287,6 +287,16 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.run_tui()
             self.assertEqual(picker.call_count, 2)
 
+    def test_analyzer_cli_handles_picker_interrupt_without_traceback(self):
+        for interruption in (KeyboardInterrupt, EOFError):
+            with self.subTest(interruption=interruption), \
+                 mock.patch.object(analyze.sys, "argv", ["analyze.py", "--tui"]), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=interruption), \
+                 redirect_stdout(io.StringIO()) as output:
+                analyze.main()
+            self.assertIn("Review cancelled.", output.getvalue())
+
     def test_only_absolute_local_non_root_paths_become_candidates(self):
         results = self.analyze_rows([
             {"File Name": "C:\\", "Size": "1000", "DRIVECAPACITY": "1000", "FREESPACE": "200", "USEDSPACE": "800"},
@@ -1932,6 +1942,19 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_backup_cli_confirmation_interrupts_cancel_without_running_operation(self):
+        for command, expected_message, operation in (
+                ("restore", "Restore cancelled", "restore_backup"),
+                ("delete", "Backup deletion cancelled", "delete_backup")):
+            with self.subTest(command=command), \
+                 mock.patch.object(backup.sys, "argv", ["backup.py", command, "--id", "backup_test"]), \
+                 mock.patch("builtins.input", side_effect=KeyboardInterrupt), \
+                 mock.patch.object(backup, operation) as run_operation, \
+                 redirect_stdout(io.StringIO()) as output:
+                backup.main()
+            run_operation.assert_not_called()
+            self.assertIn(expected_message, output.getvalue())
+
     def test_backup_list_skips_malformed_manifest_shapes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

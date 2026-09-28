@@ -61,7 +61,7 @@ python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds
 python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds --yes
 ```
 
-To remove one backup permanently, use `python backup.py delete --id <id>` and confirm the prompt. Do not remove a backup until you no longer need its recovery copy.
+To remove one backup permanently, use `python backup.py delete --id <id>` and confirm the prompt. Ctrl+C at a restore or delete confirmation cancels before the operation starts. Do not remove a backup until you no longer need its recovery copy.
 
 ## 5. Other useful options
 

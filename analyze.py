@@ -1442,7 +1442,10 @@ def main():
     args = parser.parse_args()
 
     if args.tui:
-        run_tui(args.csv_file, args.min_size)
+        try:
+            run_tui(args.csv_file, args.min_size)
+        except (EOFError, KeyboardInterrupt):
+            print("\nReview cancelled.")
         return
 
     if not args.csv_file:

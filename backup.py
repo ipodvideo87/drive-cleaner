@@ -1269,9 +1269,13 @@ def main():
     elif args.command == 'restore':
         overwrite = bool(args.yes)
         if not args.yes:
-            answer = input(
-                "Handle existing files: O to overwrite, M to restore missing files and preserve existing ones, or Q to cancel [M]: "
-            ).strip().lower()
+            try:
+                answer = input(
+                    "Handle existing files: O to overwrite, M to restore missing files and preserve existing ones, or Q to cancel [M]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("Restore cancelled")
+                return
             if answer in {"o", "overwrite"}:
                 overwrite = True
             elif answer in {"", "m", "merge"}:
@@ -1284,7 +1288,11 @@ def main():
 
     elif args.command == 'delete':
         if not args.yes:
-            answer = input("Permanently delete this backup? This cannot be undone. (y/N): ").strip().lower()
+            try:
+                answer = input("Permanently delete this backup? This cannot be undone. (y/N): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("Backup deletion cancelled")
+                return
             if answer != "y":
                 print("Backup deletion cancelled")
                 return
