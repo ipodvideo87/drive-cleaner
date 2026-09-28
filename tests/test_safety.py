@@ -948,6 +948,26 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 ValueError, "does not match its priority and cleanup label"):
             analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"), priority="medium")
 
+    def test_bcut_cache_is_only_a_caution_candidate(self):
+        path = r"C:\Users\A\AppData\Roaming\BCUT\Cache\Material\asset.bin"
+        results = self.analyze_rows([{"File Name": path, "Size": "104857600"}])
+        high_items = results["categories"]["high"]["items"]
+        medium_items = results["categories"]["medium"]["items"]
+        self.assertFalse(any(item["path"] == path for item in high_items))
+        bcut_items = [item for item in medium_items if item["path"] == path]
+        self.assertEqual(len(bcut_items), 1)
+        self.assertIn("name alone does not prove", bcut_items[0]["name"])
+
+    def test_generated_plan_rejects_old_bcut_safe_label(self):
+        results = {"categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}}
+        results["categories"]["high"]["items"] = [{
+            "path": r"C:\Users\A\AppData\Roaming\BCUT\Cache\Material\asset.bin",
+            "name": "BCUT cache", "size": 100, "size_formatted": "100 B", "kind": "File",
+        }]
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"))
+
     def test_all_priority_plan_accepts_valid_lower_tier_candidate(self):
         categories = {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
         path = r"Z:\DriveCleanrTest\.gradle\caches\modules"

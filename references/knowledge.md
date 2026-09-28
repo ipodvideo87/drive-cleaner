@@ -16,6 +16,7 @@
 - Automated cleanup patterns match complete Windows path components; multi-component patterns must appear as adjacent components. Similar names embedded in larger words are not sufficient to label a path. Generated plans revalidate every target against the selected tier and exact cleanup label before writing the script.
 - Dump folders and filenames are candidates only under the drive's `Windows` directory; similarly named user archives and project folders stay untouched.
 - Protect OneDrive's standard organization-root form (`OneDrive - <organization>`) while leaving unrelated sibling names such as `OneDriveBackup` to normal path review.
+- Do not label app-specific Bcut (`BCUT`) cache data as lower-risk disposable based on its name alone. Its contents and rebuild behavior are not established in verified vendor documentation; the generic cache rule can surface it only as a caution item requiring exact path/content review. Prefer the app's own controls when available.
 
 These rules are based on practical cleanup cases. In one case, 28.9 GB was recovered from one computer; roughly two-thirds came from items that required case-by-case review beyond the pattern list. These figures are examples only. Results vary by system and scan.
 

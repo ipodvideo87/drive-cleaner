@@ -35,7 +35,6 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
             {"pattern": "\\.cache\\puppeteer", "name": "Puppeteer cache", "safe": True},
             {"pattern": "\\electron\\cache", "name": "Electron cache", "safe": True},
-            {"pattern": "\\bcut\\cache", "name": "BCUT cache", "safe": True},
             {"pattern": "\\npm-cache", "name": "npm cache", "safe": True},
             {"pattern": "\\yarn\\cache", "name": "Yarn cache", "safe": True},
             {"pattern": "\\temp\\", "name": "Temporary files (check for installers or builds in progress)", "safe": True},
