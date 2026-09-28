@@ -993,7 +993,13 @@ foreach ($target in $cleanTargets) {{
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             $deletable | Sort-Object {{ $_.FullName.Length }} -Descending | Remove-Item -Force -EA Stop
-            if ($preservePaths.Count -gt 0) {{ Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow }}
+            if ($preservePaths.Count -gt 0) {{
+                Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
+            }} else {{
+                # Get-ChildItem does not include the selected root itself. Remove
+                # it only after every child was removed and no protected data remains.
+                Remove-Item -LiteralPath $target.Path -Force -EA Stop
+            }}
         }} else {{
             $before = $item.Length
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path

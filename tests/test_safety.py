@@ -694,6 +694,38 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("protected data was preserved", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_removes_empty_selected_folder_after_verified_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected-cache"
+            selected.mkdir()
+            (selected / "remove-me.bin").write_bytes(b"temporary data")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)",
+                "size": 14, "size_formatted": "14 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            fake_backup = root / "backup.py"
+            fake_backup.write_text(
+                "import json, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertFalse(selected.exists(), result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_refuses_directory_tree_with_nested_reparse_point(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
