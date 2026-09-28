@@ -233,6 +233,7 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
     planned_entries = []
     archived_attributes = []
     conflicts = []
+    seen_targets = set()
     with zipfile.ZipFile(archive_path, "r") as archive:
         for info in archive.infolist():
             member = info.filename.replace("\\", "/")
@@ -255,6 +256,10 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
                 contained = False
             if not contained:
                 raise RuntimeError(f"Unsafe path inside backup archive: {info.filename}")
+            target_key = os.path.normcase(os.path.normpath(target)).casefold()
+            if target_key in seen_targets:
+                raise RuntimeError(f"Refusing duplicate or case-colliding paths in backup archive: {info.filename}")
+            seen_targets.add(target_key)
             if _path_has_reparse_component(target):
                 raise RuntimeError(f"Refusing to restore through a reparse point: {info.filename}")
             parent = os.path.dirname(target)
@@ -277,7 +282,12 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
             planned_entries.append((info, target))
 
         # Validate every member before writing any of them, avoiding partial
-        # restoration when a later entry is unsafe.
+        # restoration when a later entry is unsafe or has damaged contents.
+        print("        [Checking archive contents before restore]")
+        damaged_member = archive.testzip()
+        if damaged_member is not None:
+            raise RuntimeError(f"Refusing a damaged backup archive member: {damaged_member}")
+
         for info, target in planned_entries:
             if info.is_dir():
                 existed = os.path.lexists(target)
@@ -899,6 +909,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
 
     success_count = 0
     conflict_count = 0
+    failure_count = 0
 
     for item, original_path, backup_path, backup_format in validated_items:
         print(f"[Restore] {original_path}")
@@ -955,11 +966,15 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 print("        [Done]")
             success_count += 1
         except Exception as e:
+            failure_count += 1
             print(f"        [Failed] {e}")
 
     print("-" * 50)
-    if conflict_count:
-        print(f"Restore incomplete: {success_count}/{len(manifest['items'])} items; preserved {conflict_count} existing file(s)")
+    if conflict_count or failure_count:
+        print(
+            f"Restore incomplete: {success_count}/{len(manifest['items'])} items; "
+            f"{failure_count} failed; preserved {conflict_count} existing file(s)"
+        )
     else:
         print(f"Restore complete: {success_count}/{len(manifest['items'])} items")
 

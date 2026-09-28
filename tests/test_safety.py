@@ -1802,6 +1802,60 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertFalse((destination / "first.txt").exists())
             self.assertEqual((destination / "blocker").read_text(encoding="utf-8"), "preserve me")
 
+    def test_zip_restore_rejects_case_colliding_paths_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "case-collision.zip"
+            destination = root / "restore"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("cache.bin", "first copy")
+                archive.writestr("CACHE.BIN", "second copy")
+
+            with self.assertRaisesRegex(RuntimeError, "duplicate or case-colliding"):
+                backup._extract_zip_backup(str(archive_path), str(destination))
+            self.assertFalse(destination.exists())
+
+    @unittest.skipUnless(os.name == "nt", "backup restore targets Windows paths")
+    def test_restore_rejects_corrupt_later_zip_member_before_writing_any_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / "backup_20260927_123456_123456"
+            backup_dir.mkdir()
+            archive_path = backup_dir / "payload.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("first.txt", b"restored data")
+                archive.writestr("later.txt", b"damaged data")
+
+            with zipfile.ZipFile(archive_path) as archive:
+                info = archive.getinfo("later.txt")
+                data_offset = info.header_offset + 30 + len(info.filename.encode("utf-8")) + len(info.extra)
+            with archive_path.open("r+b") as archive_file:
+                archive_file.seek(data_offset)
+                original_byte = archive_file.read(1)
+                archive_file.seek(data_offset)
+                archive_file.write(bytes([original_byte[0] ^ 0x01]))
+
+            destination = root / "restore-target"
+            manifest = {
+                "status": "completed",
+                "timestamp": "2026-09-27T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(archive_path),
+                    "format": "zip",
+                    "integrity_sha256": backup._sha256_file(str(archive_path)),
+                    "size": len(b"restored data") + len(b"damaged data"),
+                }],
+            }
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)):
+                with mock.patch("builtins.print") as output:
+                    self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
+            self.assertFalse(destination.exists())
+            restore_summary = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+            self.assertIn("Restore incomplete: 0/1 items; 1 failed", restore_summary)
+            self.assertNotIn("Restore complete", restore_summary)
+
     def test_zip_restore_rejects_windows_alternate_stream_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "ads.zip"
