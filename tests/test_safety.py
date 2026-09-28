@@ -2190,6 +2190,52 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual((destination / "changed.bin").read_bytes(), b"newer user data")
             self.assertEqual((destination / "removed.bin").read_bytes(), b"restore me")
 
+    def test_directory_restore_rechecks_destination_before_robocopy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "backup"
+            saved = backup_root / "saved-directory"
+            saved.mkdir(parents=True)
+            (saved / "payload.bin").write_bytes(b"saved data")
+            destination = root / "restored-directory"
+            destination.mkdir()
+            protected = destination / "keep.bin"
+            protected.write_bytes(b"existing user data")
+            manifest = {
+                "id": "backup_20260927_123456_123456",
+                "status": "completed",
+                "timestamp": "2026-09-27T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(saved),
+                    "format": "copy",
+                    "size": backup.get_dir_size(str(saved)),
+                }],
+            }
+            destination_key = os.path.normcase(os.path.abspath(destination))
+            destination_checks = 0
+
+            def destination_becomes_linked(path):
+                nonlocal destination_checks
+                if os.path.normcase(os.path.abspath(path)) == destination_key:
+                    destination_checks += 1
+                    return destination_checks >= 3
+                return False
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=destination_becomes_linked),
+                mock.patch.object(backup.subprocess, "run") as robocopy,
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            robocopy.assert_not_called()
+            self.assertEqual(protected.read_bytes(), b"existing user data")
+            self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
+
     def test_restore_rejects_same_size_corrupted_file_backup_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"

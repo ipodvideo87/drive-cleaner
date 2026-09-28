@@ -1062,7 +1062,14 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                     item_conflicts += 1
                     continue
             elif backup_format == "copy":
+                if _path_has_reparse_component(original_path) or _path_has_reparse_component(backup_path):
+                    raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
                 os.makedirs(original_path, exist_ok=True)
+                if (_path_has_reparse_component(original_path) or
+                        _path_has_reparse_component(backup_path) or
+                        _tree_has_reparse_point(original_path) or
+                        _tree_has_reparse_point(backup_path)):
+                    raise RuntimeError("Restore source or destination changed to a reparse point")
                 # Restore by copying the saved directory.
                 command = [
                         "robocopy", backup_path, original_path,

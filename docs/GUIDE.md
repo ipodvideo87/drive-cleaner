@@ -52,7 +52,7 @@ The analyzer rejects UNC/device paths, traversal paths, and drive roots from imp
 
 Before deleting anything, the script invokes `backup.py` for every selected target. A missing or partial backup stops the cleanup. Immediately before removing each target, it verifies the backup payload and confirms the source still matches the content saved at backup time. A changed target is left in place. Backups go to a non-system drive with at least 5 GB free; there also needs to be sufficient room for the selected data. File backups are copied directly; smaller directories are copied; larger directories are compressed.
 
-Keep the backup until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. For unattended use, `--yes` explicitly approves overwriting conflicts:
+Keep the backup until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. Directory-copy restores recheck the source and destination for links immediately before Robocopy starts. For unattended use, `--yes` explicitly approves overwriting conflicts:
 
 ```powershell
 python backup.py list
