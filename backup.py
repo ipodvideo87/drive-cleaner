@@ -1037,6 +1037,14 @@ def delete_backup(backup_id: str) -> bool:
         return False
 
     try:
+        if _tree_has_reparse_point(backup_dir):
+            print("Refusing to delete a backup containing a reparse point or junction")
+            return False
+    except OSError as exc:
+        print(f"Could not safely inspect backup before deletion: {exc}")
+        return False
+
+    try:
         shutil.rmtree(backup_dir)
         print(f"Deleted backup: {backup_id}")
         return True

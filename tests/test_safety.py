@@ -1647,6 +1647,16 @@ class BackupSafetyTests(unittest.TestCase):
             backup.print_backups_table([manifest])
         self.assertIn(r"Saved to: D:\CleanBackups\backup_20260928_123456_123456", output.getvalue())
 
+    def test_delete_refuses_backup_tree_with_reparse_point(self):
+        output = io.StringIO()
+        with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\backup_20260928_123456_123456"), \
+             mock.patch.object(backup, "_tree_has_reparse_point", return_value=True), \
+             mock.patch.object(backup.shutil, "rmtree") as remove_tree, \
+             redirect_stdout(output):
+            self.assertFalse(backup.delete_backup("backup_20260928_123456_123456"))
+        remove_tree.assert_not_called()
+        self.assertIn("containing a reparse point or junction", output.getvalue())
+
     def test_reparse_point_lookup_fails_closed_but_allows_missing_paths(self):
         with mock.patch.object(backup.os, "lstat", side_effect=PermissionError("access denied")):
             self.assertTrue(backup._is_reparse_point("unreadable-path"))
