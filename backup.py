@@ -1086,6 +1086,9 @@ def print_backups_table(backups: List[Dict]):
         size = backup.get("total_size_formatted", "Unknown")
         items = len(backup.get("items", []))
         print(f"{backup_id:<30} {timestamp:<20} {size:<12} {items:<8}")
+        backup_root = backup.get("backup_root")
+        if isinstance(backup_root, str) and backup_root:
+            print(f"  Saved to: {ntpath.join(backup_root, backup_id)}")
 
     print("=" * 70)
 

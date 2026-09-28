@@ -694,6 +694,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("HashSet[string]", script)
         self.assertIn("$projectMarkers", script)
         self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)
+        self.assertIn("$backupLocation = Join-Path $backup.backup_root $backup.id", script)
+        self.assertIn('Write-Host "Backup saved to: $backupLocation"', script)
         self.assertIn("only the permissions needed for the selected paths", script)
         self.assertNotIn("Run with administrator privileges", script)
 
@@ -1632,6 +1634,19 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_backup_list_shows_the_restore_location(self):
+        manifest = {
+            "id": "backup_20260928_123456_123456",
+            "timestamp": "2026-09-28T12:34:56",
+            "backup_root": r"D:\CleanBackups",
+            "total_size_formatted": "12 MB",
+            "items": [{"original_path": r"C:\Users\A\cache.bin"}],
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            backup.print_backups_table([manifest])
+        self.assertIn(r"Saved to: D:\CleanBackups\backup_20260928_123456_123456", output.getvalue())
+
     def test_reparse_point_lookup_fails_closed_but_allows_missing_paths(self):
         with mock.patch.object(backup.os, "lstat", side_effect=PermissionError("access denied")):
             self.assertTrue(backup._is_reparse_point("unreadable-path"))

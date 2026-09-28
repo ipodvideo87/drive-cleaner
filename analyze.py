@@ -983,6 +983,10 @@ if ($backup.status -ne 'completed' -or $backup.items.Count -ne $cleanTargets.Cou
     throw "Backup was incomplete. No cleanup was performed. Review backup $($backup.id)."
 }}
 Write-Host "Backup created: $($backup.id)" -ForegroundColor Green
+if ($backup.backup_root) {{
+    $backupLocation = Join-Path $backup.backup_root $backup.id
+    Write-Host "Backup saved to: $backupLocation" -ForegroundColor Green
+}}
 
 Write-Host "`nStarting cleanup..." -ForegroundColor Cyan
 
