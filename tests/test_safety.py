@@ -1007,7 +1007,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse(backup_log.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_partial_backup_aborts_generated_cleanup(self):
+    def test_cleanup_rejects_partial_or_incomplete_backup_even_if_helper_exits_zero(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -1023,18 +1023,22 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
-            (root / "backup.py").write_text(
-                "import json, sys\n"
-                "print(json.dumps({'status':'partial','items':[],'id':'mock-backup'}))\n"
-                "sys.exit(1)\n",
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=90,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertTrue(marker.exists())
+            backup_helper = root / "backup.py"
+            for status, items in (("partial", "[]"), ("completed", "[]")):
+                with self.subTest(status=status, items=items):
+                    backup_helper.write_text(
+                        "import json\n"
+                        f"print(json.dumps({{'status': {status!r}, 'items': {items}, 'id': 'mock-backup'}}))\n",
+                        encoding="utf-8",
+                    )
+                    result = subprocess.run(
+                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                        capture_output=True, text=True, timeout=90,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Backup was incomplete. No cleanup was performed.", result.stderr + result.stdout)
+                    self.assertNotIn("Starting cleanup...", result.stdout)
+                    self.assertTrue(marker.exists())
 
     def test_generating_empty_plan_is_an_error(self):
         results = {"categories": {"high": {"name": "High", "items": []}}}
