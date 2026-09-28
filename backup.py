@@ -175,9 +175,10 @@ def _directory_fingerprint_sha256(path: str) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _create_zip_backup(source_path: str, archive_path: str) -> None:
-    """Write a ZIP64 archive of all files, including hidden/system entries."""
+def _create_zip_backup(source_path: str, archive_path: str) -> Dict[str, tuple]:
+    """Write a ZIP64 archive and fingerprint the exact content it contains."""
     source_path = os.path.abspath(source_path)
+    archived_entries = {}
 
     def raise_walk_error(error):
         raise error
@@ -196,6 +197,7 @@ def _create_zip_backup(source_path: str, archive_path: str) -> None:
                 directory_attributes = os.stat(current, follow_symlinks=False)
                 info.external_attr = (info.external_attr & 0xFFFF0000) | getattr(directory_attributes, "st_file_attributes", 0) & 0xFF
                 archive.writestr(info, b"")
+                archived_entries[os.path.normcase(relative_dir)] = ("directory",)
             for name in files:
                 file_path = os.path.join(current, name)
                 if _is_reparse_point(file_path):
@@ -205,8 +207,17 @@ def _create_zip_backup(source_path: str, archive_path: str) -> None:
                 info.compress_type = zipfile.ZIP_DEFLATED
                 file_attributes = os.stat(file_path, follow_symlinks=False)
                 info.external_attr = (info.external_attr & 0xFFFF0000) | getattr(file_attributes, "st_file_attributes", 0) & 0xFF
+                digest = hashlib.sha256()
+                written = 0
                 with open(file_path, "rb") as source, archive.open(info, "w", force_zip64=True) as destination:
-                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                        destination.write(chunk)
+                        digest.update(chunk)
+                        written += len(chunk)
+                archived_entries[os.path.normcase(relative_file.replace("/", os.sep))] = (
+                    "file", written, digest.hexdigest()
+                )
+    return archived_entries
 
 
 def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = False) -> list[str]:
@@ -508,7 +519,11 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             print(f"        → Compress to {backup_path}")
 
             try:
-                _create_zip_backup(path, backup_path)
+                source_fingerprint = _directory_fingerprint(path)
+                archived_fingerprint = _create_zip_backup(path, backup_path)
+                if archived_fingerprint != source_fingerprint:
+                    manifest["errors"].append(f"Source changed while its backup archive was being created: {path}")
+                    continue
                 print(f"        [Done]")
             except Exception as e:
                 print(f"        [Failed] {e}")

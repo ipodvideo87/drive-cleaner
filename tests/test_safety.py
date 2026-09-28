@@ -1153,6 +1153,30 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(result["items"], [])
             self.assertTrue(any("different file contents" in error for error in result["errors"]))
 
+    def test_zip_backup_rejects_content_that_differs_from_source_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "large-directory"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"good")
+            source_snapshot = {"payload.bin": ("file", 4, "a" * 64)}
+            archived_snapshot = {"payload.bin": ("file", 4, "b" * 64)}
+
+            def write_changed_archive(source_path, archive_path):
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.write(Path(source_path) / "payload.bin", "payload.bin")
+                return archived_snapshot
+
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "get_dir_size", return_value=backup.SIZE_THRESHOLD), \
+                 mock.patch.object(backup, "_directory_fingerprint", return_value=source_snapshot), \
+                 mock.patch.object(backup, "_create_zip_backup", side_effect=write_changed_archive):
+                result = backup.create_backup([str(source)])
+
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["items"], [])
+            self.assertTrue(any("Source changed while" in error for error in result["errors"]))
+
     def test_file_backup_restores_after_the_original_is_missing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
@@ -1280,7 +1304,8 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertTrue(ctypes.windll.kernel32.SetFileAttributesW(str(hidden_file), 0x2))
             archive_path = Path(temp_dir) / "backup.zip"
             destination = Path(temp_dir) / "restored"
-            backup._create_zip_backup(str(source), str(archive_path))
+            archived_fingerprint = backup._create_zip_backup(str(source), str(archive_path))
+            self.assertEqual(archived_fingerprint, backup._directory_fingerprint(str(source)))
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertEqual(archive.testzip(), None)
                 self.assertIn(".hidden-folder/secret-cache.bin", archive.namelist())
