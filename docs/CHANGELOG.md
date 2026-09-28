@@ -2,6 +2,8 @@
 
 ## Unreleased
 - Match automated cleanup and protection patterns on complete Windows path components, preventing embedded names such as `CacheInspector` and `OneDriveBackup` from inheriting unrelated classifications.
+- Require exact component matches, list supported dump filenames explicitly, and use matching component boundaries when generated plans preserve protected paths.
+- Keep standard `OneDrive - <organization>` roots protected without treating `OneDriveBackup` as the same folder.
 - Correct the WizTree elevation guidance: standard scans are available without elevation; only fast MFT scanning requires an administrator terminal.
 - Run the Windows mock and safety suite in GitHub Actions on Python 3.10 and 3.13 for pushes and pull requests.
 - Keep cleanup-script generation compatible with Python 3.10 and use a long Windows temp path in the nested-preservation integration test.

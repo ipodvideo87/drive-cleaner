@@ -14,6 +14,8 @@
 - Do not suggest recovered previous-installation data, `$WinREAgent`, Windows Update logs, or Service Worker storage for direct cleanup.
 - A scan is complete when the selected scanner exits and its export is stable, not merely when file growth pauses.
 - Automated cleanup patterns match complete Windows path components; multi-component patterns must appear as adjacent components. Similar names embedded in larger words are not sufficient to label a path.
+- Known memory dump files are listed explicitly (`MEMORY.DMP`, `CrashDump.dmp`, and `Minidump.dmp`); a dotted suffix alone does not turn an unrelated name into a cleanup candidate.
+- Protect OneDrive's standard organization-root form (`OneDrive - <organization>`) while leaving unrelated sibling names such as `OneDriveBackup` to normal path review.
 
 These rules are based on practical cleanup cases. In one case, 28.9 GB was recovered from one computer; roughly two-thirds came from items that required case-by-case review beyond the pattern list. These figures are examples only. Results vary by system and scan.
 
@@ -91,6 +93,8 @@ Large caches             Cache\\$|cache\\$
 ```
 
 The installer-cache patterns are shown as reminders of protected data; their presence in a path does not make them cleanup candidates. Messaging folders also contain personal data and remain protected.
+
+The patterns in this review list are locating cues, not an exhaustive list of automated cleanup rules. Only entries in `analyze.py` are classified automatically; those rules use exact path components or adjacent component sequences.
 
 ## Execution rules
 

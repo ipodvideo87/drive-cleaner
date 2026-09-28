@@ -26,6 +26,10 @@ CLEANABLE_PATTERNS = {
         "patterns": [
             {"pattern": "livekernelreports", "name": "Kernel crash dumps (diagnostic snapshots; system does not depend on them)", "safe": True},
             {"pattern": "crashdump", "name": "Crash dumps", "safe": True},
+            {"pattern": "crashdumps", "name": "Crash dumps", "safe": True},
+            {"pattern": "crashdump.dmp", "name": "Crash dump file", "safe": True},
+            {"pattern": "minidump.dmp", "name": "Blue screen mini dump file", "safe": True},
+            {"pattern": "memory.dmp", "name": "Windows memory dump", "safe": True},
             {"pattern": "minidump", "name": "Blue screen mini dumps", "safe": True},
             {"pattern": "optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
             {"pattern": "ota-artifacts", "name": "NVIDIA update cache", "safe": True},
@@ -103,6 +107,7 @@ EXCLUDE_PATTERNS = [
     "\\.ssh\\",
     "\\.gnupg\\",
 ]
+EXCLUDE_COMPONENT_PREFIXES = ("onedrive -",)
 
 ANALYSIS_PROGRESS_INTERVAL = 100_000
 PROJECT_MARKERS = (
@@ -189,12 +194,7 @@ def _contains_component_sequence(components, wanted):
 def _matches_cleanup_pattern(components, wanted):
     if not wanted:
         return False
-    if len(wanted) > 1:
-        return _contains_component_sequence(components, wanted)
-    # Accept a suffix such as CrashDump.dmp while excluding similarly named
-    # tools and project folders such as CrashDumpManager.
-    return any(component == wanted[0] or component.startswith(wanted[0] + ".")
-               for component in components)
+    return _contains_component_sequence(components, wanted)
 
 
 _EXCLUDE_COMPONENTS = tuple(_path_components(pattern) for pattern in EXCLUDE_PATTERNS)
@@ -208,7 +208,11 @@ _CLEANABLE_COMPONENTS = {
 def _is_excluded_path(path, components=None):
     """Return whether a path matches a protected-path fragment."""
     components = components if components is not None else _path_components(path)
-    return any(_contains_component_sequence(components, pattern) for pattern in _EXCLUDE_COMPONENTS)
+    return (
+        any(_contains_component_sequence(components, pattern) for pattern in _EXCLUDE_COMPONENTS)
+        or any(component.startswith(prefix)
+               for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
+    )
 
 
 def _inside_project_tree(path, directory, cache):
@@ -851,7 +855,9 @@ Write-Host "========================================" -ForegroundColor Cyan
     }},
 '''
 
-    protected_pattern = "(?:" + "|".join(re.escape(fragment) for fragment in EXCLUDE_PATTERNS) + ")"
+    protected_fragments = [re.escape("\\".join(components)) for components in _EXCLUDE_COMPONENTS]
+    protected_fragments.extend(re.escape(prefix) + r"[^\\]*" for prefix in EXCLUDE_COMPONENT_PREFIXES)
+    protected_pattern = r"(?:^|\\)(?:" + "|".join(protected_fragments) + r")(?:\\|$)"
     project_markers_str = ",\n".join(f"        {_ps_literal(marker)}" for marker in PROJECT_MARKERS)
 
     script = script.format(

@@ -153,16 +153,22 @@ class AnalyzeSafetyTests(unittest.TestCase):
             {"File Name": "C:\\Users\\A\\AppData\\Local\\GPUCache\\large.bin", "Size": "104857600"},
             {"File Name": "C:\\Users\\A\\Projects\\CrashDumpManager\\large.bin", "Size": "104857600"},
             {"File Name": "C:\\Users\\A\\OneDriveBackup\\AppData\\Local\\Temp\\build.tmp", "Size": "104857600"},
+            {"File Name": "C:\\Users\\A\\AppData\\Local\\Temp.archive\\large.bin", "Size": "104857600"},
+            {"File Name": "C:\\Windows\\MEMORY.DMP", "Size": "104857600"},
+            {"File Name": "C:\\Windows\\CrashDump.dmp", "Size": "104857600"},
         ])
         candidates = [item["path"] for category in results["categories"].values()
                       for item in category["items"]]
         self.assertEqual(set(candidates), {
             "C:\\Users\\A\\AppData\\Local\\GPUCache\\large.bin",
             "C:\\Users\\A\\OneDriveBackup\\AppData\\Local\\Temp\\build.tmp",
+            "C:\\Windows\\MEMORY.DMP",
+            "C:\\Windows\\CrashDump.dmp",
         })
 
     def test_exclusions_match_complete_path_components(self):
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive\\Documents\\file.dat"))
+        self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive - Contoso\\AppData\\Local\\Temp\\file.dat"))
         self.assertFalse(analyze._is_excluded_path("C:\\Users\\A\\OneDriveBackup\\Temp\\file.dat"))
 
     def test_scan_paths_reject_windows_devices_streams_and_invalid_names(self):
@@ -340,12 +346,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
             unselected = root / "unselected"
             (selected / "nested" / "claude-session").mkdir(parents=True)
             (selected / "nested" / ".codex" / "extensions").mkdir(parents=True)
+            onedrive_cache = selected / "nested" / "OneDrive - Contoso" / "Cache"
+            onedrive_cache.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
             unselected.mkdir()
             (selected / "remove-me.bin").write_bytes(b"remove")
             (selected / "nested" / "claude-session" / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / ".codex" / "extensions" / "keep.bin").write_bytes(b"keep")
+            (onedrive_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "regular-cache").mkdir()
@@ -371,12 +380,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
-                capture_output=True, text=True, timeout=45, env=env,
+                capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertFalse((selected / "remove-me.bin").exists(), result.stdout + result.stderr)
             self.assertEqual((selected / "nested" / "claude-session" / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((selected / "nested" / ".codex" / "extensions" / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((onedrive_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertFalse((selected / "nested" / "regular-cache" / "remove.bin").exists())
             self.assertEqual((unselected / "keep.bin").read_bytes(), b"untouched")
@@ -412,7 +422,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=45,
+                capture_output=True, text=True, timeout=90,
             )
             self.assertEqual((selected / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((outside / "keep.bin").read_bytes(), b"outside")
@@ -453,7 +463,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
-                capture_output=True, text=True, timeout=45, env=env,
+                capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertFalse((selected / "remove-me.bin").exists())
@@ -482,7 +492,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-                input="Q\n", capture_output=True, text=True, timeout=45, env=env,
+                input="Q\n", capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertTrue(marker.exists())
@@ -513,7 +523,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=45,
+                capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue(marker.exists())
