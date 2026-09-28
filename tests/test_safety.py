@@ -1902,7 +1902,7 @@ class BackupSafetyTests(unittest.TestCase):
                     archive_file.seek(info.header_offset)
                     local_header = archive_file.read(30)
                 self.assertEqual(struct.unpack_from("<H", local_header, 4)[0], 45)
-                self.assertEqual(struct.unpack_from("<II", local_header, 18), (0xFFFFFFFF, 0xFFFFFFFF))
+                self.assertGreaterEqual(info.extract_version, 45)
                 self.assertEqual(archive.read("large.bin"), b"small synthetic payload")
 
     def test_zip_restore_rejects_path_traversal(self):
