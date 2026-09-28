@@ -837,6 +837,67 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "preserve")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_scan_csv_candidate_flows_to_reviewed_cleanup_with_mock_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with (
+            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
+            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"synthetic cache data")
+            csv_path = Path(plan_temp) / "synthetic-scan.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as export:
+                writer = csv.writer(export)
+                writer.writerow(["File Name", "Size", "Allocated"])
+                writer.writerow([str(target), str(target.stat().st_size), str(target.stat().st_size)])
+
+            with (
+                mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False),
+                mock.patch.object(analyze, "_directory_has_project_marker", return_value=False),
+                mock.patch.object(analyze.shutil, "disk_usage", side_effect=OSError),
+            ):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            candidate = results["categories"]["high"]["items"][0]
+            self.assertEqual(candidate["path"], str(target))
+
+            script_path = Path(plan_temp) / "reviewed-cleanup.ps1"
+            backup_root = Path(plan_temp) / "mock-backups"
+            backup_id = "backup_20260928_123456_123456"
+            backup_helper = Path(plan_temp) / "backup.py"
+            helper_contents = (
+                "import hashlib, json, shutil, sys\nfrom pathlib import Path\n"
+                f"backup_root = Path({str(backup_root)!r})\n"
+                f"backup_id = {backup_id!r}\n"
+                "source = Path(sys.argv[sys.argv.index('--paths') + 1])\n"
+                "payload = backup_root / backup_id / 'payload.bin'\n"
+                "if sys.argv[1] == 'create':\n"
+                "    payload.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    shutil.copy2(source, payload)\n"
+                "    print(json.dumps({'status':'completed','id':backup_id,'backup_root':str(backup_root),'items':[{}]}))\n"
+                "elif sys.argv[1] == 'verify':\n"
+                "    digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()\n"
+                "    if not payload.is_file() or digest(source) != digest(payload): sys.exit(1)\n"
+                "    print('Backup and selected source contents match.')\n"
+            )
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            backup_helper.write_text(helper_contents, encoding="utf-8")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertEqual((backup_root / backup_id / "payload.bin").read_bytes(), b"synthetic cache data")
+            self.assertIn("Backup created:", result.stdout)
+            self.assertIn("Cleanup complete!", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_nested_protected_and_project_data(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

@@ -134,4 +134,4 @@ python -m unittest discover -s tests -v
 python -m py_compile analyze.py backup.py scan.py
 ```
 
-Tests use temporary files and mocked processes. They do not run WizTree or delete real user data.
+Tests use temporary files and mocked processes. One Windows integration test sends a synthetic scan candidate through analysis and a reviewed PowerShell cleanup using a mock backup helper. Tests do not run WizTree or delete real user data.
