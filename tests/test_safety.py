@@ -2036,6 +2036,10 @@ class ScanSafetyTests(unittest.TestCase):
 
                 def fake_popen(command, **_kwargs):
                     captured["command"] = command
+                    export_arg = next(arg for arg in command if arg.startswith("/export="))
+                    export_path = Path(export_arg.split("=", 1)[1])
+                    export_path.parent.mkdir(parents=True, exist_ok=True)
+                    export_path.write_text("File Name,Size\n", encoding="utf-8")
                     return object()
 
                 try:
@@ -2060,6 +2064,10 @@ class ScanSafetyTests(unittest.TestCase):
 
             def fake_popen(command, **_kwargs):
                 captured["command"] = command
+                export_arg = next(arg for arg in command if arg.startswith("/export="))
+                export_path = Path(export_arg.split("=", 1)[1])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
                 return object()
 
             try:
@@ -2100,6 +2108,9 @@ class ScanSafetyTests(unittest.TestCase):
 
             def fake_popen(command, **kwargs):
                 captured["command"] = command
+                export_path = Path(command[2])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
                 return object()
 
             try:
@@ -2114,7 +2125,9 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertTrue(result.endswith(".csv"))
         self.assertEqual(captured["command"][:2], ["/mock/WinDirStat.exe", "/SaveTo"])
         self.assertEqual(captured["command"][-1], "D:")
-        self.assertEqual(captured["command"][2], result)
+        self.assertNotEqual(captured["command"][2], result)
+        self.assertEqual(Path(captured["command"][2]).name, Path(result).name)
+        self.assertEqual(Path(captured["command"][2]).parent.name, ".incomplete")
         self.assertNotIn("Command:", output_text)
         self.assertNotIn("python scan.py --cleanup", output_text)
         self.assertIn("applies its saved filters and scan exclusions", output_text)
@@ -2346,6 +2359,13 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
                  mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
                  mock.patch.object(scan.subprocess, "Popen") as launch:
+                def write_export(command, **_kwargs):
+                    export_path = Path(command[2])
+                    export_path.parent.mkdir(parents=True, exist_ok=True)
+                    export_path.write_text("File Name,Size\n", encoding="utf-8")
+                    return object()
+
+                launch.side_effect = write_export
                 output = scan.scan("D:", app="windirstat")
 
             self.assertEqual(output, str(data_dir / "scan_windirstat_20260928120000000000_2.csv"))
@@ -2494,6 +2514,50 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
 
+    def test_unstoppable_scanner_keeps_partial_export(self):
+        class UnstoppableProcess:
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("mock-scanner", timeout)
+
+            def kill(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data_dir = Path(temp_dir) / "data"
+            scan.DATA_DIR = str(data_dir)
+            process = UnstoppableProcess()
+
+            def fake_popen(command, **kwargs):
+                Path(command[2]).write_text("partial scan", encoding="utf-8")
+                return process
+
+            ticks = iter([0.0, 2.0])
+            output = io.StringIO()
+            try:
+                with mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                     mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                     mock.patch.object(scan.time, "monotonic", side_effect=lambda: next(ticks)), \
+                     mock.patch.object(scan.time, "sleep", return_value=None), \
+                     redirect_stdout(output):
+                    self.assertIsNone(scan.scan("D:", app="windirstat", timeout=1))
+
+                partial_exports = list((data_dir / ".incomplete").glob("*.csv"))
+                self.assertEqual(len(partial_exports), 1)
+                self.assertEqual(partial_exports[0].read_text(encoding="utf-8"), "partial scan")
+                self.assertIn("could not be confirmed stopped", output.getvalue())
+                self.assertIsNone(scan.get_latest_scan())
+                self.assertEqual(scan.cleanup_old_scans(keep_latest=1), 0)
+                self.assertTrue(partial_exports[0].exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
     def test_interrupted_or_failed_scan_stops_process_and_removes_partial_export(self):
         for failure in (KeyboardInterrupt(), RuntimeError("mock scan failure")):
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temp_dir:
@@ -2530,7 +2594,7 @@ class ScanSafetyTests(unittest.TestCase):
                          mock.patch("builtins.print"):
                         self.assertIsNone(scan.scan("D:", app="windirstat"))
                     self.assertTrue(process.terminated)
-                    self.assertEqual(list(Path(scan.DATA_DIR).glob("*.csv")), [])
+                    self.assertEqual(list(Path(scan.DATA_DIR).rglob("*.csv")), [])
                 finally:
                     scan.DATA_DIR = old_data_dir
 

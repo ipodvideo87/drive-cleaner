@@ -90,7 +90,7 @@ python backup.py verify --id backup_YYYYMMDD_HHMMSS_microseconds
 - Confirm the terminal is elevated for MFT scanning.
 - Confirm `python scan.py --latest` and `python scan.py C:` use the project folder you expect.
 - Set `WIZTREE_PATH` to the 64-bit `WizTree64.exe` if auto-detection fails.
-- Try a longer timeout for a large drive; do not delete partial results until you confirm the scan is no longer running.
+- Try a longer timeout for a large drive. If Drive Cleanr cannot confirm that the scanner stopped, its incomplete export is kept under `data/.incomplete/` and excluded from previous-scan selection and retention cleanup.
 - The scanner now waits for the WizTree process to exit. If it times out, note the final elapsed time and export size, then retry with a longer timeout.
 
 ## Developer checks

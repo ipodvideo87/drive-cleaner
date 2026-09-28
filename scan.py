@@ -215,14 +215,14 @@ def validate_scan_export(filepath):
 
 
 def _stop_scan_process(process):
-    """Terminate a started scanner, escalating to kill if it will not exit."""
+    """Stop a scanner, escalating to kill and confirming that it exited."""
     if process is None:
-        return
+        return True
     try:
         if process.poll() is not None:
-            return
+            return True
     except OSError:
-        return
+        return False
     try:
         process.terminate()
     except OSError:
@@ -237,9 +237,27 @@ def _stop_scan_process(process):
         try:
             process.wait(timeout=5)
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            return _scan_process_has_exited(process)
     except OSError:
-        pass
+        return _scan_process_has_exited(process)
+    return _scan_process_has_exited(process)
+
+
+def _scan_process_has_exited(process):
+    try:
+        return process.poll() is not None
+    except OSError:
+        return False
+
+
+def _remove_or_preserve_partial_scan(process, filepath):
+    """Remove a failed export only after confirming its scanner has stopped."""
+    if _stop_scan_process(process):
+        _remove_partial_scan_export(filepath)
+        return True
+    print("Scanner could not be confirmed stopped; preserving its incomplete export:")
+    print(filepath)
+    return False
 
 
 def _remove_partial_scan_export(filepath):
@@ -379,13 +397,24 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
             print("Automated CSV scanning requires WinDirStat 2.6.0 or newer.")
         return None
 
-    # Keep scan creation and later retention cleanup within project storage.
+    # Keep completed exports visible at the top level; unfinished scans stay
+    # isolated so the review menu and retention cleanup cannot mistake them for
+    # usable scan files.
     if _path_has_reparse_component(DATA_DIR):
         print("Error: scan storage crosses a reparse point or junction")
         return None
-    os.makedirs(DATA_DIR, exist_ok=True)
+    partial_dir = os.path.join(DATA_DIR, ".incomplete")
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(partial_dir, exist_ok=True)
+    except OSError as exc:
+        print(f"Error: could not prepare scan storage: {describe_error(exc)}")
+        return None
     if _path_has_reparse_component(DATA_DIR):
         print("Error: scan storage changed to a reparse point or junction")
+        return None
+    if _path_has_reparse_component(partial_dir):
+        print("Error: incomplete-scan storage crosses a reparse point or junction")
         return None
 
     # Generate output filename
@@ -393,23 +422,26 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     mode_label = f"wiztree_{effective_wiztree_mode}" if app == "wiztree" else "windirstat"
     output_stem = os.path.join(DATA_DIR, f"scan_{mode_label}_{timestamp}")
     output_file = f"{output_stem}.csv"
+    partial_stem = os.path.join(partial_dir, os.path.basename(output_stem))
+    partial_file = f"{partial_stem}.csv"
     collision_index = 1
-    while os.path.lexists(output_file):
+    while os.path.lexists(output_file) or os.path.lexists(partial_file):
         output_file = f"{output_stem}_{collision_index}.csv"
+        partial_file = f"{partial_stem}_{collision_index}.csv"
         collision_index += 1
 
     if app == "wiztree":
         # Admin mode enables MFT scanning. Standard mode uses normal filesystem
         # access and remains available to non-administrator users.
         admin_flag = "/admin=1" if effective_wiztree_mode == "fast" else "/admin=0"
-        cmd = [executable, drive, f'/export={output_file}', admin_flag,
+        cmd = [executable, drive, f'/export={partial_file}', admin_flag,
                '/exportfolders=1', f'/exportfiles={1 if include_files else 0}',
                '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
     else:
         # WinDirStat 2.6+ /SaveTo runs headlessly and selects CSV from the suffix.
         print("Note: WinDirStat applies its saved filters and scan exclusions.")
         print("Check them in WinDirStat if you expect a full scan.")
-        cmd = [executable, '/SaveTo', output_file, drive]
+        cmd = [executable, '/SaveTo', partial_file, drive]
 
     print(f"Starting {app_name} scan: {drive}")
 
@@ -424,31 +456,35 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
 
-        if wait_for_scan_process(process, output_file, timeout=timeout, scanner_name=app_name):
+        if wait_for_scan_process(process, partial_file, timeout=timeout, scanner_name=app_name):
+            try:
+                os.rename(partial_file, output_file)
+            except OSError as exc:
+                print(f"Scan completed, but its export could not be moved into the scan list: {describe_error(exc)}")
+                print(f"The verified export remains at: {partial_file}")
+                return None
             print("\nScan complete.")
             print(f"Results: {output_file}")
             print("Previous scans and cleanup plans were kept.")
 
             return output_file
         else:
-            # The export belongs to this failed run and is incomplete.
-            _remove_partial_scan_export(output_file)
+            _remove_or_preserve_partial_scan(process, partial_file)
             print("Scan timed out or failed")
             return None
 
     except subprocess.TimeoutExpired:
-        _stop_scan_process(process)
-        _remove_partial_scan_export(output_file)
+        _remove_or_preserve_partial_scan(process, partial_file)
         print("Process timed out")
         return None
     except KeyboardInterrupt:
-        _stop_scan_process(process)
-        _remove_partial_scan_export(output_file)
-        print("\nScan cancelled; the scanner was stopped and its partial export was removed.")
+        if _remove_or_preserve_partial_scan(process, partial_file):
+            print("\nScan cancelled; the scanner was stopped and its partial export was removed.")
+        else:
+            print("\nScan cancelled; its incomplete export was preserved because the scanner may still be running.")
         return None
     except Exception as e:
-        _stop_scan_process(process)
-        _remove_partial_scan_export(output_file)
+        _remove_or_preserve_partial_scan(process, partial_file)
         print(f"Scan error: {describe_error(e)}")
         return None
 
