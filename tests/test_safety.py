@@ -430,6 +430,36 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 str(Path(temp_dir) / "store-app-cleanup.ps1"),
             )
 
+    def test_credential_bearing_cli_profiles_are_excluded_from_candidates_and_plans(self):
+        paths = (
+            r"C:\Users\A\.aws\sso\cache\access-token.json",
+            r"C:\Users\A\.azure\cache\token.json",
+            r"C:\Users\A\.kube\cache\discovery\cluster.json",
+            r"C:\Users\A\.docker\cache\auth.json",
+            r"C:\Users\A\.config\gcloud\cache\credentials.db",
+            r"C:\Users\A\.config\gh\cache\auth.json",
+        )
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "100000000"} for path in paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        self.assertTrue(all(analyze._is_excluded_path(path) for path in paths))
+
+        item = {
+            "path": paths[0],
+            "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+            "size": 100_000_000, "size_formatted": "95.37 MB", "kind": "File",
+        }
+        categories = {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
+        categories["medium"]["items"] = [item]
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "protected path"):
+            analyze.generate_clean_script(
+                {"categories": categories},
+                str(Path(temp_dir) / "credential-profile-cleanup.ps1"),
+                priority="medium",
+            )
+
     def test_windows_case_and_separator_aware_parent_deduplication(self):
         self.assertTrue(analyze._is_under(r"C:\Temp\nested", r"c:/temp/"))
         self.assertFalse(analyze._is_under(r"C:\Temp-old\item", r"C:\Temp"))

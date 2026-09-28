@@ -109,6 +109,13 @@ EXCLUDE_PATTERNS = [
     # Credentials and application settings
     "\\.ssh\\",
     "\\.gnupg\\",
+    # Cloud, container, and source-control CLI profiles can store credentials.
+    "\\.aws\\",
+    "\\.azure\\",
+    "\\.kube\\",
+    "\\.docker\\",
+    "\\.config\\gcloud\\",
+    "\\.config\\gh\\",
 ]
 EXCLUDE_COMPONENT_PREFIXES = ("onedrive - ", "openai.codex_")
 

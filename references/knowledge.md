@@ -40,7 +40,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | `AppData\Local\Packages\<package>\` | Store app data and state; manage Store apps through Windows Settings or `winget` rather than deleting their package data |
 | `.codex`, legacy `.codex-old` profiles, `.agents`, Microsoft Store `OpenAI.Codex_*` package data, `AppData\Roaming\Codex`, and container-machine cache trees | Hold tool configuration, installed skills, extension data, app state, or container state that may be actively in use |
 | `Documents`, `Desktop`, `Pictures`, `Videos`, `Downloads`, `Tencent Files`, and `xwechat_files` | Personal files, project sources, installers, and messaging data |
-| `.ssh`, `.gnupg`, certificates, and application settings folders | Credentials and configuration |
+| `.ssh`, `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`, `.config\gcloud`, `.config\gh`, certificates, and application settings folders | Credentials and configuration |
 | Anything the user does not recognize | Ask first; leave it untouched if its purpose is still unclear |
 
 ## Tier 0: Lower-risk, recreatable data
