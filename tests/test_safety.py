@@ -625,6 +625,25 @@ class AnalyzeSafetyTests(unittest.TestCase):
         report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertIn("type changed since the scan", report)
 
+    def test_candidate_analysis_skips_reparse_paths_and_discloses_them(self):
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True):
+            results = self.analyze_rows([{
+                "File Name": r"C:\Users\A\AppData\Local\Temp\redirected-cache.bin",
+                "Size": "104857600",
+            }])
+
+        self.assertEqual(results["categories"]["high"]["items"], [])
+        self.assertEqual(results["reparse_candidate_count"], 1)
+        with mock.patch("builtins.print") as output:
+            analyze.print_report(results)
+        report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("cross a junction, symbolic link", report)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_file = Path(temp_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_file))
+            self.assertIn("cross a junction, symbolic link", candidate_file.read_text(encoding="utf-8"))
+
     def test_windirstat_without_volume_metadata_uses_labeled_current_space(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "windirstat.csv"

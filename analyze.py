@@ -12,6 +12,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+import scan
 from scan import get_latest_scan
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -458,6 +459,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         "project_candidate_count": 0,
         "unclassified_candidate_count": 0,
         "type_mismatch_count": 0,
+        "reparse_candidate_count": 0,
         "categories": {
             "high": {"name": "High priority — lower risk (review each path)", "items": [], "total_size": 0},
             "medium": {"name": "Medium priority — review carefully", "items": [], "total_size": 0},
@@ -589,7 +591,9 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                                              path_component_set, path_sequences):
                         # Type metadata is only needed for candidates; most
                         # scanner rows are ordinary files we can skip here.
-                        if not os.path.exists(path.rstrip("\\/")):
+                        if scan._path_has_reparse_component(path.rstrip("\\/")):
+                            results["reparse_candidate_count"] += 1
+                        elif not os.path.exists(path.rstrip("\\/")):
                             results["stale_candidate_count"] += 1
                         else:
                             scanner_type = 'directory' if path.endswith(('\\', '/')) else None
@@ -750,6 +754,8 @@ def print_report(results, show_all_items=False, item_limit=10):
         print(f"Skipped {results['unclassified_candidate_count']} candidate rows with no reliable file or folder type; rescan to get complete item details.")
     if results.get("type_mismatch_count", 0):
         print(f"Skipped {results['type_mismatch_count']} candidate rows whose file or folder type changed since the scan; rescan to refresh those entries.")
+    if results.get("reparse_candidate_count", 0):
+        print(f"Skipped {results['reparse_candidate_count']} candidate paths that cross a junction, symbolic link, or path with unreadable metadata.")
     print("=" * 60)
 
 
@@ -1155,6 +1161,9 @@ def write_item_list_report(results, output_path):
     lines.append(f"Generated at: {datetime.now().isoformat()}")
     lines.append(f"Source scan last modified: {_safe_scan_timestamp(results)}")
     lines.append("")
+    if results.get("reparse_candidate_count", 0):
+        lines.append(f"Skipped {results['reparse_candidate_count']} candidate paths that cross a junction, symbolic link, or path with unreadable metadata.")
+        lines.append("")
     lines.append("Tier subtotals may overlap when folders contain candidates from another tier; the overall estimate deduplicates them.")
     lines.append("")
 
