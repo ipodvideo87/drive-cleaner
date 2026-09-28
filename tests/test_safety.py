@@ -494,6 +494,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_scan_paths_reject_windows_devices_streams_and_invalid_names(self):
         for path in (
             r"C:\Temp\cache:alternate-stream", r"C:\Temp\CON.txt",
+            "C:\\Temp\\COM¹.txt", "C:\\Temp\\LPT³.log",
             r"C:\Temp\bad*name", r"C:\Temp\trailing.\cache",
             "C:\\Temp\\bad\x00name",
         ):
@@ -2837,11 +2838,15 @@ class BackupSafetyTests(unittest.TestCase):
 
     def test_zip_restore_rejects_windows_reserved_device_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            archive_path = Path(temp_dir) / "device-name.zip"
-            with zipfile.ZipFile(archive_path, "w") as archive:
-                archive.writestr("nested/CON.txt", "must not target a device")
-            with self.assertRaisesRegex(RuntimeError, "Unsafe path"):
-                backup._extract_zip_backup(str(archive_path), str(Path(temp_dir) / "restore"))
+            for index, name in enumerate(("CON.txt", "COM¹.txt", "LPT³.log")):
+                with self.subTest(name=name):
+                    archive_path = Path(temp_dir) / f"device-name-{index}.zip"
+                    with zipfile.ZipFile(archive_path, "w") as archive:
+                        archive.writestr(f"nested/{name}", "must not target a device")
+                    destination = Path(temp_dir) / f"restore-{index}"
+                    with self.assertRaisesRegex(RuntimeError, "Unsafe path"):
+                        backup._extract_zip_backup(str(archive_path), str(destination))
+                    self.assertFalse(destination.exists())
 
     def test_restore_manifest_rejects_traversal_before_restoring_anything(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2904,7 +2909,8 @@ class BackupSafetyTests(unittest.TestCase):
         for path in (
             "C:\\", r"\\server\share\file.bin", r"\??\C:\file.bin",
             r"C:\Users\..\Windows\file.bin", r"C:\Users\file.bin:stream",
-            r"C:\Users\*.bin", r"C:\Users\CON.txt", "C:\\Users\\trailing. ",
+            r"C:\Users\*.bin", r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
+            "C:\\Users\\LPT³.log", "C:\\Users\\trailing. ",
         ):
             with self.subTest(path=path):
                 self.assertFalse(backup._valid_restore_target(path))
