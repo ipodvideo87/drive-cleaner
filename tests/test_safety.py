@@ -1239,7 +1239,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             project.mkdir()
             selected = project / "build.tmp"
             selected.write_bytes(b"keep once project marker appears")
-            marker = project / ".vs"
+            marker = project / "RuntimeAdded.uproject"
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
@@ -1249,7 +1249,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (root / "backup.py").write_text(
                 "import json, os, pathlib, sys\n"
                 "if sys.argv[1] == 'verify':\n"
-                "    pathlib.Path(os.environ['CLEANR_TEST_PROJECT_MARKER']).mkdir()\n"
+                "    pathlib.Path(os.environ['CLEANR_TEST_PROJECT_MARKER']).touch()\n"
                 "    sys.exit(0)\n"
                 "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
                 "paths=sys.argv[start:end]\n"
