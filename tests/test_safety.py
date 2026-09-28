@@ -2191,6 +2191,38 @@ class BackupSafetyTests(unittest.TestCase):
         self.assertTrue(any("Directory archive backup failed" in error and "mock archive failure" in error
                             for error in result["errors"]))
 
+    def test_zip64_directory_backup_manifest_verification_and_restore_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source-data"
+            nested = source / "nested"
+            nested.mkdir(parents=True)
+            expected = bytes(range(64))
+            (nested / "payload.bin").write_bytes(expected)
+            output = io.StringIO()
+
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(zipfile, "ZIP64_LIMIT", 16), \
+                 redirect_stdout(output):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["items"][0]["format"], "zip")
+            self.assertIn("Backup complete!", output.getvalue())
+            with zipfile.ZipFile(manifest["items"][0]["backup_path"]) as archive:
+                self.assertGreaterEqual(archive.getinfo("nested/payload.bin").extract_version, 45)
+
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), \
+                 redirect_stdout(io.StringIO()):
+                self.assertTrue(backup.verify_backup(manifest["id"]))
+
+            shutil.rmtree(source)
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), \
+                 redirect_stdout(io.StringIO()):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+            self.assertEqual((nested / "payload.bin").read_bytes(), expected)
+
     def test_file_backup_is_copied_and_verified(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
