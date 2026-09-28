@@ -116,6 +116,12 @@ PROJECT_MARKERS = (
     "go.mod", "cmakelists.txt", "makefile", "setup.py", "pom.xml",
     "build.gradle", "composer.json",
 )
+WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+})
+INVALID_WINDOWS_PATH_CHARACTERS = re.compile(r'[<>:"|?*\x00-\x1f]')
 
 
 def format_size(size_bytes):
@@ -177,43 +183,61 @@ def _path_key(path):
     return ntpath.normcase(ntpath.normpath(path.replace("/", "\\")))
 
 
-def _path_components(path):
+def _path_components(path, drive_tail=None):
     """Return case-insensitive Windows path components without drive/root syntax."""
-    normalized = str(path).replace("/", "\\").casefold()
-    _drive, tail = ntpath.splitdrive(normalized)
-    return [part for part in tail.split("\\") if part]
+    if drive_tail is None:
+        normalized = str(path).replace("/", "\\").casefold()
+        _drive, drive_tail = ntpath.splitdrive(normalized)
+    else:
+        drive_tail = drive_tail.casefold()
+    return [part for part in drive_tail.split("\\") if part]
 
 
-def _contains_component_sequence(components, wanted):
-    """Match pre-split path fragments on component boundaries."""
-    if not wanted or len(wanted) > len(components):
-        return False
-    return any(components[index:index + len(wanted)] == wanted
-               for index in range(len(components) - len(wanted) + 1))
-
-
-def _matches_cleanup_pattern(components, wanted):
-    if not wanted:
-        return False
-    return _contains_component_sequence(components, wanted)
-
-
-_EXCLUDE_COMPONENTS = tuple(_path_components(pattern) for pattern in EXCLUDE_PATTERNS)
+_EXCLUDE_COMPONENTS = tuple(tuple(_path_components(pattern)) for pattern in EXCLUDE_PATTERNS)
 _CLEANABLE_COMPONENTS = {
-    priority: tuple((pattern_info, _path_components(pattern_info["pattern"]))
+    priority: tuple((pattern_info, tuple(_path_components(pattern_info["pattern"])))
                     for pattern_info in category["patterns"])
     for priority, category in CLEANABLE_PATTERNS.items()
 }
+_EXCLUDE_SINGLE_COMPONENTS = frozenset(
+    pattern[0] for pattern in _EXCLUDE_COMPONENTS if len(pattern) == 1
+)
+_EXCLUDE_SEQUENCES = {
+    length: frozenset(pattern for pattern in _EXCLUDE_COMPONENTS if len(pattern) == length)
+    for length in {len(pattern) for pattern in _EXCLUDE_COMPONENTS if len(pattern) > 1}
+}
+_COMPONENT_SEQUENCE_LENGTHS = frozenset(
+    {len(pattern) for pattern in _EXCLUDE_COMPONENTS if len(pattern) > 1}
+    | {len(pattern) for patterns in _CLEANABLE_COMPONENTS.values()
+       for _, pattern in patterns if len(pattern) > 1}
+)
 
 
-def _is_excluded_path(path, components=None):
+def _path_match_index(components):
+    """Build reusable set indexes for all exact and adjacent path rules."""
+    component_set = set(components)
+    sequences = {
+        length: {
+            tuple(components[index:index + length])
+            for index in range(len(components) - length + 1)
+        }
+        for length in _COMPONENT_SEQUENCE_LENGTHS if len(components) >= length
+    }
+    return component_set, sequences
+
+
+def _is_excluded_path(path, components=None, component_set=None, sequences=None):
     """Return whether a path matches a protected-path fragment."""
     components = components if components is not None else _path_components(path)
-    return (
-        any(_contains_component_sequence(components, pattern) for pattern in _EXCLUDE_COMPONENTS)
-        or any(component.startswith(prefix)
+    if component_set is None or sequences is None:
+        component_set, sequences = _path_match_index(components)
+    if not _EXCLUDE_SINGLE_COMPONENTS.isdisjoint(component_set):
+        return True
+    if any(not excluded.isdisjoint(sequences.get(length, ()))
+           for length, excluded in _EXCLUDE_SEQUENCES.items()):
+        return True
+    return any(component.startswith(prefix)
                for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
-    )
 
 
 def _inside_project_tree(path, directory, cache):
@@ -246,27 +270,28 @@ def _inside_project_tree(path, directory, cache):
     return project_found
 
 
-def _is_local_drive_path(path):
+def _is_local_drive_path(path, drive=None, drive_tail=None):
+    """Accept only normalized, non-root local Windows paths from scan exports."""
     if not isinstance(path, str) or not path:
         return False
     normalized = path.replace("/", "\\")
-    drive, tail = ntpath.splitdrive(normalized)
+    if drive is None or drive_tail is None:
+        drive, drive_tail = ntpath.splitdrive(normalized)
     if (len(drive) != 2 or not drive[0].isalpha() or drive[1] != ":" or
-            not tail.startswith("\\") or normalized.startswith("\\\\") or
-            ntpath.normpath(normalized) != normalized.rstrip("\\") or
-            ntpath.normpath(normalized) == drive + "\\"):
+            not drive_tail.startswith("\\") or drive_tail.startswith("\\\\") or
+            normalized.startswith("\\\\")):
         return False
-    parts = [part for part in tail.strip("\\").split("\\") if part]
-    reserved = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
-    reserved.update(f"COM{index}" for index in range(1, 10))
-    reserved.update(f"LPT{index}" for index in range(1, 10))
-    return not any(
-        part in {".", ".."} or part.endswith((".", " ")) or
-        part.split(".")[0].rstrip(" .").upper() in reserved or
-        any(character in part for character in '<>:"|?*') or
-        any(ord(character) < 32 for character in part)
-        for part in parts
-    )
+    stripped_tail = drive_tail.strip("\\")
+    if not stripped_tail:
+        return False
+    parts = stripped_tail.split("\\")
+    if INVALID_WINDOWS_PATH_CHARACTERS.search(drive_tail):
+        return False
+    for part in parts:
+        if (not part or part in {".", ".."} or part.endswith((".", " ")) or
+                part.split(".")[0].rstrip(" .").upper() in WINDOWS_RESERVED_NAMES):
+            return False
+    return True
 
 
 def _ps_literal(value):
@@ -390,9 +415,10 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                 # quoted rows without allocating a dictionary for every item.
                 path = cell(row, path_column) or ''
                 logical_size = int(cell(row, size_column) or 0)
-                drive, drive_tail = ntpath.splitdrive(path.replace("/", "\\"))
+                normalized_path = path.replace("/", "\\")
+                drive, drive_tail = ntpath.splitdrive(normalized_path)
                 if (len(drive) == 2 and drive[0].isalpha() and drive[1] == ":" and
-                        drive_tail.startswith("\\") and not path.startswith(("\\\\", "//"))):
+                        drive_tail.startswith("\\") and not normalized_path.startswith("\\\\")):
                     source_drives.add(drive.upper())
                 allocated_raw = next((cell(row, name) for name in allocated_columns
                                       if cell(row, name) not in (None, '')), None)
@@ -418,7 +444,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                 # Imported CSVs are data, not authority. Only accept ordinary
                 # absolute drive paths and reject roots, traversal, UNC, and
                 # device paths before any item can become executable.
-                if not _is_local_drive_path(path):
+                if not _is_local_drive_path(path, drive, drive_tail):
                     continue
 
                 # Skip small entries and excluded paths.
@@ -426,14 +452,18 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                     continue
 
                 # Apply the safety exclusion list.
-                path_components = _path_components(path)
-                if _is_excluded_path(path, path_components):
+                path_components = _path_components(path, drive_tail)
+                path_component_set, path_sequences = _path_match_index(path_components)
+                if _is_excluded_path(path, path_components, path_component_set, path_sequences):
                     continue
 
                 # Match the path against cleanup categories.
                 for priority, category in CLEANABLE_PATTERNS.items():
                     for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
-                        if _matches_cleanup_pattern(path_components, pattern_components):
+                        if ((len(pattern_components) == 1 and
+                             pattern_components[0] in path_component_set) or
+                                (len(pattern_components) > 1 and
+                                 pattern_components in path_sequences.get(len(pattern_components), ()))):
                             # Type metadata is only needed for candidates; most
                             # scanner rows are ordinary files we can skip here.
                             row_is_directory = path.endswith(('\\', '/')) or _is_directory_row({
