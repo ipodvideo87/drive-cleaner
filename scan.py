@@ -176,8 +176,8 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
 
 def validate_scan_export(filepath):
     """Check the first CSV header without loading a potentially huge export."""
-    path_headers = {"文件名称", "filename", "name"}
-    size_headers = {"大小", "size", "logicalsize"}
+    path_headers = {"\u6587\u4ef6\u540d\u79f0", "filename", "name"}
+    size_headers = {"\u5927\u5c0f", "size", "logicalsize"}
 
     def is_header(row):
         keys = {str(value or "").strip().casefold().replace(" ", "") for value in row}

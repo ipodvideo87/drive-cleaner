@@ -451,8 +451,8 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
     def has_required_headers(line):
         fields = next(csv.reader([line]), [])
         keys = {str(value or "").strip().casefold().replace(" ", "") for value in fields}
-        return (bool(keys & {"文件名称", "filename", "name"}) and
-                bool(keys & {"大小", "size", "logicalsize"}))
+        return (bool(keys & {"\u6587\u4ef6\u540d\u79f0", "filename", "name"}) and
+                bool(keys & {"\u5927\u5c0f", "size", "logicalsize"}))
 
     with open(csv_path, 'r', encoding='utf-8-sig') as f:
         # GUI WizTree exports may start with a generated note line. Both scanner
@@ -481,14 +481,14 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         def column(*names):
             return next((header_keys[name] for name in names if name in header_keys), None)
 
-        path_column = column('文件名称', 'filename', 'name')
-        size_column = column('大小', 'size', 'logicalsize')
+        path_column = column('\u6587\u4ef6\u540d\u79f0', 'filename', 'name')
+        size_column = column('\u5927\u5c0f', 'size', 'logicalsize')
         allocated_columns = [column(name) for name in (
-            'allocated', '已分配', '分配大小', '占用空间', 'physicalsize'
+            'allocated', '\u5df2\u5206\u914d', '\u5206\u914d\u5927\u5c0f', '\u5360\u7528\u7a7a\u95f4', 'physicalsize'
         )]
         allocated_columns = [name for name in allocated_columns if name is not None]
         wiztree_allocated_columns = [column(name) for name in (
-            'allocated', '已分配', '分配大小', '占用空间'
+            'allocated', '\u5df2\u5206\u914d', '\u5206\u914d\u5927\u5c0f', '\u5360\u7528\u7a7a\u95f4'
         )]
         wiztree_allocated_columns = [name for name in wiztree_allocated_columns if name is not None]
         attributes_column = column('attributes')
@@ -762,9 +762,9 @@ def generate_clean_script(results, output_path, priority="high"):
         if not _matches_cleanup_rule(path, allowed_priorities, item["name"]):
             raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
         kind = item.get("kind", classify_path(path))
-        if not isinstance(kind, str) or kind.lower() not in ("file", "directory", "folder", "目录"):
+        if not isinstance(kind, str) or kind.lower() not in ("file", "directory", "folder", "\u76ee\u5f55"):
             raise ValueError("Cleanup plan contains an invalid target type")
-        is_directory = kind.lower() in ("directory", "folder", "目录")
+        is_directory = kind.lower() in ("directory", "folder", "\u76ee\u5f55")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
 

@@ -613,7 +613,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("Current capacity", output_text)
         self.assertIn("Volume space was checked now", output_text)
 
-    def test_chinese_wiztree_headers_remain_supported_without_non_english_ui(self):
+    def test_localized_wiztree_headers_remain_supported_with_english_ui(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "localized.csv"
             path_header = "\u6587\u4ef6\u540d\u79f0"
