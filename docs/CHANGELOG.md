@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Require scan exports to contain a stable, readable CSV path and size header before reporting success; accept WizTree's optional generated-note line.
 - Preserve files already present at restore destinations unless overwrite is explicitly approved; allow safe directory merges of missing files, report conflicts, and preflight archive parent paths before writing.
 - Reject backup sources reached through reparse points, backup storage roots that cross junctions, and backup ID collisions that could reuse an existing directory.
 - Compare each large ZIP backup's streamed file hashes with a source fingerprint so changing files cannot pass verification as a complete backup.

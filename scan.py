@@ -8,6 +8,7 @@ import time
 import shutil
 import subprocess
 import re
+import csv
 from datetime import datetime
 from pathlib import Path
 
@@ -138,6 +139,30 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
     return False
 
 
+def validate_scan_export(filepath):
+    """Check the first CSV header without loading a potentially huge export."""
+    path_headers = {"文件名称", "filename", "name"}
+    size_headers = {"大小", "size", "logicalsize"}
+
+    def is_header(row):
+        keys = {str(value or "").strip().casefold().replace(" ", "") for value in row}
+        return bool(keys & path_headers) and bool(keys & size_headers)
+
+    try:
+        with open(filepath, "r", encoding="utf-8-sig", newline="") as source:
+            reader = csv.reader(source, strict=True)
+            first_row = next(reader, [])
+            if is_header(first_row):
+                return True, None
+            # GUI-generated WizTree exports can have one informational line
+            # before the actual column headings.
+            if is_header(next(reader, [])):
+                return True, None
+            return False, "CSV is missing a recognized path and size header"
+    except (OSError, UnicodeError, csv.Error) as exc:
+        return False, f"CSV could not be read: {exc}"
+
+
 def _stop_scan_process(process):
     """Terminate a started scanner, escalating to kill if it will not exit."""
     if process is None:
@@ -196,7 +221,13 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
         print(f"\nScanner exited with code {return_code}")
         return False
     print("\nScanner finished; checking the export file...")
-    return wait_for_file(filepath, timeout=30, stable_time=2)
+    if not wait_for_file(filepath, timeout=30, stable_time=2):
+        return False
+    valid, error = validate_scan_export(filepath)
+    if not valid:
+        print(f"\nScan export is invalid: {error}")
+        return False
+    return True
 
 
 def _normalize_scan_target(target):
