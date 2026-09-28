@@ -337,8 +337,14 @@ def get_backup_root(exclude_drives=None, required_space_bytes=0) -> str:
     backup_root = find_backup_drive(exclude_drives, required_space_bytes)
     if not backup_root:
         raise RuntimeError("No suitable backup drive found (requires a different drive with at least 5 GB free)")
+    if _path_has_reparse_component(backup_root):
+        raise RuntimeError("Refusing to store backups through a reparse point or junction")
+    if os.path.lexists(backup_root) and not os.path.isdir(backup_root):
+        raise RuntimeError("Backup destination exists but is not a directory")
 
     os.makedirs(backup_root, exist_ok=True)
+    if _path_has_reparse_component(backup_root):
+        raise RuntimeError("Backup destination changed to a reparse point or junction")
     return backup_root
 
 
@@ -405,7 +411,9 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
     backup_id = f"backup_{timestamp}"
     backup_dir = os.path.join(backup_root, backup_id)
 
-    os.makedirs(backup_dir, exist_ok=True)
+    # Never merge a new run into or truncate an existing backup if the
+    # timestamp collides or the destination was pre-created unexpectedly.
+    os.makedirs(backup_dir, exist_ok=False)
 
     manifest = {
         "id": backup_id,
@@ -429,7 +437,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             manifest["errors"].append(f"Path does not exist: {path}")
             continue
 
-        if _is_reparse_point(path):
+        if _path_has_reparse_component(path):
             manifest["errors"].append(f"Refusing to back up a reparse point: {path}")
             continue
 

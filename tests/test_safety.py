@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1054,6 +1055,44 @@ class BackupSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsafe backup path"):
                     backup.create_backup([unsafe_path])
                 get_root.assert_not_called()
+
+    def test_backup_source_beneath_a_reparse_parent_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "linked-parent" / "cache.bin"
+            source.parent.mkdir()
+            source.write_bytes(b"keep")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_path_has_reparse_component", return_value=True), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10):
+                result = backup.create_backup([str(source)])
+            self.assertEqual(result["status"], "partial")
+            self.assertEqual(result["items"], [])
+            self.assertTrue(any("reparse point" in error for error in result["errors"]))
+            self.assertEqual(source.read_bytes(), b"keep")
+
+    def test_backup_root_refuses_an_existing_reparse_path_before_writing(self):
+        with mock.patch.object(backup, "find_backup_drive", return_value=r"D:\CleanBackups"), \
+             mock.patch.object(backup, "_path_has_reparse_component", return_value=True), \
+             mock.patch.object(backup.os, "makedirs") as make_directory:
+            with self.assertRaisesRegex(RuntimeError, "reparse point or junction"):
+                backup.get_backup_root()
+        make_directory.assert_not_called()
+
+    def test_backup_id_collision_never_reuses_an_existing_backup_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache.bin"
+            source.write_bytes(b"new source")
+            fixed_now = datetime(2026, 9, 27, 12, 34, 56, 123456)
+            existing = Path(temp_dir) / "backup_20260927_123456_123456"
+            existing.mkdir()
+            marker = existing / "preserve.txt"
+            marker.write_text("existing backup", encoding="utf-8")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = fixed_now
+                with self.assertRaises(FileExistsError):
+                    backup.create_backup([str(source)])
+            self.assertEqual(marker.read_text(encoding="utf-8"), "existing backup")
 
     def test_missing_path_makes_backup_partial_not_successful(self):
         with tempfile.TemporaryDirectory() as temp_dir:
