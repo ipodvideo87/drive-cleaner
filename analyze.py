@@ -126,7 +126,8 @@ EXCLUDE_COMPONENT_PREFIXES = ("onedrive - ", "openai.codex_")
 
 ANALYSIS_PROGRESS_INTERVAL = 100_000
 PROJECT_MARKERS = (
-    ".drive-cleanr-protect", ".git", ".hg", ".svn", "pyproject.toml", "package.json", "cargo.toml",
+    ".drive-cleanr-protect", ".git", ".gitignore", ".gitattributes", ".editorconfig",
+    ".hg", ".svn", ".idea", ".vs", "pyproject.toml", "package.json", "cargo.toml",
     "go.mod", "go.work", "cmakelists.txt", "cmakepresets.json", "makefile", "meson.build",
     "build.ninja", "setup.py", "setup.cfg", "requirements.txt", "pipfile", "pipfile.lock",
     "poetry.lock", "uv.lock", "tox.ini", "pytest.ini", "environment.yml", "environment.yaml",
@@ -141,6 +142,7 @@ PROJECT_MARKER_SUFFIXES = (
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
 _PROFILE_ROOT_IGNORED_MARKERS = frozenset({
+    ".editorconfig",
     "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock",
     "bun.lockb", "pnpm-lock.yaml", "yarn.lock",
 })
@@ -928,7 +930,7 @@ $projectMarkers = @(
 {project_markers}
 )
 $projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
-$profileRootIgnoredMarkers = @('package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
+$profileRootIgnoredMarkers = @('.editorconfig', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
 
 function Test-DirectoryHasProjectMarker([string]$Directory) {{
     try {{

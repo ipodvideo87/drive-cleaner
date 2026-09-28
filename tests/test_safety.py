@@ -161,6 +161,24 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["project_candidate_count"], len(markers))
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_git_and_ide_workspace_markers_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (".gitignore", ".gitattributes", ".editorconfig", ".idea", ".vs")
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"project-{index}"
+                cache = project / "cache"
+                cache.mkdir(parents=True)
+                marker_path = project / marker
+                if marker in {".idea", ".vs"}:
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+            results = self.analyze_rows(rows)
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
     def test_project_marker_at_user_profile_root_is_checked_before_walking_stops(self):
         profile = r"C:\Users\Jordan"
         cache_path = profile + r"\AppData\Local\Temp\pip\cache"
@@ -170,7 +188,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_node_tool_metadata_at_profile_root_does_not_hide_other_cleanup_locations(self):
         entries = []
-        for name in ("package.json", "package-lock.json", "bun.lock"):
+        for name in ("package.json", "package-lock.json", "bun.lock", ".editorconfig"):
             entry = mock.Mock()
             entry.name = name
             entry.is_file.return_value = True

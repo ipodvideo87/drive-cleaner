@@ -38,6 +38,8 @@ When a path matches both a broad cache rule and a recognized package-manager rul
 
 Crash-dump rules only apply under the drive's `Windows` directory, not to user archives or project folders with similar names.
 
+Cache-like paths inside recognized projects are omitted from cleanup candidates. Project markers include common manifests, Git files such as `.gitignore`, IDE workspace folders such as `.idea` and `.vs`, and Visual Studio project/solution files. A root `.editorconfig` under the user profile is treated as shared editor settings; it does not mark the entire profile as a project. For a project with no recognized marker, add an empty `.drive-cleanr-protect` file at its root.
+
 ## 3. Generate and inspect a cleanup plan
 
 ```powershell
