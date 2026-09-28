@@ -242,6 +242,16 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
                 raise RuntimeError(f"Unsafe path inside backup archive: {info.filename}")
             if _path_has_reparse_component(target):
                 raise RuntimeError(f"Refusing to restore through a reparse point: {info.filename}")
+            parent = os.path.dirname(target)
+            while parent:
+                if os.path.lexists(parent) and not os.path.isdir(parent):
+                    raise RuntimeError(f"Refusing to restore through a non-directory path component: {parent}")
+                if os.path.normcase(parent) == os.path.normcase(destination):
+                    break
+                next_parent = os.path.dirname(parent)
+                if next_parent == parent:
+                    break
+                parent = next_parent
             if os.path.lexists(target):
                 if info.is_dir() and not os.path.isdir(target):
                     raise RuntimeError(f"Refusing to replace a file with a directory: {info.filename}")

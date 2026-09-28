@@ -1301,6 +1301,22 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True), [])
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "saved data")
 
+    def test_zip_restore_preflights_non_directory_parent_conflicts_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "restore"
+            destination.mkdir()
+            (destination / "blocker").write_text("preserve me", encoding="utf-8")
+            archive_path = root / "nested-without-directory-entry.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("first.txt", "must not be partially restored")
+                archive.writestr("blocker/nested.txt", "cannot restore here")
+
+            with self.assertRaisesRegex(RuntimeError, "non-directory path component"):
+                backup._extract_zip_backup(str(archive_path), str(destination))
+            self.assertFalse((destination / "first.txt").exists())
+            self.assertEqual((destination / "blocker").read_text(encoding="utf-8"), "preserve me")
+
     def test_zip_restore_rejects_windows_alternate_stream_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "ads.zip"
