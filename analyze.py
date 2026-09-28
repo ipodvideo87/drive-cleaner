@@ -27,7 +27,6 @@ CLEANABLE_PATTERNS = {
     "high": {
         "name": "High Priority (Lower Risk)",
         "patterns": [
-            {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)", "safe": True},
             {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
             {"pattern": "\\.cache\\puppeteer", "name": "Puppeteer cache", "safe": True},
             {"pattern": "\\electron\\cache", "name": "Electron cache", "safe": True},
@@ -47,6 +46,7 @@ CLEANABLE_PATTERNS = {
             {"pattern": "minidump.dmp", "root": "windows", "root_child": True, "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
             {"pattern": "memory.dmp", "root": "windows", "root_child": True, "name": "Windows memory dump (may contain memory data; keep if troubleshooting)", "safe": False},
             {"pattern": "minidump", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (close Chrome first; it may be downloaded again; consider disabling optimization-guide-on-device-model in chrome://flags)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\logs\\", "name": "Logs data (review contents; may include user or diagnostic history)", "safe": False},

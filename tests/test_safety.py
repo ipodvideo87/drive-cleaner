@@ -476,17 +476,32 @@ class AnalyzeSafetyTests(unittest.TestCase):
             {"File Name": r"D:\Archive\ota-artifacts" + "\\", "Size": "104857600"},
         ])
         high = results["categories"]["high"]["items"]
+        medium = results["categories"]["medium"]["items"]
         low = results["categories"]["low"]["items"]
-        self.assertEqual([item["path"] for item in high], [
+        self.assertEqual(high, [])
+        chrome_model = [item for item in medium if "OptGuideOnDeviceModel" in item["path"]]
+        self.assertEqual([item["path"] for item in chrome_model], [
             r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel" + "\\",
         ])
-        self.assertIn("Chrome on-device AI model", high[0]["name"])
+        self.assertIn("Chrome on-device AI model", chrome_model[0]["name"])
+        self.assertIn("may be downloaded again", chrome_model[0]["name"])
+        self.assertFalse(chrome_model[0]["safe"])
         self.assertEqual({item["path"] for item in low}, {
             r"C:\ProgramData\NVIDIA Corporation\NVIDIA App\UpdateFramework\ota-artifacts" + "\\",
             r"C:\ProgramData\NVIDIA Corporation\NvApp-UpdateFramework\ota-artifacts" + "\\",
         })
         self.assertTrue(all(not item["safe"] for item in low))
         self.assertTrue(all("driver-update files" in item["name"] for item in low))
+
+    def test_generated_plan_rejects_old_lower_risk_chrome_model_label(self):
+        results = {"categories": {"high": {"name": "High", "items": [{
+            "path": r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel",
+            "name": "Chrome on-device AI model (after deleting, consider disabling optimization-guide-on-device-model in chrome://flags to prevent re-download)",
+            "size": 100, "size_formatted": "100 B", "kind": "Directory",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"))
 
     def test_indexeddb_candidates_require_a_browser_profile_parent(self):
         results = self.analyze_rows([

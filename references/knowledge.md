@@ -56,7 +56,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 | Item | Typical size | Side effects and notes |
 |---|---:|---|
-| Chrome on-device AI model at `...\Chrome\User Data\OptGuideOnDeviceModel` | About 4 GB | Close Chrome first. Consider disabling `optimization-guide-on-device-model` in `chrome://flags` to avoid a re-download. |
+| Chrome on-device AI model at `...\Chrome\User Data\OptGuideOnDeviceModel` | About 4 GB | Drive Cleanr places this in its caution tier. Close Chrome first; Chrome may download the model again. Consider disabling `optimization-guide-on-device-model` in `chrome://flags` if you do not want it downloaded again. |
 | Windows crash dumps under `C:\Windows\LiveKernelReports`, `C:\Windows\CrashDumps`, `C:\Windows\Minidump`, or `C:\Windows\MEMORY.DMP` | Varies; can be several GB | Keep while troubleshooting or waiting on support. Dump types can contain memory data; review privacy before copying or sharing. Only these Windows-root locations match automatically, and each target still needs review. |
 | DISM component cleanup | 2–4 GB | Use `DISM /Online /Cleanup-Image /StartComponentCleanup`. Never add `/ResetBase`; that removes the ability to uninstall updates. WinSxS and System32 share hard links, so apparent size can exceed recovered space. |
 | VS Code caches at `%APPDATA%\Code\{CachedExtensionVSIXs,CachedData,Cache,Crashpad}` | 1–2 GB | Close VS Code first. Preserve `WebStorage` and `User`, which hold extension state and settings. |
