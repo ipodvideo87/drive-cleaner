@@ -848,17 +848,46 @@ class AnalyzeSafetyTests(unittest.TestCase):
         ):
             target = Path(target_temp) / "candidate.tmp"
             target.write_bytes(b"synthetic cache data")
-            csv_path = Path(plan_temp) / "synthetic-scan.csv"
-            with csv_path.open("w", newline="", encoding="utf-8") as export:
-                writer = csv.writer(export)
-                writer.writerow(["File Name", "Size", "Allocated"])
-                writer.writerow([str(target), str(target.stat().st_size), str(target.stat().st_size)])
+            scan_data = Path(plan_temp) / "scan-data"
+            scan_command = []
+
+            class CompletedMockScanner:
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            def write_mock_scan_export(command, **_kwargs):
+                scan_command.extend(command)
+                export_arg = next(arg for arg in command if arg.startswith("/export="))
+                csv_path = Path(export_arg.split("=", 1)[1])
+                with csv_path.open("w", newline="", encoding="utf-8") as export:
+                    writer = csv.writer(export)
+                    writer.writerow(["File Name", "Size", "Allocated"])
+                    writer.writerow([str(target), str(target.stat().st_size), str(target.stat().st_size)])
+                return CompletedMockScanner()
 
             with (
-                mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False),
+                mock.patch.object(scan, "DATA_DIR", str(scan_data)),
+                mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"),
+                mock.patch.object(scan, "check_admin", return_value=False),
+                mock.patch.object(scan, "_path_has_reparse_component", return_value=False),
+                mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_scan_export),
+                mock.patch.object(scan.time, "sleep", return_value=None),
                 mock.patch.object(analyze, "_directory_has_project_marker", return_value=False),
                 mock.patch.object(analyze.shutil, "disk_usage", side_effect=OSError),
             ):
+                csv_path = scan.scan(
+                    drive=target_temp,
+                    app="wiztree",
+                    wiztree_mode="standard",
+                    timeout=30,
+                )
+                self.assertTrue(csv_path)
+                self.assertIn("mock-WizTree64.exe", scan_command)
+                self.assertIn(target_temp, scan_command)
+                self.assertIn("/exportfiles=1", scan_command)
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
             candidate = results["categories"]["high"]["items"][0]
             self.assertEqual(candidate["path"], str(target))
