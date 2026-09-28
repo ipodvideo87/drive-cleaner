@@ -32,6 +32,8 @@ High, medium, and low are review tiers, not a guarantee of safety. Read [the kno
 
 Drive Cleanr uses WinDirStat's item type and count fields to distinguish files from folders. If an imported WinDirStat row lacks reliable type data, it is skipped and counted in the report instead of being guessed as a file.
 
+When a path matches both a broad cache rule and a recognized package-manager rule, Drive Cleanr uses the more specific package-manager category and caution tier.
+
 ## 3. Generate and inspect a cleanup plan
 
 ```powershell

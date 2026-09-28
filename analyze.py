@@ -216,6 +216,12 @@ _CLEANABLE_COMPONENTS = {
                     for pattern_info in category["patterns"])
     for priority, category in CLEANABLE_PATTERNS.items()
 }
+_CLEANABLE_RULES = tuple(sorted(
+    ((priority, pattern_info, pattern_components)
+     for priority, patterns in _CLEANABLE_COMPONENTS.items()
+     for pattern_info, pattern_components in patterns),
+    key=lambda rule: len(rule[2]), reverse=True,
+))
 _EXCLUDE_SINGLE_COMPONENTS = frozenset(
     pattern[0] for pattern in _EXCLUDE_COMPONENTS if len(pattern) == 1
 )
@@ -520,61 +526,57 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                     continue
 
                 # Match the path against cleanup categories.
-                for priority, category in CLEANABLE_PATTERNS.items():
-                    for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
-                        if ((len(pattern_components) == 1 and
-                             pattern_components[0] in path_component_set) or
-                                (len(pattern_components) > 1 and
-                                 pattern_components in path_sequences.get(len(pattern_components), ()))):
-                            # Type metadata is only needed for candidates; most
-                            # scanner rows are ordinary files we can skip here.
-                            if not os.path.exists(path.rstrip("\\/")):
-                                results["stale_candidate_count"] += 1
+                for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+                    if ((len(pattern_components) == 1 and
+                         pattern_components[0] in path_component_set) or
+                            (len(pattern_components) > 1 and
+                             pattern_components in path_sequences.get(len(pattern_components), ()))):
+                        # Type metadata is only needed for candidates; most
+                        # scanner rows are ordinary files we can skip here.
+                        if not os.path.exists(path.rstrip("\\/")):
+                            results["stale_candidate_count"] += 1
+                        else:
+                            row_type = 'directory' if path.endswith(('\\', '/')) else None
+                            if row_type is None and is_windirstat_export:
+                                row_type = _is_directory_row({
+                                    'attributes': cell(row, attributes_column),
+                                    'windirstatattributes': cell(row, windirstat_attributes_column),
+                                    'files': cell(row, files_column),
+                                    'folders': cell(row, folders_column),
+                                })
+                            elif row_type is None:
+                                # WizTree represents directory rows with a trailing separator.
+                                row_type = 'file'
+
+                            if row_type is None:
+                                results['unclassified_candidate_count'] += 1
                             else:
-                                row_type = 'directory' if path.endswith(('\\', '/')) else None
-                                if row_type is None and is_windirstat_export:
-                                    row_type = _is_directory_row({
-                                        'attributes': cell(row, attributes_column),
-                                        'windirstatattributes': cell(row, windirstat_attributes_column),
-                                        'files': cell(row, files_column),
-                                        'folders': cell(row, folders_column),
-                                    })
-                                elif row_type is None:
-                                    # WizTree represents directory rows with a trailing separator.
-                                    row_type = 'file'
-
-                                if row_type is None:
-                                    results['unclassified_candidate_count'] += 1
+                                row_is_directory = row_type == 'directory'
+                                if row_is_directory and not path.endswith(('\\', '/')):
+                                    path += '\\'
+                                if _inside_project_tree(path, row_is_directory, project_path_cache):
+                                    results["project_candidate_count"] += 1
                                 else:
-                                    row_is_directory = row_type == 'directory'
-                                    if row_is_directory and not path.endswith(('\\', '/')):
-                                        path += '\\'
-                                    if _inside_project_tree(path, row_is_directory, project_path_cache):
-                                        results["project_candidate_count"] += 1
-                                    else:
-                                        # Avoid double-counting an entry under a selected parent.
-                                        existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
-                                        is_subdir = any(_is_under(path, p) for p in existing_paths)
+                                    # Avoid double-counting an entry under a selected parent.
+                                    existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
+                                    is_subdir = any(_is_under(path, p) for p in existing_paths)
 
-                                        if not is_subdir:
-                                            # Replace selected children with this outer directory.
-                                            results["categories"][priority]["items"] = [
-                                                item for item in results["categories"][priority]["items"]
-                                                if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
-                                            ]
+                                    if not is_subdir:
+                                        # Replace selected children with this outer directory.
+                                        results["categories"][priority]["items"] = [
+                                            item for item in results["categories"][priority]["items"]
+                                            if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
+                                        ]
 
-                                            results["categories"][priority]["items"].append({
-                                                "path": path,
-                                                "size": size,
-                                                "size_formatted": format_size(size),
-                                                "name": pattern_info["name"],
-                                                "safe": pattern_info["safe"],
-                                                "kind": classify_path(path),
-                                            })
-                            break
-                    else:
-                        continue
-                    break
+                                        results["categories"][priority]["items"].append({
+                                            "path": path,
+                                            "size": size,
+                                            "size_formatted": format_size(size),
+                                            "name": pattern_info["name"],
+                                            "safe": pattern_info["safe"],
+                                            "kind": classify_path(path),
+                                        })
+                        break
             except (ValueError, KeyError):
                 continue
 

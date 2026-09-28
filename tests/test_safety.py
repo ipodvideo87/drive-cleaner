@@ -204,6 +204,25 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_specific_package_cache_rules_beat_generic_cache_rules(self):
+        results = self.analyze_rows([
+            {"File Name": r"C:\Users\A\.gradle\caches" + "\\", "Size": "100000000"},
+            {"File Name": r"C:\Users\A\.cargo\registry\cache\download\package.crate", "Size": "90000000"},
+            {"File Name": r"C:\Users\A\AppData\Local\OtherApp\caches\state.bin", "Size": "80000000"},
+        ])
+        high = results["categories"]["high"]["items"]
+        medium = results["categories"]["medium"]["items"]
+        low = results["categories"]["low"]["items"]
+        self.assertFalse(high)
+        self.assertEqual([item["path"] for item in medium], [
+            r"C:\Users\A\AppData\Local\OtherApp\caches\state.bin",
+        ])
+        self.assertEqual({item["path"] for item in low}, {
+            r"C:\Users\A\.gradle\caches" + "\\",
+            r"C:\Users\A\.cargo\registry\cache\download\package.crate",
+        })
+        self.assertEqual({item["name"] for item in low}, {"Gradle cache", "Cargo cache"})
+
     def test_exclusions_match_complete_path_components(self):
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive\\Documents\\file.dat"))
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive - Contoso\\AppData\\Local\\Temp\\file.dat"))
