@@ -2127,6 +2127,40 @@ class ScanSafetyTests(unittest.TestCase):
 
             self.assertTrue(scan.wait_for_scan_process(QuietProcess(), str(export_path), timeout=10))
 
+    def test_transient_export_stat_error_does_not_abort_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+
+            class FinishingProcess:
+                calls = 0
+
+                def poll(self):
+                    self.calls += 1
+                    return None if self.calls == 1 else 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            original_getsize = scan.os.path.getsize
+            stat_calls = []
+
+            def fail_once(path):
+                if not stat_calls:
+                    stat_calls.append(path)
+                    raise PermissionError("temporary sharing violation")
+                return original_getsize(path)
+
+            output = io.StringIO()
+            with mock.patch.object(scan.os.path, "getsize", side_effect=fail_once), \
+                 mock.patch.object(scan.time, "sleep", return_value=None), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_scan_process(
+                    FinishingProcess(), str(export_path), timeout=10
+                ))
+            self.assertIn("export size temporarily unavailable", output.getvalue())
+            self.assertIn("Scan complete", output.getvalue())
+
     def test_wait_for_file_does_not_swallow_unexpected_errors_or_interrupts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "scan.csv"

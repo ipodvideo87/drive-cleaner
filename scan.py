@@ -265,8 +265,12 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
             return False
 
         if elapsed - last_report >= 5:
-            size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
-            print(f"\rScanning... {elapsed}s, exported {size / 1024 / 1024:.1f} MB", end="", flush=True)
+            try:
+                size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
+            except OSError:
+                print(f"\rScanning... {elapsed}s, export size temporarily unavailable", end="", flush=True)
+            else:
+                print(f"\rScanning... {elapsed}s, exported {size / 1024 / 1024:.1f} MB", end="", flush=True)
             last_report = elapsed
         time.sleep(1)
 
