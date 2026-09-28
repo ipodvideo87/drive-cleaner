@@ -1220,9 +1220,10 @@ foreach ($target in $cleanTargets) {{
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
             }} else {{
-                # Get-ChildItem does not include the selected root itself. Remove
-                # it only after every child was removed and no protected data remains.
-                Remove-Item -LiteralPath $target.Path -Force -EA Stop
+                # Delete only an empty root. A new child may have appeared after
+                # the earlier enumeration; recursive removal here could erase
+                # data that was never included in the verified backup.
+                [System.IO.Directory]::Delete($target.Path, $false)
             }}
         }} else {{
             $before = $item.Length
