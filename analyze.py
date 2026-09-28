@@ -1028,6 +1028,27 @@ foreach ($target in $cleanTargets) {{
     }}
 }}
 
+$directoryTargets = @($cleanTargets | Where-Object {{ [bool]$_.IsDirectory }})
+if ($directoryTargets.Count -gt 0) {{
+    $previewLimit = 12
+    Write-Host "`nFolder contents preview (direct children only; up to 12 per folder):" -ForegroundColor Cyan
+    foreach ($target in $directoryTargets) {{
+        Write-Host "  [$($target.Index)] $($target.Path)" -ForegroundColor White
+        $previewEntries = @(Get-ChildItem -LiteralPath $target.Path -Force -EA Stop | Select-Object -First ($previewLimit + 1))
+        if ($previewEntries.Count -eq 0) {{
+            Write-Host "    (empty)" -ForegroundColor Gray
+            continue
+        }}
+        $hasMoreEntries = $previewEntries.Count -gt $previewLimit
+        foreach ($entry in ($previewEntries | Select-Object -First $previewLimit)) {{
+            $entryType = if ($entry.PSIsContainer) {{ "folder" }} else {{ "file" }}
+            $entrySize = if ($entry.PSIsContainer) {{ "" }} else {{ " - $([long]$entry.Length) B" }}
+            Write-Host ("    [{{0}}] {{1}}{{2}}" -f $entryType, $entry.Name, $entrySize) -ForegroundColor Gray
+        }}
+        if ($hasMoreEntries) {{ Write-Host "    Additional direct contents are not shown." -ForegroundColor Gray }}
+    }}
+}}
+
 Write-Host "`nOnly these selected items will be cleaned:" -ForegroundColor Cyan
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.Path) - $($target.Size)" }}
 if (-not $Force) {{

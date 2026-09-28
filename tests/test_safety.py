@@ -1293,6 +1293,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target.mkdir()
             marker = target / "keep.bin"
             marker.write_bytes(b"keep")
+            (target / "visible-cache.bin").write_bytes(b"preview")
+            for index in range(20):
+                (target / f"preview-{index:02d}.tmp").write_bytes(b"preview")
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 4,
                 "size_formatted": "4 B", "kind": "Directory",
@@ -1304,10 +1307,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-                input="Q\n", capture_output=True, text=True, timeout=90, env=env,
+                input="1\nQ\n", capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertTrue(marker.exists())
+            self.assertIn("Folder contents preview (direct children only", result.stdout)
+            self.assertIn("keep.bin", result.stdout)
+            self.assertIn("Additional direct contents are not shown.", result.stdout)
+            preview_rows = [line for line in result.stdout.splitlines() if "preview-" in line or "visible-cache.bin" in line]
+            self.assertLessEqual(len(preview_rows), 12)
             self.assertFalse(backup_log.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")

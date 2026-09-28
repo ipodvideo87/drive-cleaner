@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Preview a bounded set of direct folder contents before the typed cleanup confirmation so users can spot unexpected files before backup or removal.
 - Handle Ctrl+C and closed input as cancellation at interactive analyzer, restore, and backup-delete confirmations.
 - Re-prompt on invalid guided scan options and accept `Q` to cancel setup instead of silently treating an unrecognized file-row answer as yes.
 - Keep folders merely named `Temp` or `Tmp` in the caution tier unless they are standard Windows/user temp roots or the configured `TEMP`/`TMP` location.
