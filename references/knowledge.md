@@ -13,7 +13,7 @@
 - Do not directly clean `SoftwareDistribution\\Download`; Windows update state can be hard to assess, so use Windows Storage or Disk Cleanup.
 - Do not suggest recovered previous-installation data, `$WinREAgent`, Windows Update logs, or Service Worker storage for direct cleanup.
 - A scan is complete when the selected scanner exits and its export is stable, not merely when file growth pauses.
-- Automated cleanup patterns match complete Windows path components; multi-component patterns must appear as adjacent components. Similar names embedded in larger words are not sufficient to label a path.
+- Automated cleanup patterns match complete Windows path components; multi-component patterns must appear as adjacent components. Similar names embedded in larger words are not sufficient to label a path. Generated plans revalidate every target against the selected tier and exact cleanup label before writing the script.
 - Known memory dump files are listed explicitly (`MEMORY.DMP`, `CrashDump.dmp`, and `Minidump.dmp`); a dotted suffix alone does not turn an unrelated name into a cleanup candidate.
 - Protect OneDrive's standard organization-root form (`OneDrive - <organization>`) while leaving unrelated sibling names such as `OneDriveBackup` to normal path review.
 

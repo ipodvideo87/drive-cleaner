@@ -240,6 +240,21 @@ def _is_excluded_path(path, components=None, component_set=None, sequences=None)
                for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
 
 
+def _matches_cleanup_rule(path, priorities, name):
+    """Require cleanup plans to preserve the analyzer's priority and label."""
+    components = _path_components(path)
+    component_set, sequences = _path_match_index(components)
+    for priority in priorities:
+        for pattern_info, pattern_components in _CLEANABLE_COMPONENTS[priority]:
+            if pattern_info["name"] != name:
+                continue
+            if ((len(pattern_components) == 1 and pattern_components[0] in component_set) or
+                    (len(pattern_components) > 1 and
+                     pattern_components in sequences.get(len(pattern_components), ()))):
+                return True
+    return False
+
+
 def _inside_project_tree(path, directory, cache):
     """Recognize project roots above a candidate to avoid recursive project cleanup."""
     normalized = ntpath.normpath(path.replace("/", "\\"))
@@ -608,15 +623,12 @@ def generate_clean_script(results, output_path, priority="high"):
         items = []
         for key in ["high", "medium", "low"]:
             items.extend(results["categories"][key]["items"])
-        # Deduplicate paths and sort by size before writing the script.
-        deduped = {}
-        for item in items:
-            deduped[_path_key(item["path"])] = item
-        items = list(deduped.values())
         priority_name = "All priorities (high / medium / low)"
+        allowed_priorities = ("high", "medium", "low")
     else:
         items = results["categories"][priority]["items"]
         priority_name = CLEANABLE_PATTERNS[priority]["name"]
+        allowed_priorities = (priority,)
 
     # Candidate data can come from imported or edited results, so reapply the
     # path and project protections at the plan-generation boundary as well.
@@ -633,12 +645,22 @@ def generate_clean_script(results, output_path, priority="high"):
             raise ValueError("Cleanup plan contains an unsafe path; only absolute non-root local paths are allowed")
         if _is_excluded_path(path):
             raise ValueError("Cleanup plan contains a protected path; remove it and rescan")
+        if not _matches_cleanup_rule(path, allowed_priorities, item["name"]):
+            raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
         kind = item.get("kind", classify_path(path))
         if not isinstance(kind, str) or kind.lower() not in ("file", "directory", "folder", "目录"):
             raise ValueError("Cleanup plan contains an invalid target type")
         is_directory = kind.lower() in ("directory", "folder", "目录")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
+
+    if priority == "all":
+        # Validate each source-tier entry before deduplicating so malformed
+        # imported results cannot bypass the plan-generation checks.
+        deduped = {}
+        for item in items:
+            deduped[_path_key(item["path"])] = item
+        items = list(deduped.values())
 
     # A parent candidate covers descendants even when rules put them in
     # different tiers. Emit a non-overlapping plan to prevent double counting.

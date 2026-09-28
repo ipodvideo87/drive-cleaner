@@ -309,7 +309,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_generated_script_quotes_untrusted_path_and_backs_up_first(self):
         path = "C:\\Users\\O'Brien\\$(not-a-command)\\AppData\\Local\\Temp\\"
         results = {"categories": {"high": {"name": "High", "items": [{
-            "path": path, "name": "Temporary files", "size": 100,
+            "path": path, "name": "Temporary files (check for installers or builds in progress)", "size": 100,
             "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -335,7 +335,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         if not powershell:
             self.skipTest("PowerShell is not installed")
         results = {"categories": {"high": {"name": "High", "items": [{
-            "path": "C:\\Users\\Jordan\\AppData\\Local\\Temp\\candidate-folder\\", "name": "Temporary files",
+            "path": "C:\\Users\\Jordan\\AppData\\Local\\Temp\\candidate-folder\\", "name": "Temporary files (check for installers or builds in progress)",
             "size": 100, "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -388,8 +388,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "nested" / "regular-cache" / "remove.bin").write_bytes(b"remove")
             (unselected / "keep.bin").write_bytes(b"untouched")
             results = {"categories": {"high": {"name": "High", "items": [
-                {"path": str(selected) + "\\", "name": "Temporary files", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
-                {"path": str(unselected) + "\\", "name": "Temporary files", "size": 9, "size_formatted": "9 B", "kind": "Directory"},
+                {"path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
+                {"path": str(unselected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 9, "size_formatted": "9 B", "kind": "Directory"},
             ]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -440,7 +440,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             except OSError as exc:
                 self.skipTest(f"Could not create a temporary directory symlink: {exc}")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(selected) + "\\", "name": "Temporary files", "size": 4,
+                "path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 4,
                 "size_formatted": "4 B", "kind": "Directory",
             }]}}}
             script_path = root / "clean.ps1"
@@ -473,9 +473,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "remove-me.bin").write_bytes(b"remove")
             (unselected / "keep.bin").write_bytes(b"keep")
             results = {"categories": {"high": {"name": "High", "items": [
-                {"path": str(missing) + "\\", "name": "Temporary files", "size": 10, "size_formatted": "10 B", "kind": "Directory"},
-                {"path": str(selected) + "\\", "name": "Temporary files", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
-                {"path": str(unselected) + "\\", "name": "Temporary files", "size": 4, "size_formatted": "4 B", "kind": "Directory"},
+                {"path": str(missing) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 10, "size_formatted": "10 B", "kind": "Directory"},
+                {"path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
+                {"path": str(unselected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 4, "size_formatted": "4 B", "kind": "Directory"},
             ]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -511,7 +511,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             marker = target / "keep.bin"
             marker.write_bytes(b"keep")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(target) + "\\", "name": "Temporary files", "size": 4,
+                "path": str(target) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 4,
                 "size_formatted": "4 B", "kind": "Directory",
             }]}}}
             script_path = root / "clean.ps1"
@@ -539,7 +539,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             marker = target / "keep.bin"
             marker.write_bytes(b"must remain")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(target) + "\\", "name": "Temporary files", "size": 11,
+                "path": str(target) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 11,
                 "size_formatted": "11 B", "kind": "Directory",
             }]}}}
             script_path = root / "clean.ps1"
@@ -566,11 +566,48 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_generated_plan_rejects_protected_downloads_even_from_imported_data(self):
         results = {"categories": {"high": {"name": "High", "items": [{
             "path": "C:\\Users\\Jordan\\Downloads\\PhoenixPE\\Temp\\dotnet\\",
-            "name": "Temporary files", "size": 100, "size_formatted": "100 B", "kind": "Directory",
+            "name": "Temporary files (check for installers or builds in progress)", "size": 100, "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "protected path"):
                 analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"))
+
+    def test_generated_plan_rejects_unmatched_or_mislabeled_candidates(self):
+        invalid_items = [
+            {
+                "path": r"C:\Users\Jordan\OneDriveBackup\Important",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": 100, "size_formatted": "100 B", "kind": "File",
+            },
+            {
+                "path": r"C:\Users\Jordan\AppData\Local\Temp\ordinary.tmp",
+                "name": "Crash dumps",
+                "size": 100, "size_formatted": "100 B", "kind": "File",
+            },
+            {
+                "path": r"C:\Users\Jordan\.gradle\caches\modules",
+                "name": "Gradle cache",
+                "size": 100, "size_formatted": "100 B", "kind": "Directory",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for item in invalid_items:
+                results = {"categories": {"high": {"name": "High", "items": [item]}}}
+                with self.subTest(path=item["path"]), self.assertRaisesRegex(
+                        ValueError, "does not match its priority and cleanup label"):
+                    analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"))
+
+    def test_all_priority_plan_accepts_valid_lower_tier_candidate(self):
+        categories = {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
+        path = r"Z:\DriveCleanrTest\.gradle\caches\modules"
+        categories["low"]["items"] = [{
+            "path": path, "name": "Gradle cache", "size": 100,
+            "size_formatted": "100 B", "kind": "Directory",
+        }]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "clean-all.ps1"
+            analyze.generate_clean_script({"categories": categories}, str(output), priority="all")
+            self.assertIn(path, output.read_text(encoding="utf-8-sig"))
 
     def test_generated_plan_rejects_unsafe_paths_and_priority_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -615,7 +652,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = {"categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}}
             results["categories"]["high"]["items"] = [{
                 "path": str(target) + "\\", "size": 100, "size_formatted": "100 B",
-                "name": "Cache", "kind": "Directory", "safe": True,
+                "name": "Temporary files (check for installers or builds in progress)",
+                "kind": "Directory", "safe": True,
             }]
             with self.assertRaisesRegex(ValueError, "outside the selected cleanup targets"):
                 analyze.generate_clean_script(results, str(target / "plan.ps1"))

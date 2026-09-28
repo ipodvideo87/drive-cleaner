@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Revalidate cleanup-plan targets against the selected priority and exact rule label so edited or malformed candidate data cannot turn an unrelated path into a deletion target.
 - Match automated cleanup and protection patterns on complete Windows path components, preventing embedded names such as `CacheInspector` and `OneDriveBackup` from inheriting unrelated classifications.
 - Require exact component matches, list supported dump filenames explicitly, and use matching component boundaries when generated plans preserve protected paths.
 - Keep standard `OneDrive - <organization>` roots protected without treating `OneDriveBackup` as the same folder.
