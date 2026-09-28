@@ -942,6 +942,29 @@ class ScanSafetyTests(unittest.TestCase):
             finally:
                 scan.DATA_DIR = old_data_dir
 
+    def test_scan_storage_reparse_path_blocks_launch_and_retention_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            data = Path(scan.DATA_DIR)
+            data.mkdir()
+            older = data / "old.csv"
+            newer = data / "new.csv"
+            older.write_text("old", encoding="utf-8")
+            newer.write_text("new", encoding="utf-8")
+            try:
+                with mock.patch.object(scan, "find_windirstat", return_value="/mock/WinDirStat.exe"), \
+                     mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+                     mock.patch.object(scan.subprocess, "Popen") as launch, \
+                     mock.patch("builtins.print"):
+                    self.assertIsNone(scan.scan("D:", app="windirstat"))
+                    self.assertEqual(scan.cleanup_old_scans(keep_latest=1), 0)
+                launch.assert_not_called()
+                self.assertTrue(older.exists())
+                self.assertTrue(newer.exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
     def test_wait_uses_process_exit_after_a_quiet_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "scan.csv"

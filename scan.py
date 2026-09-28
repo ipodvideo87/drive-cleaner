@@ -47,6 +47,33 @@ def find_windirstat():
     return shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
 
 
+def _is_reparse_point(path):
+    """Detect symlinks, junctions, and other Windows reparse points."""
+    if os.path.islink(path):
+        return True
+    if hasattr(os.path, "isjunction") and os.path.isjunction(path):
+        return True
+    try:
+        attributes = os.stat(path, follow_symlinks=False).st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _path_has_reparse_component(path):
+    """Return true if any existing component redirects outside scan storage."""
+    absolute = os.path.abspath(os.fspath(path))
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.sep if drive else os.path.abspath(os.sep)
+    for part in tail.strip("\\/").replace("/", os.sep).split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and _is_reparse_point(current):
+            return True
+    return False
+
+
 def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
     print("Choose a disk usage scanner:")
@@ -192,6 +219,9 @@ def _stop_scan_process(process):
 
 
 def _remove_partial_scan_export(filepath):
+    if _path_has_reparse_component(filepath):
+        print("Refusing to remove a partial export through a reparse point")
+        return
     try:
         os.unlink(filepath)
     except OSError:
@@ -309,8 +339,14 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
             print("Automated CSV scanning requires WinDirStat 2.6.0 or newer.")
         return None
 
-    # Ensure the data directory exists
+    # Keep scan creation and later retention cleanup within project storage.
+    if _path_has_reparse_component(DATA_DIR):
+        print("Error: scan storage crosses a reparse point or junction")
+        return None
     os.makedirs(DATA_DIR, exist_ok=True)
+    if _path_has_reparse_component(DATA_DIR):
+        print("Error: scan storage changed to a reparse point or junction")
+        return None
 
     # Generate output filename
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
@@ -400,6 +436,13 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
     if keep_latest < 1:
         raise ValueError("keep_latest must be at least one")
     data_path = Path(DATA_DIR)
+    skill_path = data_path.parent
+    if _path_has_reparse_component(data_path):
+        print("Refusing to prune scan files through a reparse point or junction")
+        return 0
+    if include_scripts and _path_has_reparse_component(skill_path):
+        print("Refusing to prune cleanup plans through a reparse point or junction")
+        return 0
     deleted = 0
 
     # Clean CSV data files
@@ -411,6 +454,9 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
 
             # Delete old files
             for old_file in csv_files[keep_latest:]:
+                if _path_has_reparse_component(old_file):
+                    print(f"Refusing to prune linked scan file: {old_file.name}")
+                    continue
                 try:
                     old_file.unlink()
                     print(f"Deleted old data file: {old_file.name}")
@@ -421,8 +467,10 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
     # Script deletion is a separate explicit action; never remove a user's
     # reviewed cleanup plan as a side effect of creating a new scan.
     if include_scripts:
-        skill_path = Path(DATA_DIR).parent
         for script in skill_path.glob("clean_*.ps1"):
+            if _path_has_reparse_component(script):
+                print(f"Refusing to prune linked cleanup plan: {script.name}")
+                continue
             try:
                 script.unlink()
                 print(f"Deleted cleanup script: {script.name}")
