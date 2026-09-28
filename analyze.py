@@ -96,7 +96,16 @@ EXCLUDE_PATTERNS = [
     "\\desktop\\",
     "\\pictures\\",
     "\\videos\\",
+    "\\music\\",
     "\\downloads\\",                   # May contain projects, installers, and user files
+    "\\contacts\\",
+    "\\favorites\\",
+    "\\links\\",
+    "\\saved games\\",
+    "\\saved pictures\\",
+    "\\camera roll\\",
+    "\\searches\\",
+    "\\3d objects\\",
     "\\recovered-windowsold\\",         # Preserve data retained from a previous Windows installation
     "\\$winreagent",                      # Windows-managed update recovery staging
     "\\programdata\\usoshared\\logs\\", # Active Windows Update diagnostics

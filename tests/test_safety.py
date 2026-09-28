@@ -603,6 +603,36 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 str(Path(temp_dir) / "store-app-cleanup.ps1"),
             )
 
+    def test_windows_personal_folders_are_excluded_from_candidates_and_imported_plans(self):
+        paths = (
+            r"C:\Users\Jordan\Music\Temp\unfinished-recording.wav",
+            r"C:\Users\Jordan\Saved Games\Logs\game-session.log",
+            r"C:\Users\Jordan\Contacts\Cache\contacts.db",
+            r"C:\Users\Jordan\Camera Roll\Cache\photo-index.db",
+            r"C:\Users\Jordan\Saved Pictures\Temp\edited-photo.tmp",
+            r"C:\Users\Jordan\Favorites\Cache\links.dat",
+            r"C:\Users\Jordan\Links\Temp\project-link.lnk",
+            r"C:\Users\Jordan\Searches\Logs\search-history.log",
+            r"C:\Users\Jordan\3D Objects\Cache\model-index.db",
+        )
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "100000000"} for path in paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        self.assertTrue(all(analyze._is_excluded_path(path) for path in paths))
+
+        item = {
+            "path": paths[0],
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 100_000_000, "size_formatted": "95.37 MB", "kind": "File",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "protected path"):
+            analyze.generate_clean_script(
+                {"categories": {"high": {"name": "High", "items": [item]}}},
+                str(Path(temp_dir) / "personal-folder-cleanup.ps1"),
+            )
+
     def test_credential_bearing_cli_profiles_are_excluded_from_candidates_and_plans(self):
         paths = (
             r"C:\Users\A\.aws\sso\cache\access-token.json",
@@ -1068,6 +1098,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             codex_package_cache.mkdir(parents=True)
             codex_roaming_cache = selected / "nested" / "AppData" / "Roaming" / "Codex" / "web" / "Cache"
             codex_roaming_cache.mkdir(parents=True)
+            personal_music = selected / "nested" / "Music" / "Temp"
+            personal_music.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
             visual_project_cache = selected / "nested" / "visual-studio-project" / "packages" / "cache"
@@ -1081,6 +1113,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (onedrive_cache / "keep.bin").write_bytes(b"keep")
             (codex_package_cache / "keep.bin").write_bytes(b"keep")
             (codex_roaming_cache / "keep.bin").write_bytes(b"keep")
+            (personal_music / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
             (visual_project_cache / "keep.bin").write_bytes(b"keep")
@@ -1118,6 +1151,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((onedrive_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_package_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((personal_music / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((visual_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertFalse((selected / "nested" / "regular-cache" / "remove.bin").exists())
