@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -1634,6 +1635,45 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_backup_list_skips_malformed_manifest_shapes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            malformed_id = "backup_20260928_123456_000001"
+            wrong_fields_id = "backup_20260928_123456_000002"
+            valid_id = "backup_20260928_123456_000003"
+            for backup_id in (malformed_id, wrong_fields_id, valid_id):
+                (root / backup_id).mkdir()
+            (root / malformed_id / "manifest.json").write_text("[]", encoding="utf-8")
+            (root / wrong_fields_id / "manifest.json").write_text(json.dumps({
+                "id": wrong_fields_id, "timestamp": {}, "items": [],
+            }), encoding="utf-8")
+            (root / valid_id / "manifest.json").write_text(json.dumps({
+                "id": valid_id, "timestamp": "2026-09-28T12:34:56", "items": [],
+            }), encoding="utf-8")
+
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]):
+                backups = backup.list_backups()
+
+        self.assertEqual([valid_id], [entry["id"] for entry in backups])
+
+    def test_backup_list_skips_redirected_manifest_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_id = "backup_20260928_123456_123456"
+            backup_dir = root / backup_id
+            backup_dir.mkdir()
+            manifest_path = backup_dir / "manifest.json"
+            manifest_path.write_text(json.dumps({
+                "id": backup_id, "timestamp": "2026-09-28T12:34:56", "items": [],
+            }), encoding="utf-8")
+            redirected = os.path.normcase(os.path.abspath(manifest_path))
+
+            def is_redirected(path):
+                return os.path.normcase(os.path.abspath(path)) == redirected
+
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), mock.patch.object(backup, "_path_has_reparse_component", side_effect=is_redirected):
+                self.assertEqual([], backup.list_backups())
+
     def test_backup_list_shows_the_restore_location(self):
         manifest = {
             "id": "backup_20260928_123456_123456",

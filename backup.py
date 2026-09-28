@@ -681,17 +681,34 @@ def list_backups() -> List[Dict]:
     backups = []
 
     for backup_root in _existing_backup_roots():
-        for item in os.listdir(backup_root):
+        if _path_has_reparse_component(backup_root):
+            continue
+        try:
+            entries = os.listdir(backup_root)
+        except OSError:
+            continue
+
+        for item in entries:
+            if not _valid_backup_id(item):
+                continue
             backup_dir = os.path.join(backup_root, item)
             manifest_path = os.path.join(backup_dir, "manifest.json")
+            if (_path_has_reparse_component(backup_dir) or
+                    not os.path.isdir(backup_dir) or
+                    _path_has_reparse_component(manifest_path) or
+                    not os.path.isfile(manifest_path)):
+                continue
 
-            if os.path.isdir(backup_dir) and _valid_backup_id(item) and os.path.exists(manifest_path):
-                try:
-                    with open(manifest_path, "r", encoding="utf-8") as f:
-                        manifest = json.load(f)
-                    backups.append(manifest)
-                except (OSError, ValueError):
-                    continue
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if (not isinstance(manifest, dict) or manifest.get("id") != item or
+                    not isinstance(manifest.get("timestamp"), str) or
+                    not isinstance(manifest.get("items"), list)):
+                continue
+            backups.append(manifest)
 
     # Sort newest backups first.
     backups.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
