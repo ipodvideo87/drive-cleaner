@@ -2292,6 +2292,76 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_backup_cleanup_requires_exact_confirmation(self):
+        backups = [{
+            "id": "backup_20260928_123456_000001",
+            "timestamp": "2026-09-28T12:34:56",
+            "items": [],
+            "backup_root": r"D:\CleanBackups",
+            "total_size_formatted": "0 B",
+        }]
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "cleanup", "--all"]), \
+             mock.patch.object(backup, "list_backups", return_value=backups), \
+             mock.patch("builtins.input", return_value="delete"), \
+             mock.patch.object(backup, "cleanup_all_backups") as cleanup, \
+             redirect_stdout(io.StringIO()) as output:
+            backup.main()
+        cleanup.assert_not_called()
+        self.assertIn("Backup cleanup cancelled", output.getvalue())
+
+    def test_backup_cleanup_interrupt_cancels_without_deleting(self):
+        backups = [{
+            "id": "backup_20260928_123456_000001",
+            "timestamp": "2026-09-28T12:34:56",
+            "items": [],
+            "backup_root": r"D:\CleanBackups",
+            "total_size_formatted": "0 B",
+        }]
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "cleanup", "--all"]), \
+             mock.patch.object(backup, "list_backups", return_value=backups), \
+             mock.patch("builtins.input", side_effect=KeyboardInterrupt), \
+             mock.patch.object(backup, "cleanup_all_backups") as cleanup, \
+             redirect_stdout(io.StringIO()) as output:
+            backup.main()
+        cleanup.assert_not_called()
+        self.assertIn("Backup cleanup cancelled", output.getvalue())
+
+    def test_backup_cleanup_uses_the_displayed_snapshot_after_confirmation(self):
+        backups = [{
+            "id": "backup_20260928_123456_000001",
+            "timestamp": "2026-09-28T12:34:56",
+            "items": [],
+            "backup_root": r"D:\CleanBackups",
+            "total_size_formatted": "0 B",
+        }]
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "cleanup", "--all"]), \
+             mock.patch.object(backup, "list_backups", return_value=backups), \
+             mock.patch("builtins.input", return_value="DELETE") as prompt, \
+             mock.patch.object(backup, "cleanup_all_backups", return_value=1) as cleanup, \
+             redirect_stdout(io.StringIO()) as output:
+            backup.main()
+        prompt.assert_called_once()
+        self.assertIn("Permanently delete all 1 listed backups", prompt.call_args.args[0])
+        cleanup.assert_called_once_with(backups)
+        self.assertIn("Deleted 1 of 1 listed backups", output.getvalue())
+
+    def test_backup_cleanup_yes_skips_prompt_but_uses_displayed_snapshot(self):
+        backups = [{
+            "id": "backup_20260928_123456_000001",
+            "timestamp": "2026-09-28T12:34:56",
+            "items": [],
+            "backup_root": r"D:\CleanBackups",
+            "total_size_formatted": "0 B",
+        }]
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "cleanup", "--all", "--yes"]), \
+             mock.patch.object(backup, "list_backups", return_value=backups), \
+             mock.patch("builtins.input") as prompt, \
+             mock.patch.object(backup, "cleanup_all_backups", return_value=1) as cleanup, \
+             redirect_stdout(io.StringIO()):
+            backup.main()
+        prompt.assert_not_called()
+        cleanup.assert_called_once_with(backups)
+
     def test_backup_cli_confirmation_interrupts_cancel_without_running_operation(self):
         for command, expected_message, operation in (
                 ("restore", "Restore cancelled", "restore_backup"),

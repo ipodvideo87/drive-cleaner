@@ -1160,14 +1160,15 @@ def delete_backup(backup_id: str) -> bool:
         return False
 
 
-def cleanup_all_backups() -> int:
+def cleanup_all_backups(backups: Optional[List[Dict]] = None) -> int:
     """
-    Delete all backups.
+    Delete all backups from a previously displayed snapshot, if supplied.
 
     Returns:
         int: Number of backups deleted.
     """
-    backups = list_backups()
+    if backups is None:
+        backups = list_backups()
     deleted = 0
 
     for backup in backups:
@@ -1236,7 +1237,8 @@ def main():
 
     # Cleanup command.
     cleanup_parser = subparsers.add_parser('cleanup', help='Clean up backups')
-    cleanup_parser.add_argument('--all', action='store_true', help='Confirm deleting all backups')
+    cleanup_parser.add_argument('--all', action='store_true', help='Select every currently saved backup for deletion')
+    cleanup_parser.add_argument('--yes', action='store_true', help='Skip the deletion prompt for deliberate unattended use')
 
     # Info command.
     info_parser = subparsers.add_parser('info', help='Show backup details')
@@ -1304,11 +1306,27 @@ def main():
         sys.exit(0 if success else 1)
 
     elif args.command == 'cleanup':
-        if args.all:
-            deleted = cleanup_all_backups()
-            print(f"Cleaned up {deleted} backups")
-        else:
+        if not args.all:
             print("Please specify --all to confirm deleting all backups")
+            return
+        backups = list_backups()
+        if not backups:
+            print("No saved backups were found.")
+            return
+        print_backups_table(backups)
+        if not args.yes:
+            try:
+                answer = input(
+                    f"Permanently delete all {len(backups)} listed backups? Type DELETE to continue: "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                print("Backup cleanup cancelled")
+                return
+            if answer != "DELETE":
+                print("Backup cleanup cancelled")
+                return
+        deleted = cleanup_all_backups(backups)
+        print(f"Deleted {deleted} of {len(backups)} listed backups.")
 
     elif args.command == 'info':
         manifest = get_backup(args.id)
