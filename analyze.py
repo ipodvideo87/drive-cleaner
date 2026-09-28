@@ -1025,6 +1025,34 @@ function Assert-TargetMatchesScan([object]$Target) {{
     }}
 }}
 
+function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
+    # Directory contents are enumerated before the final backup verification.
+    # Re-open each item and each nested parent immediately before removing it;
+    # a directory could have been replaced by a junction after enumeration.
+    Assert-TargetMatchesScan $Target
+    $targetRoot = [System.IO.Path]::GetFullPath($Target.Path).TrimEnd('\\')
+    $currentPath = [System.IO.Path]::GetFullPath($Entry.FullName)
+    $isEntry = $true
+    while ($true) {{
+        if ($currentPath -ne $targetRoot -and
+            -not $currentPath.StartsWith($targetRoot + '\\', [System.StringComparison]::OrdinalIgnoreCase)) {{
+            throw "A cleanup entry moved outside its selected folder; refusing cleanup: $($Entry.FullName)"
+        }}
+        $currentItem = Get-Item -LiteralPath $currentPath -Force -EA Stop
+        if (($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+            throw "A cleanup entry or nested parent is now a reparse point; refusing cleanup: $currentPath"
+        }}
+        if ($isEntry -and [bool]$currentItem.PSIsContainer -ne [bool]$Entry.PSIsContainer) {{
+            throw "A cleanup entry changed type after review; refusing cleanup: $currentPath"
+        }}
+        if ($currentPath.Equals($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{ break }}
+        $parent = [System.IO.Directory]::GetParent($currentPath)
+        if (-not $parent) {{ throw "Could not validate a cleanup entry's parent path: $currentPath" }}
+        $currentPath = $parent.FullName
+        $isEntry = $false
+    }}
+}}
+
 $available = @()
 Write-Host "Choose exactly which items to clean:" -ForegroundColor White
 for ($i = 0; $i -lt $cleanTargets.Count; $i++) {{
@@ -1219,7 +1247,10 @@ foreach ($target in $cleanTargets) {{
             if (Test-PathInsideProject $target.Path $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
-            $deletable | Sort-Object {{ $_.FullName.Length }} -Descending | Remove-Item -Force -EA Stop
+            foreach ($entry in ($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)) {{
+                Assert-CleanupEntryMatchesScan $target $entry
+                Remove-Item -LiteralPath $entry.FullName -Force -EA Stop
+            }}
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
             }} else {{

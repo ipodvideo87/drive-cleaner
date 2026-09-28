@@ -1424,6 +1424,58 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("containing a reparse point", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_rechecks_nested_paths_after_backup_verification(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected"
+            nested = selected / "nested"
+            moved_original = selected / "nested-original"
+            outside = root / "outside"
+            nested.mkdir(parents=True)
+            outside.mkdir()
+            (nested / "cache.tmp").write_bytes(b"selected fixture")
+            # Match the enumerated child name so the stale cleanup path would
+            # resolve through the newly-created junction if it is not checked.
+            outside_sentinel = outside / "cache.tmp"
+            outside_sentinel.write_bytes(b"outside sentinel")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": 16, "size_formatted": "16 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, pathlib, subprocess, sys\n"
+                f"nested = pathlib.Path({str(nested)!r})\n"
+                f"moved_original = pathlib.Path({str(moved_original)!r})\n"
+                f"outside = pathlib.Path({str(outside)!r})\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify':\n"
+                "    nested.rename(moved_original)\n"
+                "    link_result = subprocess.run(['cmd.exe', '/d', '/c', 'mklink', '/J', str(nested), str(outside)], capture_output=True)\n"
+                "    if link_result.returncode:\n"
+                "        sys.exit(2)\n"
+                "    sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertTrue(outside_sentinel.exists(), result.stdout + result.stderr)
+            self.assertEqual(outside_sentinel.read_bytes(), b"outside sentinel")
+            self.assertTrue((moved_original / "cache.tmp").exists(), result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("reparse point", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_refuses_target_changed_after_backup(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
