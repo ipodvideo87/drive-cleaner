@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Hash each selected-folder file before backup verification and again immediately before removal; leave a changed file in place even when its replacement has the same size and preserved timestamp.
 - Write scanner output to an isolated incomplete-scan folder and publish it to the previous-scan list only after process exit and CSV validation; preserve and isolate partial output if the scanner cannot be confirmed stopped.
 - Prefer the more cautious cleanup tier when equally specific rules overlap, so Cache, Logs, or GPUCache labels are not downgraded by a broad Temp match.
 - Reopen each selected folder descendant and recheck its nested parent paths immediately before removal, so a junction introduced after backup verification stops cleanup; preserve files whose size or last-write time changes after the backup check.

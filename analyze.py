@@ -1028,7 +1028,7 @@ function Assert-TargetMatchesScan([object]$Target) {{
     }}
 }}
 
-function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
+function Assert-CleanupEntryPathMatchesScan([object]$Target, [object]$Entry) {{
     # Directory contents are enumerated before the final backup verification.
     # Re-open each item and each nested parent immediately before removing it;
     # a directory could have been replaced by a junction after enumeration.
@@ -1058,6 +1058,19 @@ function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
         if (-not $parent) {{ throw "Could not validate a cleanup entry's parent path: $currentPath" }}
         $currentPath = $parent.FullName
         $isEntry = $false
+    }}
+}}
+
+function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
+    Assert-CleanupEntryPathMatchesScan $Target $Entry
+    if (-not [bool]$Entry.PSIsContainer) {{
+        $currentHash = (Get-FileHash -LiteralPath $Entry.FullName -Algorithm SHA256 -EA Stop).Hash
+        if ($currentHash -ne [string]$Entry.CleanupSha256) {{
+            throw "A cleanup file's contents changed after backup verification; refusing cleanup: $($Entry.FullName)"
+        }}
+        # Recheck every path after hashing so a junction introduced during the
+        # read is caught before Remove-Item reopens the path.
+        Assert-CleanupEntryPathMatchesScan $Target $Entry
     }}
 }}
 
@@ -1248,13 +1261,23 @@ foreach ($target in $cleanTargets) {{
             $deletable = @($entries | Where-Object {{
                 -not $preservePaths.Contains($_.FullName)
             }})
+            $fileHashTotal = @($deletable | Where-Object {{ -not $_.PSIsContainer }}).Count
+            $fileHashIndex = 0
+            if ($fileHashTotal -gt 0) {{
+                Write-Host "Checking the contents of $fileHashTotal selected files; large files may take a while." -ForegroundColor Gray
+            }}
             foreach ($entry in $deletable) {{
                 if (-not $entry.PSIsContainer) {{
+                    $fileHashIndex++
+                    Write-Progress -Activity "Checking selected file contents" -Status "$fileHashIndex of $fileHashTotal" -PercentComplete ([int](100 * ($fileHashIndex - 1) / $fileHashTotal))
                     $entry.Refresh()
                     Add-Member -InputObject $entry -NotePropertyName CleanupLength -NotePropertyValue ([long]$entry.Length) -Force
                     Add-Member -InputObject $entry -NotePropertyName CleanupLastWriteTimeUtc -NotePropertyValue $entry.LastWriteTimeUtc -Force
+                    $cleanupHash = (Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -EA Stop).Hash
+                    Add-Member -InputObject $entry -NotePropertyName CleanupSha256 -NotePropertyValue $cleanupHash -Force
                 }}
             }}
+            if ($fileHashTotal -gt 0) {{ Write-Progress -Activity "Checking selected file contents" -Completed }}
             $before = ($deletable | Where-Object {{ -not $_.PSIsContainer }} | Measure-Object -Property Length -Sum).Sum
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
@@ -1262,10 +1285,21 @@ foreach ($target in $cleanTargets) {{
             if (Test-PathInsideProject $target.Path $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
-            foreach ($entry in ($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)) {{
+            $orderedDeletable = @($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)
+            $fileRecheckTotal = @($orderedDeletable | Where-Object {{ -not $_.PSIsContainer }}).Count
+            $fileRecheckIndex = 0
+            if ($fileRecheckTotal -gt 0) {{
+                Write-Host "Rechecking file contents immediately before removal..." -ForegroundColor Gray
+            }}
+            foreach ($entry in $orderedDeletable) {{
+                if (-not $entry.PSIsContainer) {{
+                    $fileRecheckIndex++
+                    Write-Progress -Activity "Rechecking selected file contents" -Status "$fileRecheckIndex of $fileRecheckTotal" -PercentComplete ([int](100 * ($fileRecheckIndex - 1) / $fileRecheckTotal))
+                }}
                 Assert-CleanupEntryMatchesScan $target $entry
                 Remove-Item -LiteralPath $entry.FullName -Force -EA Stop
             }}
+            if ($fileRecheckTotal -gt 0) {{ Write-Progress -Activity "Rechecking selected file contents" -Completed }}
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
             }} else {{
@@ -1276,8 +1310,22 @@ foreach ($target in $cleanTargets) {{
             }}
         }} else {{
             $before = $item.Length
+            Write-Host "Rechecking selected file contents before removal..." -ForegroundColor Gray
+            Write-Progress -Activity "Checking selected file contents" -Status "Comparing file contents" -PercentComplete 50
+            $cleanupHash = (Get-FileHash -LiteralPath $target.Path -Algorithm SHA256 -EA Stop).Hash
+            Write-Progress -Activity "Checking selected file contents" -Completed
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
+            Assert-TargetMatchesScan $target
+            if (Test-PathInsideProject $target.Path $false) {{
+                throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+            }}
+            Write-Progress -Activity "Checking selected file contents" -Status "Confirming contents" -PercentComplete 50
+            $currentHash = (Get-FileHash -LiteralPath $target.Path -Algorithm SHA256 -EA Stop).Hash
+            Write-Progress -Activity "Checking selected file contents" -Completed
+            if ($currentHash -ne $cleanupHash) {{
+                throw "The selected file's contents changed after backup verification; refusing cleanup: $($target.Path)"
+            }}
             Assert-TargetMatchesScan $target
             if (Test-PathInsideProject $target.Path $false) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
