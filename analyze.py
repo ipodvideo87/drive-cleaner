@@ -917,6 +917,24 @@ function Test-PathInsideProject([string]$Path, [bool]$IsDirectory) {{
     return $false
 }}
 
+function Assert-TargetMatchesScan([object]$Target) {{
+    $current = [System.IO.Path]::GetFullPath($Target.Path)
+    $isTarget = $true
+    while ($current) {{
+        $item = Get-Item -LiteralPath $current -Force -EA Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+            throw "The target or one of its parent paths is now a reparse point; refusing cleanup: $($Target.Path)"
+        }}
+        if ($isTarget -and [bool]$item.PSIsContainer -ne [bool]$Target.IsDirectory) {{
+            throw "The item type changed since the scan; rescan before creating a backup: $($Target.Path)"
+        }}
+        $parent = [System.IO.Directory]::GetParent($current)
+        if (-not $parent) {{ break }}
+        $current = $parent.FullName
+        $isTarget = $false
+    }}
+}}
+
 $available = @()
 Write-Host "Choose exactly which items to clean:" -ForegroundColor White
 for ($i = 0; $i -lt $cleanTargets.Count; $i++) {{
@@ -963,6 +981,7 @@ if ($Select.Count -gt 0) {{
 }}
 
 foreach ($target in $cleanTargets) {{
+    Assert-TargetMatchesScan $target
     if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
         throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
     }}

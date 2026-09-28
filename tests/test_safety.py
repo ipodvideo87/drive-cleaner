@@ -740,6 +740,51 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_rejects_changed_item_type_before_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with (
+            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
+            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_text("scanned as a file", encoding="utf-8")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            sentinel = Path(plan_temp) / "backup_called.txt"
+            backup_helper = Path(plan_temp) / "backup.py"
+            helper_contents = (
+                "import json\nfrom pathlib import Path\n"
+                f"Path({str(sentinel)!r}).write_text('called', encoding='utf-8')\n"
+                "print(json.dumps({'status':'completed','id':'backup_20260928_123456_123456',"
+                "'items':[{}]}))\n"
+            )
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            backup_helper.write_text(helper_contents, encoding="utf-8")
+
+            target.unlink()
+            target.mkdir()
+            (target / "keep.txt").write_text("preserve", encoding="utf-8")
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("item type changed since the scan", result.stdout + result.stderr)
+            self.assertFalse(sentinel.exists(), "Backup should not start for a stale candidate type")
+            self.assertEqual((target / "keep.txt").read_text(encoding="utf-8"), "preserve")
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_nested_protected_and_project_data(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
