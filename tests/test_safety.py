@@ -1689,10 +1689,43 @@ class BackupSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10_000_000):
-                result = backup.create_backup([str(Path(temp_dir) / "missing")])
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = backup.create_backup([str(Path(temp_dir) / "missing")])
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["items"], [])
             self.assertTrue(result["errors"])
+            self.assertIn("Backup incomplete:", output.getvalue())
+            self.assertNotIn("Backup complete!", output.getvalue())
+
+    def test_directory_copy_failure_has_machine_readable_manifest_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "small-directory"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"mock data")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup.subprocess, "run", side_effect=RuntimeError("mock robocopy failure")):
+                result = backup.create_backup([str(source)])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["items"], [])
+        self.assertTrue(any("Directory copy backup failed" in error and "mock robocopy failure" in error
+                            for error in result["errors"]))
+
+    def test_directory_archive_failure_has_machine_readable_manifest_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "large-directory"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"mock data")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "get_dir_size", return_value=backup.SIZE_THRESHOLD), \
+                 mock.patch.object(backup, "_create_zip_backup", side_effect=OSError("mock archive failure")):
+                result = backup.create_backup([str(source)])
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["items"], [])
+        self.assertTrue(any("Directory archive backup failed" in error and "mock archive failure" in error
+                            for error in result["errors"]))
 
     def test_file_backup_is_copied_and_verified(self):
         with tempfile.TemporaryDirectory() as temp_dir:

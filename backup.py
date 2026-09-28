@@ -553,6 +553,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 print(f"        [Done]")
             except Exception as e:
                 print(f"        [Failed] {e}")
+                manifest["errors"].append(f"Directory copy backup failed for {path}: {e}")
                 continue
         else:
             # Compress directories of 1 GB or larger.
@@ -570,6 +571,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 print(f"        [Done]")
             except Exception as e:
                 print(f"        [Failed] {e}")
+                manifest["errors"].append(f"Directory archive backup failed for {path}: {e}")
                 continue
 
         if backup_format == "copy":
@@ -637,7 +639,13 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     print("-" * 50)
-    print(f"Backup complete! {len(manifest['items'])} items backed up, total {manifest['total_size_formatted']}")
+    if manifest["status"] == "completed":
+        print(f"Backup complete! {len(manifest['items'])} items backed up, total {manifest['total_size_formatted']}")
+    else:
+        print(
+            f"Backup incomplete: {len(manifest['items'])}/{len(paths)} items backed up, "
+            f"total {manifest['total_size_formatted']}. Review the reported issues before cleanup."
+        )
     print(f"Backup ID: {backup_id}")
 
     return manifest
