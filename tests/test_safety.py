@@ -2016,7 +2016,6 @@ class BackupSafetyTests(unittest.TestCase):
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
                 mock.patch.object(backup.shutil, "copy2", side_effect=create_destination),
-                mock.patch.object(backup.os, "rename", side_effect=FileExistsError("destination appeared")),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
