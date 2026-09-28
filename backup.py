@@ -234,6 +234,7 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
     archived_attributes = []
     conflicts = []
     seen_targets = set()
+    archive_path_types = {}
     with zipfile.ZipFile(archive_path, "r") as archive:
         for info in archive.infolist():
             member = info.filename.replace("\\", "/")
@@ -260,6 +261,22 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
             if target_key in seen_targets:
                 raise RuntimeError(f"Refusing duplicate or case-colliding paths in backup archive: {info.filename}")
             seen_targets.add(target_key)
+
+            # Windows cannot represent a file as both a path and a parent
+            # directory. Validate every explicit and implicit path component
+            # before writing any archive member, regardless of ZIP entry order.
+            for index in range(1, len(safe_parts) + 1):
+                relative_key = "\\".join(safe_parts[:index]).casefold()
+                component_type = (
+                    "directory" if index < len(safe_parts) or info.is_dir() else "file"
+                )
+                existing_type = archive_path_types.get(relative_key)
+                if existing_type is not None and existing_type != component_type:
+                    raise RuntimeError(
+                        f"Refusing file/directory path conflict in backup archive: {info.filename}"
+                    )
+                archive_path_types[relative_key] = component_type
+
             if _path_has_reparse_component(target):
                 raise RuntimeError(f"Refusing to restore through a reparse point: {info.filename}")
             parent = os.path.dirname(target)

@@ -1853,6 +1853,24 @@ class BackupSafetyTests(unittest.TestCase):
                 backup._extract_zip_backup(str(archive_path), str(destination))
             self.assertFalse(destination.exists())
 
+    def test_zip_restore_rejects_file_directory_path_conflicts_before_writing(self):
+        conflicting_orders = (
+            ("blocked", "blocked/child.txt"),
+            ("blocked/child.txt", "blocked"),
+        )
+        for names in conflicting_orders:
+            with self.subTest(names=names), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                archive_path = root / "path-conflict.zip"
+                destination = root / "restore"
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    for name in names:
+                        archive.writestr(name, "payload")
+
+                with self.assertRaisesRegex(RuntimeError, "file/directory path conflict"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+                self.assertFalse(destination.exists())
+
     @unittest.skipUnless(os.name == "nt", "backup restore targets Windows paths")
     def test_restore_rejects_corrupt_later_zip_member_before_writing_any_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:

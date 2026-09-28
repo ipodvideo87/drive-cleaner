@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Reject ZIP backup members that require the same Windows path to be both a file and a directory before restoring any data.
 - Change broad cache, log, GPU-cache, shader-cache, and code-cache labels to explain that names are only cues and users must review the location and contents.
 - Restrict IndexedDB labels to recognized Chrome and Edge User Data profile paths; leave other same-named folders unclassified.
 - Restrict Chrome model labels to Chrome User Data and NVIDIA update artifact labels to known updater paths; show NVIDIA update data as a caution candidate rather than disposable cache.
