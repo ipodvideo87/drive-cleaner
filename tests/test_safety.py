@@ -240,6 +240,34 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_generic_cache_and_log_labels_explain_the_uncertainty(self):
+        rows = [
+            r"C:\Users\A\AppData\Local\App\Cache\settings.db",
+            r"C:\Users\A\AppData\Local\App\Caches\plugin-data.bin",
+            r"C:\Users\A\AppData\Local\App\Logs\account-history.log",
+            r"C:\Users\A\AppData\Local\App\GPUCache\shader.bin",
+            r"C:\Users\A\AppData\Local\App\ShaderCache\compiled.bin",
+            r"C:\Users\A\AppData\Local\App\Code Cache\index.bin",
+        ]
+        results = self.analyze_rows([{"File Name": path, "Size": "104857600"} for path in rows])
+        items = results["categories"]["medium"]["items"]
+        self.assertEqual({item["path"] for item in items}, set(rows))
+        self.assertTrue(all(not item["safe"] for item in items))
+        descriptions = " ".join(item["name"] for item in items)
+        self.assertIn("name alone does not prove it is disposable", descriptions)
+        self.assertIn("may include user or diagnostic history", descriptions)
+        self.assertIn("review which application owns it before cleanup", descriptions)
+        self.assertTrue(analyze._matches_cleanup_rule(
+            r"C:\Users\A\AppData\Local\App\Cache\settings.db",
+            ("medium",),
+            "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+        ))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Users\A\AppData\Local\App\Cache\settings.db",
+            ("medium",),
+            "Application cache",
+        ))
+
     def test_chrome_and_nvidia_labels_require_their_known_parent_paths(self):
         results = self.analyze_rows([
             {"File Name": r"C:\Users\A\AppData\Local\Google\Chrome\User Data\OptGuideOnDeviceModel" + "\\", "Size": "104857600"},
@@ -910,6 +938,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 with self.subTest(path=item["path"]), self.assertRaisesRegex(
                         ValueError, "does not match its priority and cleanup label"):
                     analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"))
+
+    def test_generated_plan_rejects_old_generic_cache_label(self):
+        results = {"categories": {"medium": {"name": "Medium", "items": [{
+            "path": r"C:\Users\A\AppData\Local\App\Cache\settings.db",
+            "name": "Application cache", "size": 100, "size_formatted": "100 B", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"), priority="medium")
 
     def test_all_priority_plan_accepts_valid_lower_tier_candidate(self):
         categories = {key: {"name": key, "items": []} for key in ("high", "medium", "low")}

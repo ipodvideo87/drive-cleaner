@@ -96,7 +96,7 @@ Large caches             Cache\\$|cache\\$
 
 The installer-cache patterns are shown as reminders of protected data; their presence in a path does not make them cleanup candidates. Messaging folders also contain personal data and remain protected.
 
-The patterns in this review list are locating cues, not an exhaustive list of automated cleanup rules. Only entries in `analyze.py` are classified automatically; those rules use exact path components or adjacent component sequences.
+The patterns in this review list are locating cues, not an exhaustive list of automated cleanup rules. Only entries in `analyze.py` are classified automatically; those rules use exact path components or adjacent component sequences. Generic Cache, Logs, GPUCache, ShaderCache, and Code Cache names are caution cues, not proof the contents can be discarded; review the exact location and contents.
 
 ## Execution rules
 

@@ -45,12 +45,12 @@ CLEANABLE_PATTERNS = {
     "medium": {
         "name": "Medium Priority (Use Caution)",
         "patterns": [
-            {"pattern": "\\cache\\", "name": "Application cache", "safe": False},
-            {"pattern": "\\caches\\", "name": "Application cache", "safe": False},
-            {"pattern": "\\logs\\", "name": "Log files", "safe": False},
-            {"pattern": "gpucache", "name": "GPU cache", "safe": False},
-            {"pattern": "shadercache", "name": "Shader cache", "safe": False},
-            {"pattern": "code cache", "name": "Code cache", "safe": False},
+            {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
+            {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
+            {"pattern": "\\logs\\", "name": "Logs data (review contents; may include user or diagnostic history)", "safe": False},
+            {"pattern": "gpucache", "name": "GPU cache data (review which application owns it before cleanup)", "safe": False},
+            {"pattern": "shadercache", "name": "Shader cache data (review which application owns it before cleanup)", "safe": False},
+            {"pattern": "code cache", "name": "Code cache data (review which application owns it before cleanup)", "safe": False},
         ]
     },
     "low": {

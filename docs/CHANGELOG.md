@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Change broad cache, log, GPU-cache, shader-cache, and code-cache labels to explain that names are only cues and users must review the location and contents.
 - Restrict IndexedDB labels to recognized Chrome and Edge User Data profile paths; leave other same-named folders unclassified.
 - Restrict Chrome model labels to Chrome User Data and NVIDIA update artifact labels to known updater paths; show NVIDIA update data as a caution candidate rather than disposable cache.
 - Treat selected paths literally throughout cleanup checks, so legal wildcard characters such as brackets in Windows names do not change path matching.
