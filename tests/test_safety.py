@@ -1656,7 +1656,7 @@ class BackupSafetyTests(unittest.TestCase):
 
         self.assertEqual([valid_id], [entry["id"] for entry in backups])
 
-    def test_backup_list_skips_redirected_manifest_files(self):
+    def test_backup_list_skips_reparse_paths_at_each_level(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             backup_id = "backup_20260928_123456_123456"
@@ -1666,13 +1666,14 @@ class BackupSafetyTests(unittest.TestCase):
             manifest_path.write_text(json.dumps({
                 "id": backup_id, "timestamp": "2026-09-28T12:34:56", "items": [],
             }), encoding="utf-8")
-            redirected = os.path.normcase(os.path.abspath(manifest_path))
+            for redirected_path in (root, backup_dir, manifest_path):
+                redirected = os.path.normcase(os.path.abspath(redirected_path))
 
-            def is_redirected(path):
-                return os.path.normcase(os.path.abspath(path)) == redirected
+                def is_redirected(path, redirected=redirected):
+                    return os.path.normcase(os.path.abspath(path)) == redirected
 
-            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), mock.patch.object(backup, "_path_has_reparse_component", side_effect=is_redirected):
-                self.assertEqual([], backup.list_backups())
+                with self.subTest(path=redirected_path), mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]), mock.patch.object(backup, "_path_has_reparse_component", side_effect=is_redirected):
+                    self.assertEqual([], backup.list_backups())
 
     def test_get_backup_rejects_corrupt_and_mismatched_manifests(self):
         with tempfile.TemporaryDirectory() as temp_dir:
