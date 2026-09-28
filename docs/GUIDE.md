@@ -44,11 +44,13 @@ The analyzer rejects UNC/device paths, traversal paths, and drive roots from imp
 
 Before deleting anything, the script invokes `backup.py` for every selected target. A missing or partial backup stops the cleanup. Backups go to a non-system drive with at least 5 GB free; there also needs to be sufficient room for the selected data. File backups are copied directly; smaller directories are copied; larger directories are compressed.
 
-Keep the backup until the affected apps and Windows behave normally for an observation period. Restore prompts before overwriting saved paths:
+Keep the backup until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. For unattended use, `--yes` explicitly approves overwriting conflicts:
 
 ```powershell
 python backup.py list
 python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds
+# Explicitly approve overwriting existing files during a scripted restore
+python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds --yes
 ```
 
 To remove one backup permanently, use `python backup.py delete --id <id>` and confirm the prompt. Do not remove a backup until you no longer need its recovery copy.

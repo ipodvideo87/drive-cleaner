@@ -903,6 +903,26 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner.main_menu()
         review_scan.assert_called_once_with()
 
+    def test_backup_menu_can_merge_without_overwriting(self):
+        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\Jordan\cache.bin"}]}]
+        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             mock.patch.object(drive_cleaner, "_pause"):
+            drive_cleaner._backup_menu()
+        restore.assert_called_once_with("backup_test", overwrite=False)
+
+    def test_backup_menu_requires_explicit_overwrite_choice(self):
+        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\Jordan\cache.bin"}]}]
+        with mock.patch("builtins.input", side_effect=["3", "backup_test", "OVERWRITE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             mock.patch.object(drive_cleaner, "_pause"):
+            drive_cleaner._backup_menu()
+        restore.assert_called_once_with("backup_test", overwrite=True)
+
     def test_scan_does_not_delete_reviewed_scripts_as_a_side_effect(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
@@ -1106,6 +1126,62 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertTrue(backup.restore_backup(manifest["id"]))
             self.assertEqual(source.read_bytes(), b"recoverable data")
 
+    def test_file_restore_preserves_existing_destination_without_explicit_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"saved data")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10):
+                manifest = backup.create_backup([str(source)])
+            source.write_bytes(b"newer user data")
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+                self.assertTrue(backup.restore_backup(manifest["id"], overwrite=True))
+            self.assertEqual(source.read_bytes(), b"saved data")
+
+    def test_directory_restore_merges_without_replacing_existing_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "backup"
+            saved = backup_root / "saved-directory"
+            saved.mkdir(parents=True)
+            (saved / "changed.bin").write_bytes(b"original")
+            (saved / "removed.bin").write_bytes(b"restore me")
+            destination = root / "restored-directory"
+            destination.mkdir()
+            (destination / "changed.bin").write_bytes(b"newer user data")
+            manifest = {
+                "id": "backup_20260927_123456_123456",
+                "status": "completed",
+                "timestamp": "2026-09-27T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(saved),
+                    "format": "copy",
+                    "size": backup.get_dir_size(str(saved)),
+                }],
+            }
+
+            def copy_missing_files(command, **_kwargs):
+                self.assertIn("/XC", command)
+                self.assertIn("/XN", command)
+                self.assertIn("/XO", command)
+                source_root, destination_root = Path(command[1]), Path(command[2])
+                for source_file in source_root.rglob("*"):
+                    if source_file.is_file():
+                        target = destination_root / source_file.relative_to(source_root)
+                        if not target.exists():
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(source_file, target)
+                return subprocess.CompletedProcess(command, 1)
+
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)), \
+                 mock.patch.object(backup.subprocess, "run", side_effect=copy_missing_files):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+            self.assertEqual((destination / "changed.bin").read_bytes(), b"newer user data")
+            self.assertEqual((destination / "removed.bin").read_bytes(), b"restore me")
+
     def test_restore_rejects_same_size_corrupted_file_backup_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
@@ -1205,6 +1281,25 @@ class BackupSafetyTests(unittest.TestCase):
                     backup._extract_zip_backup(str(archive_path), str(destination))
             self.assertFalse((destination / "first.txt").exists())
             self.assertFalse((linked_dir / "escape.txt").exists())
+
+    def test_zip_restore_preserves_existing_files_unless_overwrite_is_explicit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            destination.mkdir()
+            (destination / "existing.txt").write_text("newer user data", encoding="utf-8")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("existing.txt", "saved data")
+                archive.writestr("missing.txt", "also restore")
+
+            conflicts = backup._extract_zip_backup(str(archive_path), str(destination))
+            self.assertEqual(conflicts, [str(destination / "existing.txt")])
+            self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "newer user data")
+            self.assertEqual((destination / "missing.txt").read_text(encoding="utf-8"), "also restore")
+
+            self.assertEqual(backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True), [])
+            self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "saved data")
 
     def test_zip_restore_rejects_windows_alternate_stream_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:

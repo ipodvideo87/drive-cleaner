@@ -105,15 +105,16 @@ def _backup_menu():
                 _pause()
                 continue
             if choice == "3":
-                print("Restore can overwrite existing files at these saved paths:")
+                print("Choose how to handle files that already exist at these saved paths:")
                 for item in manifest.get("items", []):
                     print(f"  {item.get('original_path', '(unknown path)')}")
                 try:
-                    confirm = input("Type RESTORE to continue: ").strip()
+                    confirm = input("Type OVERWRITE to replace existing files, MERGE to preserve them and restore missing files, or press Enter to cancel: ").strip().upper()
                 except (EOFError, KeyboardInterrupt):
                     return
-                if confirm == "RESTORE":
-                    print("Restore completed." if backup.restore_backup(backup_id) else "Restore failed; see errors above.")
+                if confirm in {"OVERWRITE", "MERGE"}:
+                    success = backup.restore_backup(backup_id, overwrite=confirm == "OVERWRITE")
+                    print("Restore completed." if success else "Restore incomplete or failed; see conflicts and errors above.")
                 else:
                     print("Restore cancelled.")
             else:

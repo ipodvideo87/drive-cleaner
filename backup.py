@@ -209,14 +209,15 @@ def _create_zip_backup(source_path: str, archive_path: str) -> None:
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
 
 
-def _extract_zip_backup(archive_path: str, destination: str) -> None:
-    """Extract a generated archive only when every member stays under destination."""
+def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = False) -> list[str]:
+    """Restore an archive without replacing existing files unless approved."""
     destination = os.path.abspath(destination)
     if _path_has_reparse_component(destination):
         raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
 
     planned_entries = []
     archived_attributes = []
+    conflicts = []
     with zipfile.ZipFile(archive_path, "r") as archive:
         for info in archive.infolist():
             member = info.filename.replace("\\", "/")
@@ -241,17 +242,33 @@ def _extract_zip_backup(archive_path: str, destination: str) -> None:
                 raise RuntimeError(f"Unsafe path inside backup archive: {info.filename}")
             if _path_has_reparse_component(target):
                 raise RuntimeError(f"Refusing to restore through a reparse point: {info.filename}")
+            if os.path.lexists(target):
+                if info.is_dir() and not os.path.isdir(target):
+                    raise RuntimeError(f"Refusing to replace a file with a directory: {info.filename}")
+                if not info.is_dir() and not os.path.isfile(target):
+                    raise RuntimeError(f"Refusing to replace a directory with a file: {info.filename}")
+                if not info.is_dir() and not overwrite:
+                    conflicts.append(target)
             planned_entries.append((info, target))
 
         # Validate every member before writing any of them, avoiding partial
         # restoration when a later entry is unsafe.
         for info, target in planned_entries:
             if info.is_dir():
+                existed = os.path.lexists(target)
                 os.makedirs(target, exist_ok=True)
+                if existed and not overwrite:
+                    continue
             else:
+                if os.path.lexists(target) and not overwrite:
+                    continue
                 os.makedirs(os.path.dirname(target), exist_ok=True)
-                with archive.open(info, "r") as source, open(target, "wb") as output:
-                    shutil.copyfileobj(source, output, length=1024 * 1024)
+                try:
+                    with archive.open(info, "r") as source, open(target, "wb" if overwrite else "xb") as output:
+                        shutil.copyfileobj(source, output, length=1024 * 1024)
+                except FileExistsError:
+                    conflicts.append(target)
+                    continue
                 timestamp = datetime(*info.date_time).timestamp()
                 os.utime(target, (timestamp, timestamp))
             archived_attributes.append((target, info.external_attr & 0xFF))
@@ -261,6 +278,7 @@ def _extract_zip_backup(archive_path: str, destination: str) -> None:
         for target, attributes in archived_attributes:
             if attributes and not ctypes.windll.kernel32.SetFileAttributesW(target, attributes):
                 raise OSError(f"Could not restore Windows file attributes: {target}")
+    return conflicts
 
 
 def find_backup_drive(exclude_drives=None, required_space_bytes=0) -> Optional[str]:
@@ -615,7 +633,7 @@ def get_backup(backup_id: str) -> Optional[Dict]:
     return None
 
 
-def restore_backup(backup_id: str) -> bool:
+def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     """
     Restore a specific backup.
 
@@ -724,41 +742,72 @@ def restore_backup(backup_id: str) -> bool:
     print("-" * 50)
 
     success_count = 0
+    conflict_count = 0
 
     for item, original_path, backup_path, backup_format in validated_items:
         print(f"[Restore] {original_path}")
+        item_conflicts = 0
 
         try:
             if backup_format == "file":
+                if os.path.lexists(original_path) and not overwrite:
+                    print("        [Skipped; existing file preserved. Use explicit overwrite approval to replace it.]\n")
+                    conflict_count += 1
+                    item_conflicts += 1
+                    continue
                 os.makedirs(os.path.dirname(original_path), exist_ok=True)
-                shutil.copy2(backup_path, original_path)
+                if overwrite:
+                    shutil.copy2(backup_path, original_path)
+                else:
+                    with open(backup_path, "rb") as source, open(original_path, "xb") as destination:
+                        shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    shutil.copystat(backup_path, original_path)
             elif backup_format == "copy":
                 os.makedirs(original_path, exist_ok=True)
                 # Restore by copying the saved directory.
-                result = subprocess.run(
-                    [
+                command = [
                         "robocopy", backup_path, original_path,
                         "/E", "/COPY:DAT", "/R:1", "/W:1",
                         "/XJ",
                         "/NFL", "/NDL", "/NJH", "/NJS",
-                    ],
+                    ]
+                if not overwrite:
+                    # Avoid replacing files users may have recreated since cleanup.
+                    command.extend(["/XC", "/XN", "/XO"])
+                    for current, _dirs, files in os.walk(backup_path):
+                        for name in files:
+                            relative = os.path.relpath(os.path.join(current, name), backup_path)
+                            if os.path.lexists(os.path.join(original_path, relative)):
+                                conflict_count += 1
+                                item_conflicts += 1
+                result = subprocess.run(
+                    command,
                     capture_output=True,
                     timeout=300
                 )
                 if result.returncode >= 8:
                     raise RuntimeError(f"Robocopy failed with exit code {result.returncode}")
             else:
-                _extract_zip_backup(backup_path, original_path)
+                conflicts = _extract_zip_backup(backup_path, original_path, overwrite=overwrite)
+                if conflicts:
+                    conflict_count += len(conflicts)
+                    item_conflicts += len(conflicts)
 
-            print("        [Done]")
+            if item_conflicts:
+                print("        [Restored without replacing existing files]")
+            else:
+                print("        [Done]")
             success_count += 1
         except Exception as e:
             print(f"        [Failed] {e}")
 
     print("-" * 50)
-    print(f"Restore complete: {success_count}/{len(manifest['items'])} items")
+    if conflict_count:
+        print(f"Restore incomplete: {success_count}/{len(manifest['items'])} items; preserved {conflict_count} existing file(s)")
+    else:
+        print(f"Restore complete: {success_count}/{len(manifest['items'])} items")
 
-    return success_count == len(manifest["items"])
+    return success_count == len(manifest["items"]) and conflict_count == 0
 
 
 def delete_backup(backup_id: str) -> bool:
@@ -892,12 +941,19 @@ def main():
         print_backups_table(backups)
 
     elif args.command == 'restore':
+        overwrite = bool(args.yes)
         if not args.yes:
-            answer = input("Restore this backup? Existing files at the saved paths may be overwritten. (y/N): ").strip().lower()
-            if answer != "y":
+            answer = input(
+                "Handle existing files: O to overwrite, M to restore missing files and preserve existing ones, or Q to cancel [M]: "
+            ).strip().lower()
+            if answer in {"o", "overwrite"}:
+                overwrite = True
+            elif answer in {"", "m", "merge"}:
+                overwrite = False
+            else:
                 print("Restore cancelled")
                 return
-        success = restore_backup(args.id)
+        success = restore_backup(args.id, overwrite=overwrite)
         sys.exit(0 if success else 1)
 
     elif args.command == 'delete':
