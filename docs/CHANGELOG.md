@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Exclude per-user Microsoft Store app package data from generic temporary and cache cleanup candidates, consistent with the guidance to manage these apps through Windows Settings or `winget`.
 - Prefer WizTree64.exe when `WIZTREE_PATH` points to the 32-bit launcher and its paired 64-bit worker is available, so scan completion tracks the export process.
 - Treat access-denied or otherwise uncheckable path metadata as unsafe during backup, restore, and cleanup path checks; genuinely missing paths remain allowed.
 - Reject ZIP backup members that require the same Windows path to be both a file and a directory before restoring any data.

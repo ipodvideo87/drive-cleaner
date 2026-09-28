@@ -408,6 +408,28 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertFalse(results["categories"]["high"]["items"])
         self.assertFalse(results["categories"]["medium"]["items"])
 
+    def test_store_app_package_data_is_excluded_from_candidates_and_imported_plans(self):
+        paths = (
+            r"C:\Users\A\AppData\Local\Packages\Microsoft.Windows.Photos_8wekyb3d8bbwe\LocalCache\Temp\pending.dat",
+            r"C:\Users\A\AppData\Local\Packages\Microsoft.Windows.Photos_8wekyb3d8bbwe\LocalCache\Cache\state.bin",
+        )
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "100000000"} for path in paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+        item = {
+            "path": paths[0],
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 100_000_000, "size_formatted": "95.37 MB", "kind": "File",
+        }
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "protected path"):
+            analyze.generate_clean_script(
+                {"categories": {"high": {"name": "High", "items": [item]}}},
+                str(Path(temp_dir) / "store-app-cleanup.ps1"),
+            )
+
     def test_windows_case_and_separator_aware_parent_deduplication(self):
         self.assertTrue(analyze._is_under(r"C:\Temp\nested", r"c:/temp/"))
         self.assertFalse(analyze._is_under(r"C:\Temp-old\item", r"C:\Temp"))

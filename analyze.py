@@ -99,6 +99,7 @@ EXCLUDE_PATTERNS = [
     "\\.codex\\",                       # Codex settings, extensions, and task data
     "\\.codex-old\\",                   # Legacy Codex profile may contain authentication and task state
     "\\.agents\\",                      # User-installed agent skills and configuration
+    "\\appdata\\local\\packages\\", # Store app data managed by the app and Windows
     "\\appdata\\roaming\\codex\\",    # Codex app state and browser profile data
     "\\.local\\share\\containers\\",  # Container or Podman machine state
     "\\onedrive",
