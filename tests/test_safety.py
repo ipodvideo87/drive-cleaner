@@ -492,6 +492,50 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "Application cache",
         ))
 
+    def test_cargo_install_build_outputs_inside_temp_are_caution_candidates(self):
+        path = r"C:\Users\A\AppData\Local\Temp\cargo-installABC\debug\example.exe"
+        label = "Cargo install build output (confirm the install completed and review its compiled files)"
+        results = self.analyze_rows([{"File Name": path, "Size": "104857600"}])
+        items = results["categories"]["medium"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["path"], path)
+        self.assertEqual(items[0]["name"], label)
+        self.assertFalse(results["categories"]["high"]["items"])
+        self.assertTrue(analyze._matches_cleanup_rule(path, ("medium",), label))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Users\A\Downloads\cargo-installABC\debug\example.exe", ("medium",), label
+        ))
+        stale_plan = {"categories": {"high": {"name": "High", "items": [{
+            "path": path,
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 104857600, "size_formatted": "100 MB", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(stale_plan, str(Path(temp_dir) / "stale.ps1"), priority="high")
+
+    def test_chocolatey_staging_inside_temp_is_a_caution_candidate(self):
+        path = r"C:\Users\A\AppData\Local\Temp\chocolatey\windirstat\2.9.0\payload.exe"
+        label = "Chocolatey package staging (confirm installs are complete and review contents)"
+        results = self.analyze_rows([{"File Name": path, "Size": "104857600"}])
+        items = results["categories"]["medium"]["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["path"], path)
+        self.assertEqual(items[0]["name"], label)
+        self.assertFalse(results["categories"]["high"]["items"])
+        self.assertTrue(analyze._matches_cleanup_rule(path, ("medium",), label))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Users\A\Downloads\chocolatey\windirstat\2.9.0\payload.exe", ("medium",), label
+        ))
+        stale_plan = {"categories": {"high": {"name": "High", "items": [{
+            "path": path,
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 104857600, "size_formatted": "100 MB", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "does not match its priority and cleanup label"):
+            analyze.generate_clean_script(stale_plan, str(Path(temp_dir) / "stale.ps1"), priority="high")
+
     def test_known_vscode_cache_paths_get_specific_caution_labels(self):
         known_paths = [
             r"C:\Users\A\AppData\Roaming\Code\CachedExtensionVSIXs",

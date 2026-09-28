@@ -61,6 +61,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | DISM component cleanup | 2–4 GB | Use `DISM /Online /Cleanup-Image /StartComponentCleanup`. Never add `/ResetBase`; that removes the ability to uninstall updates. WinSxS and System32 share hard links, so apparent size can exceed recovered space. |
 | VS Code caches at `%APPDATA%\Code\{CachedExtensionVSIXs,CachedData,Cache,Crashpad}` | 1–2 GB | Close VS Code first. Preserve `WebStorage` and `User`, which hold extension state and settings. |
 | Build caches such as `.gradle\caches`, Go modules, `.nuget\packages`, and `.m2` | Varies | Builds may need to download the data again. Confirm no build is running. |
+| Cargo install output and Chocolatey staging under known temp roots | Varies | These locations can contain compiled executables or installer payloads, not disposable scratch files. Confirm the install/build finished and inspect contents before selecting them. |
 | Updater cache at `GoogleUpdater\crx_cache` | Varies | Usually recreated automatically; may require administrator rights. |
 | Error reports at `ProgramData\...\WER\{ReportQueue,ReportArchive}` | Varies | Removes diagnostic history. |
 | Delivery Optimization cache | Varies | Use the supported `Delete-DeliveryOptimizationCache -Force` cmdlet. |

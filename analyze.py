@@ -46,6 +46,8 @@ CLEANABLE_PATTERNS = {
             {"pattern": "minidump.dmp", "root": "windows", "root_child": True, "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
             {"pattern": "memory.dmp", "root": "windows", "root_child": True, "name": "Windows memory dump (may contain memory data; keep if troubleshooting)", "safe": False},
             {"pattern": "minidump", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "\\temp\\chocolatey", "known_temp_location": True, "component_match_required": True, "name": "Chocolatey package staging (confirm installs are complete and review contents)", "safe": False},
+            {"pattern": "cargo-install", "component_prefix": True, "component_prefix_requires_suffix": True, "known_temp_location": True, "component_match_required": True, "name": "Cargo install build output (confirm the install completed and review its compiled files)", "safe": False},
             {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (close Chrome first; it may be downloaded again; consider disabling optimization-guide-on-device-model in chrome://flags)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
@@ -345,8 +347,23 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
         (len(pattern_components) > 1 and
          pattern_components in sequences.get(len(pattern_components), ()))
     )
+    if pattern_info.get("component_prefix"):
+        prefix = pattern_components[-1]
+        prefix_match = any(
+            component.startswith(prefix) and (
+                not pattern_info.get("component_prefix_requires_suffix") or
+                len(component) > len(prefix)
+            )
+            for component in components
+        )
+        if pattern_info.get("component_prefix_requires_suffix"):
+            component_match = prefix_match
+        else:
+            component_match = component_match or prefix_match
     if pattern_info.get("known_temp_location"):
         if not _is_known_temp_location(path, components):
+            return False
+        if pattern_info.get("component_match_required") and not component_match:
             return False
     elif pattern_info.get("unknown_temp_location"):
         if not component_match or _is_known_temp_location(path, components):
