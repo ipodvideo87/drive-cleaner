@@ -1,5 +1,7 @@
 # Changelog
 
+- Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
+
 ## Unreleased
 - Restrict automatic crash-dump labels to known locations under the drive's Windows directory.
 - Prefer the most specific matching cleanup rule so package-manager caches are not labeled by generic cache rules.

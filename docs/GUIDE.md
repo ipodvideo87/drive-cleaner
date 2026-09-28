@@ -30,7 +30,7 @@ Choose the latest scan or enter a CSV path. Review the disk summary, candidate t
 
 High, medium, and low are review tiers, not a guarantee of safety. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
 
-Drive Cleanr uses WinDirStat's item type and count fields to distinguish files from folders. If an imported WinDirStat row lacks reliable type data, it is skipped and counted in the report instead of being guessed as a file.
+Drive Cleanr checks candidate file/folder types against the current filesystem. If WinDirStat did not include reliable type metadata, the current path type is used. If a row's exported type conflicts with the current path, it is skipped and counted in the report; rescan to refresh it.
 
 When a path matches both a broad cache rule and a recognized package-manager rule, Drive Cleanr uses the more specific package-manager category and caution tier.
 

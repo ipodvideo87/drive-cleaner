@@ -412,6 +412,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         "stale_candidate_count": 0,
         "project_candidate_count": 0,
         "unclassified_candidate_count": 0,
+        "type_mismatch_count": 0,
         "categories": {
             "high": {"name": "High priority — lower risk (review each path)", "items": [], "total_size": 0},
             "medium": {"name": "Medium priority — review carefully", "items": [], "total_size": 0},
@@ -546,22 +547,37 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                         if not os.path.exists(path.rstrip("\\/")):
                             results["stale_candidate_count"] += 1
                         else:
-                            row_type = 'directory' if path.endswith(('\\', '/')) else None
-                            if row_type is None and is_windirstat_export:
-                                row_type = _is_directory_row({
+                            scanner_type = 'directory' if path.endswith(('\\', '/')) else None
+                            if scanner_type is None and is_windirstat_export:
+                                scanner_type = _is_directory_row({
                                     'attributes': cell(row, attributes_column),
                                     'windirstatattributes': cell(row, windirstat_attributes_column),
                                     'files': cell(row, files_column),
                                     'folders': cell(row, folders_column),
                                 })
-                            elif row_type is None:
+                            elif scanner_type is None:
                                 # WizTree represents directory rows with a trailing separator.
-                                row_type = 'file'
+                                scanner_type = 'file'
 
-                            if row_type is None:
-                                results['unclassified_candidate_count'] += 1
+                            current_path = path.rstrip('\\/')
+                            if os.path.isdir(current_path):
+                                current_type = 'directory'
+                            elif os.path.isfile(current_path):
+                                current_type = 'file'
                             else:
-                                row_is_directory = row_type == 'directory'
+                                current_type = None
+
+                            if current_type is None:
+                                results['unclassified_candidate_count'] += 1
+                            elif scanner_type is not None and scanner_type != current_type:
+                                # Old exports can have stale type metadata (for
+                                # example, a former folder path now naming a file).
+                                # Do not build a destructive plan from that row.
+                                results['type_mismatch_count'] += 1
+                            else:
+                                # Use the current filesystem as the authority when
+                                # WinDirStat did not provide reliable type metadata.
+                                row_is_directory = current_type == 'directory'
                                 if row_is_directory and not path.endswith(('\\', '/')):
                                     path += '\\'
                                 if _inside_project_tree(path, row_is_directory, project_path_cache):
@@ -684,6 +700,8 @@ def print_report(results, show_all_items=False, item_limit=10):
         print(f"Skipped {results['project_candidate_count']} candidate entries inside detected project folders.")
     if results.get("unclassified_candidate_count", 0):
         print(f"Skipped {results['unclassified_candidate_count']} candidate rows with no reliable file or folder type; rescan to get complete item details.")
+    if results.get("type_mismatch_count", 0):
+        print(f"Skipped {results['type_mismatch_count']} candidate rows whose file or folder type changed since the scan; rescan to refresh those entries.")
     print("=" * 60)
 
 

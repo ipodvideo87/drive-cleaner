@@ -25,7 +25,41 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 writer.writeheader()
                 writer.writerows(rows)
             with mock.patch("analyze.os.path.exists", return_value=True):
-                return analyze.analyze_csv(str(csv_path), min_size_mb=0)
+                with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
+                    with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
+                        return analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+    @staticmethod
+    def _synthetic_types(rows):
+        types = {}
+        for row in rows:
+            path = next((value for key, value in row.items() if key.casefold() in {
+                "file name", "name", "path"
+            }), "")
+            if not path:
+                continue
+            normalized = path.rstrip("\\/").casefold()
+            is_directory = path.endswith(("\\", "/"))
+            keys = {key.casefold().replace(" ", "") for key in row}
+            if not is_directory and any("windirstat" in key for key in keys):
+                is_directory = analyze._is_directory_row({
+                    "attributes": row.get("Attributes", ""),
+                    "windirstatattributes": row.get("WinDirStat Attributes", ""),
+                    "files": row.get("Files", ""),
+                    "folders": row.get("Folders", ""),
+                }) is True
+            types[normalized] = "directory" if is_directory else "file"
+        return types
+
+    @classmethod
+    def _synthetic_isdir(cls, rows):
+        types = cls._synthetic_types(rows)
+        return lambda path: types.get(path.rstrip("\\/").casefold()) == "directory"
+
+    @classmethod
+    def _synthetic_isfile(cls, rows):
+        types = cls._synthetic_types(rows)
+        return lambda path: types.get(path.rstrip("\\/").casefold()) == "file"
 
     def test_scan_export_with_missing_required_columns_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -44,7 +78,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with mock.patch("analyze.os.path.exists", return_value=True):
-                results = analyze.analyze_csv(str(export_path), min_size_mb=0)
+                with mock.patch("analyze.os.path.isdir", return_value=False), \
+                     mock.patch("analyze.os.path.isfile", return_value=True):
+                    results = analyze.analyze_csv(str(export_path), min_size_mb=0)
         self.assertEqual(len(results["categories"]["high"]["items"]), 1)
         self.assertTrue(results["categories"]["high"]["items"][0]["path"].endswith("large.tmp"))
 
@@ -340,7 +376,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     "Logical Size": "125000000", "Physical Size": "120000000", "Attributes": "Archive",
                     "WinDirStat Attributes": "0x20000008",
                 })
-            with mock.patch("analyze.os.path.exists", return_value=True):
+            with mock.patch("analyze.os.path.exists", return_value=True), \
+                 mock.patch("analyze.os.path.isdir", side_effect=lambda path: path.endswith("Candidate")), \
+                 mock.patch("analyze.os.path.isfile", side_effect=lambda path: path.endswith("large.bin")):
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         items = results["categories"]["high"]["items"]
         self.assertEqual(len(items), 1)  # parent folder prevents double-counting its file
@@ -367,7 +405,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     "Logical Size": "130000000", "Physical Size": "125000000",
                 })
             with mock.patch("analyze.os.path.exists", return_value=True):
-                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+                with mock.patch("analyze.os.path.isdir", side_effect=lambda path: path.endswith("known-directory")), \
+                     mock.patch("analyze.os.path.isfile", return_value=False):
+                    results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         candidates = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in candidates], [
             r"C:\Users\A\AppData\Local\Temp\known-directory" + "\\",
@@ -378,6 +418,34 @@ class AnalyzeSafetyTests(unittest.TestCase):
             analyze.print_report(results)
         report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
         self.assertIn("no reliable file or folder type", report)
+
+    def test_windirstat_type_metadata_is_checked_against_current_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "windirstat-types.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["Name", "Logical Size", "Physical Size", "WinDirStat Attributes"])
+                writer.writeheader()
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp\changed-to-file",
+                    "Logical Size": "125000000", "Physical Size": "120000000",
+                    "WinDirStat Attributes": "0x20000004",
+                })
+                writer.writerow({
+                    "Name": r"C:\Users\A\AppData\Local\Temp\current-file",
+                    "Logical Size": "130000000", "Physical Size": "125000000",
+                })
+            with mock.patch("analyze.os.path.exists", return_value=True), \
+                 mock.patch("analyze.os.path.isdir", return_value=False), \
+                 mock.patch("analyze.os.path.isfile", return_value=True):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+        candidates = results["categories"]["high"]["items"]
+        self.assertEqual([item["path"] for item in candidates], [r"C:\Users\A\AppData\Local\Temp\current-file"])
+        self.assertEqual(candidates[0]["kind"], "File")
+        self.assertEqual(results["type_mismatch_count"], 1)
+        with mock.patch("builtins.print") as output:
+            analyze.print_report(results)
+        report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("type changed since the scan", report)
 
     def test_windirstat_without_volume_metadata_uses_labeled_current_space(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -391,6 +459,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 })
             usage = SimpleNamespace(total=1000, used=700, free=300)
             with mock.patch("analyze.os.path.exists", return_value=True), \
+                 mock.patch("analyze.os.path.isdir", return_value=False), \
+                 mock.patch("analyze.os.path.isfile", return_value=True), \
                  mock.patch("analyze.shutil.disk_usage", return_value=usage) as disk_usage:
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
                 with mock.patch("builtins.print") as output:
@@ -416,7 +486,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     size_header: "120000000", allocated_header: "120000000",
                 })
             with mock.patch("analyze.os.path.exists", return_value=True):
-                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+                with mock.patch("analyze.os.path.isdir", return_value=False), \
+                     mock.patch("analyze.os.path.isfile", return_value=True):
+                    results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         items = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
 
