@@ -2220,6 +2220,49 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True), [])
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "saved data")
 
+    def test_zip_restore_write_failure_preserves_overwrite_destination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            destination.mkdir()
+            target = destination / "existing.txt"
+            target.write_bytes(b"keep current data")
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("existing.txt", "restored data")
+
+            def partial_write_then_fail(_source, output, length):
+                output.write(b"partial")
+                raise OSError("simulated write failure")
+
+            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+                with self.assertRaisesRegex(OSError, "simulated write failure"):
+                    backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True)
+
+            self.assertEqual(target.read_bytes(), b"keep current data")
+            self.assertEqual([], list(destination.glob(".drive-cleanr-restore-*.tmp")))
+
+    def test_zip_restore_write_failure_does_not_leave_partial_new_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            destination.mkdir()
+            target = destination / "missing.txt"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("missing.txt", "restored data")
+
+            def partial_write_then_fail(_source, output, length):
+                output.write(b"partial")
+                raise OSError("simulated write failure")
+
+            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+                with self.assertRaisesRegex(OSError, "simulated write failure"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+
+            self.assertFalse(target.exists())
+            self.assertEqual([], list(destination.glob(".drive-cleanr-restore-*.tmp")))
+
     def test_zip_restore_preflights_non_directory_parent_conflicts_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

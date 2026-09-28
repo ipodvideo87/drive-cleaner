@@ -20,7 +20,7 @@ import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
@@ -149,9 +149,11 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool,
-                             expected_sha256: Optional[str], expected_size: Optional[int]) -> bool:
-    """Stage and verify a file restore before making it visible at its destination."""
+def _write_file_atomically(destination: str, write_staged: Callable[[str], None], overwrite: bool,
+                           expected_sha256: Optional[str] = None,
+                           expected_size: Optional[int] = None,
+                           timestamp: Optional[float] = None) -> bool:
+    """Write and verify a same-directory staging file before publishing it."""
     if _path_has_reparse_component(destination):
         raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
 
@@ -165,14 +167,16 @@ def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool
     )
     os.close(descriptor)
     try:
-        shutil.copy2(backup_path, staged_path)
+        write_staged(staged_path)
         if expected_sha256:
             if _sha256_file(staged_path).lower() != expected_sha256.lower():
-                raise RuntimeError("Staged restore copy failed its SHA-256 integrity check")
+                raise RuntimeError("Staged restore file failed its SHA-256 integrity check")
         elif (not isinstance(expected_size, int) or
               os.path.getsize(staged_path) != expected_size):
-            raise RuntimeError("Staged restore copy failed its size check")
+            raise RuntimeError("Staged restore file failed its size check")
 
+        if timestamp is not None:
+            os.utime(staged_path, (timestamp, timestamp))
         if _path_has_reparse_component(destination):
             raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
         if overwrite:
@@ -190,6 +194,17 @@ def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool
             os.unlink(staged_path)
         except FileNotFoundError:
             pass
+
+
+def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool,
+                             expected_sha256: Optional[str], expected_size: Optional[int]) -> bool:
+    """Stage and verify a backup file before making it visible at its destination."""
+    def copy_backup(staged_path):
+        shutil.copy2(backup_path, staged_path)
+
+    return _write_file_atomically(
+        destination, copy_backup, overwrite, expected_sha256, expected_size
+    )
 
 
 def _directory_fingerprint(path: str) -> Dict[str, tuple]:
@@ -369,15 +384,21 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
             else:
                 if os.path.lexists(target) and not overwrite:
                     continue
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                try:
-                    with archive.open(info, "r") as source, open(target, "wb" if overwrite else "xb") as output:
+                def write_member(staged_path):
+                    with archive.open(info, "r") as source, open(staged_path, "wb") as output:
                         shutil.copyfileobj(source, output, length=1024 * 1024)
-                except FileExistsError:
+
+                timestamp = datetime(*info.date_time).timestamp()
+                restored = _write_file_atomically(
+                    target,
+                    write_member,
+                    overwrite,
+                    expected_size=info.file_size,
+                    timestamp=timestamp,
+                )
+                if not restored:
                     conflicts.append(target)
                     continue
-                timestamp = datetime(*info.date_time).timestamp()
-                os.utime(target, (timestamp, timestamp))
             archived_attributes.append((target, info.external_attr & 0xFF))
 
     if os.name == "nt":
