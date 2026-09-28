@@ -123,7 +123,7 @@ Bulk backup removal lists the backups first and requires typing `DELETE`. For de
 
 - Pattern matches are suggestions, not proof that a file is disposable.
 - High, medium, and low tiers communicate different levels of impact; read the notes for each item.
-- Windows component stores, restore points, installed-program repair data, personal folders, messaging data, and credential folders are red lines.
+- Windows component stores, restore points, virtual-memory and hibernation files, installed-program repair data, personal folders, messaging data, and credential folders are red lines.
 - The report's folder sizes are estimates. Parent/child totals and hard links can make apparent savings larger than the actual disk space freed.
 - Browser, editor, and build-process warnings can mean a cache stays in use or is recreated. Close affected apps before cleanup.
 - When in doubt, omit the target.

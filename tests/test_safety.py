@@ -700,6 +700,31 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = self.analyze_rows(rows)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_virtual_memory_and_hibernation_files_are_protected_from_candidates_and_plans(self):
+        paths = (
+            r"C:\pagefile.sys",
+            r"C:\swapfile.sys",
+            r"C:\hiberfil.sys",
+            r"C:\Users\A\AppData\Local\Temp\pagefile.sys",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(analyze._is_excluded_path(path))
+
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "100000000"}
+            for path in paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+        imported = {"categories": {"high": {"name": "High", "items": [{
+            "path": paths[-1],
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 100_000_000, "size_formatted": "95.37 MB", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(ValueError, "protected path"):
+            analyze.generate_clean_script(imported, str(Path(temp_dir) / "clean.ps1"))
+
     def test_store_app_package_data_is_excluded_from_candidates_and_imported_plans(self):
         paths = (
             r"C:\Users\A\AppData\Local\Packages\Microsoft.Windows.Photos_8wekyb3d8bbwe\LocalCache\Temp\pending.dat",

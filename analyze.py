@@ -90,6 +90,9 @@ EXCLUDE_PATTERNS = [
     "\\windows\\softwaredistribution\\download\\", # Use Windows maintenance tools for update downloads
     "\\$mft",                            # NTFS file-system metadata
     "\\$extend",                         # NTFS file-system metadata
+    "pagefile.sys",                      # Windows virtual memory file
+    "swapfile.sys",                      # Windows virtual memory file
+    "hiberfil.sys",                      # Windows hibernation file
     "system volume information",         # System restore points
     "\\driverstore\\",                   # Active driver store
     "$recycle.bin",
