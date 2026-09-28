@@ -51,7 +51,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
-| Package-manager caches | npm, pip, Scoop, and Electron caches | Prefer each package manager's own cleanup command |
+| Package-manager caches | npm, pip, and Electron caches | Prefer each package manager's own cleanup command. |
 
 ## Tier 1: Review the side effects
 
@@ -76,6 +76,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 - **Jianying and other editing apps**: Jianying's `User Data` may contain drafts. Do not delete it directly; clear caches in the app. Clear WeChat or QQ data from their own storage controls, and preserve chat history.
 - **Global npm packages**: show `npm ls -g` and let the user choose packages.
 - **Test browser runtimes**, such as `ms-playwright`: they can be reinstalled with `npx playwright install`, but require a deliberate choice.
+- **Scoop downloaded installers** under `scoop\cache`: these may be useful for offline reinstalls. Prefer Scoop's own cache controls after reviewing what will be removed; see the [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout) and [command list](https://github.com/ScoopInstaller/Scoop/wiki/Commands).
 
 ## Path patterns to review
 

@@ -59,6 +59,7 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\.cargo\\registry", "name": "Cargo cache", "safe": False},
             {"pattern": "\\.nuget\\packages", "name": "NuGet cache", "safe": False},
             {"pattern": "\\go\\pkg\\mod", "name": "Go modules cache", "safe": False},
+            {"pattern": "\\scoop\\cache", "name": "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)", "safe": False},
             {"pattern": "\\programdata\\nvidia corporation\\nvidia app\\updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\programdata\\nvidia corporation\\nvapp-updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\ms-playwright", "name": "Playwright test browsers (can be reinstalled with `npx playwright install`)", "safe": False},

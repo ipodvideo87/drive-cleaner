@@ -346,6 +346,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         results = self.analyze_rows([
             {"File Name": r"C:\Users\A\.gradle\caches" + "\\", "Size": "100000000"},
             {"File Name": r"C:\Users\A\.cargo\registry\cache\download\package.crate", "Size": "90000000"},
+            {"File Name": r"C:\Users\A\scoop\cache\temurin20-jdk.zip", "Size": "85000000"},
             {"File Name": r"C:\Users\A\AppData\Local\OtherApp\caches\state.bin", "Size": "80000000"},
         ])
         high = results["categories"]["high"]["items"]
@@ -358,8 +359,20 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual({item["path"] for item in low}, {
             r"C:\Users\A\.gradle\caches" + "\\",
             r"C:\Users\A\.cargo\registry\cache\download\package.crate",
+            r"C:\Users\A\scoop\cache\temurin20-jdk.zip",
         })
-        self.assertEqual({item["name"] for item in low}, {"Gradle cache", "Cargo cache"})
+        self.assertEqual({item["name"] for item in low}, {
+            "Gradle cache", "Cargo cache",
+            "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)",
+        })
+        self.assertTrue(analyze._matches_cleanup_rule(
+            r"C:\Users\A\scoop\cache\temurin20-jdk.zip", ("low",),
+            "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)",
+        ))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Users\A\scoop\cache\temurin20-jdk.zip", ("medium",),
+            "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)",
+        ))
 
     def test_exclusions_match_complete_path_components(self):
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive\\Documents\\file.dat"))
