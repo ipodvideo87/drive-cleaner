@@ -3,6 +3,7 @@ import io
 import os
 import shutil
 import subprocess
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -1860,6 +1861,13 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertEqual(archive.testzip(), None)
                 self.assertIn(".hidden-folder/secret-cache.bin", archive.namelist())
+                file_info = archive.getinfo("normal.bin")
+                with archive_path.open("rb") as archive_file:
+                    archive_file.seek(file_info.header_offset)
+                    local_header = archive_file.read(30)
+                self.assertEqual(struct.unpack_from("<H", local_header, 4)[0], 45)
+                self.assertEqual(struct.unpack_from("<II", local_header, 18), (0xFFFFFFFF, 0xFFFFFFFF))
+                self.assertEqual(archive.read("normal.bin"), b"visible payload")
                 if os.name == "nt":
                     attrs = {entry.filename: entry.external_attr & 0xFF for entry in archive.infolist()}
                     self.assertTrue(attrs[".hidden-folder/"] & 0x2)
