@@ -177,6 +177,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Users\\Jordan\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
             "C:\\Users\\Jordan\\AppData\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
             "C:\\Users\\Jordan\\.codex\\plugins\\cache\\openai-curated-remote",
+            "C:\\Users\\Jordan\\.codex-old\\plugins\\cache\\openai-curated-remote",
         ]
         for path in report_paths:
             with self.subTest(path=path):
@@ -319,6 +320,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("'C:\\Users\\O''Brien\\$(not-a-command)\\AppData\\Local\\Temp\\'", script)
         self.assertIn("--json", script)
         self.assertIn("A Rust/Cargo process is running", script)
+        self.assertIn("A Conda, Mamba, or Pixi operation is running", script)
         self.assertIn("A Node.js or package-manager process is running", script)
         self.assertIn("A Go process is running", script)
         self.assertIn("A .NET build process is running", script)
@@ -364,6 +366,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             unselected = root / "unselected"
             (selected / "nested" / "claude-session").mkdir(parents=True)
             (selected / "nested" / ".codex" / "extensions").mkdir(parents=True)
+            codex_old_cache = selected / "nested" / ".codex-old" / "plugins" / "cache"
+            codex_old_cache.mkdir(parents=True)
             onedrive_cache = selected / "nested" / "OneDrive - Contoso" / "Cache"
             onedrive_cache.mkdir(parents=True)
             codex_package_cache = (
@@ -379,6 +383,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "remove-me.bin").write_bytes(b"remove")
             (selected / "nested" / "claude-session" / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / ".codex" / "extensions" / "keep.bin").write_bytes(b"keep")
+            (codex_old_cache / "keep.bin").write_bytes(b"keep")
             (onedrive_cache / "keep.bin").write_bytes(b"keep")
             (codex_package_cache / "keep.bin").write_bytes(b"keep")
             (codex_roaming_cache / "keep.bin").write_bytes(b"keep")
@@ -413,6 +418,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse((selected / "remove-me.bin").exists(), result.stdout + result.stderr)
             self.assertEqual((selected / "nested" / "claude-session" / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((selected / "nested" / ".codex" / "extensions" / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((codex_old_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((onedrive_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_package_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")

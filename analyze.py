@@ -97,6 +97,7 @@ EXCLUDE_PATTERNS = [
     "\\programdata\\usoshared\\logs\\", # Active Windows Update diagnostics
     "\\service worker\\",               # May contain offline site data and user state
     "\\.codex\\",                       # Codex settings, extensions, and task data
+    "\\.codex-old\\",                   # Legacy Codex profile may contain authentication and task state
     "\\.agents\\",                      # User-installed agent skills and configuration
     "\\appdata\\roaming\\codex\\",    # Codex app state and browser profile data
     "\\.local\\share\\containers\\",  # Container or Podman machine state
@@ -704,6 +705,10 @@ if ($vscode) {{
 $javaproc = Get-Process -Name "java" -ErrorAction SilentlyContinue
 if ($javaproc) {{
     Write-Host "[Warning] Java is running (possibly a Gradle daemon); build cache cleanup may be incomplete" -ForegroundColor Yellow
+}}
+$condaproc = Get-Process -Name "conda", "mamba", "micromamba", "pixi" -ErrorAction SilentlyContinue
+if ($condaproc) {{
+    Write-Host "[Warning] A Conda, Mamba, or Pixi operation is running; defer package-cache cleanup until it finishes" -ForegroundColor Yellow
 }}
 $nodeproc = Get-Process -Name "node", "npm", "yarn", "pnpm" -ErrorAction SilentlyContinue
 if ($nodeproc) {{
