@@ -189,8 +189,24 @@ def _backup_menu():
             print("Enter 0, 1, 2, 3, or 4.")
 
 
+def _print_welcome():
+    """Show the compact, once-per-launch welcome screen."""
+    print(r"""
+      .-----------------------------.
+      |   D R I V E   C L E A N R   |
+      |   [####------] SPACE MAP    |
+      '-----------------------------'
+          FIND SPACE. KEEP CONTROL.
+
+    Scan -> Review -> Select -> Back up -> Clean
+    Scans and reviews never delete files. You choose targets before a separate cleanup.
+    Start with 1 to scan, or 2 to review a previous scan.
+""")
+
+
 def main_menu():
     """Show the main guided workflow until the user exits."""
+    _print_welcome()
     while True:
         print("\nDrive Cleanr")
         print("=" * 48)

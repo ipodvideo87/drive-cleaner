@@ -148,6 +148,22 @@ def _valid_restore_target(path: str) -> bool:
     return ntpath.normpath(normalized) == normalized.rstrip("\\")
 
 
+def _windows_path_key(path: str) -> str:
+    """Normalize a local Windows path for case-insensitive overlap checks."""
+    return ntpath.normcase(ntpath.normpath(os.fspath(path).replace("/", "\\")))
+
+
+def _paths_overlap(left: str, right: str) -> bool:
+    """Return whether two Windows paths name the same or nested locations."""
+    left_key = _windows_path_key(left).rstrip("\\")
+    right_key = _windows_path_key(right).rstrip("\\")
+    return (
+        left_key == right_key or
+        left_key.startswith(right_key + "\\") or
+        right_key.startswith(left_key + "\\")
+    )
+
+
 def get_dir_size(path: str) -> int:
     """Get the complete size without following links or hiding read errors."""
     if os.path.isfile(path):
@@ -547,6 +563,9 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         if not _valid_restore_target(source_path):
             raise ValueError(f"Refusing an unsafe backup path: {source_path}")
         normalized_paths.append(source_path)
+    for index, path in enumerate(normalized_paths):
+        if any(_paths_overlap(path, earlier) for earlier in normalized_paths[:index]):
+            raise ValueError("Backup paths must not duplicate or overlap")
     paths = normalized_paths
 
     source_drives = {
@@ -855,9 +874,6 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         print("Refusing to verify through an unavailable or linked backup location")
         return False
 
-    def path_key(path):
-        return ntpath.normcase(ntpath.normpath(path.replace("/", "\\")))
-
     requested = None
     if paths is not None:
         if not isinstance(paths, list) or not paths:
@@ -868,17 +884,19 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
             if not _valid_restore_target(path):
                 print(f"Refusing to verify an unsafe source path: {path}")
                 return False
-            requested.add(path_key(path))
+            requested.add(_windows_path_key(path))
 
     items_by_path = {}
+    seen_source_paths = []
     for item in manifest["items"]:
         if not isinstance(item, dict) or not isinstance(item.get("original_path"), str):
             print("Refusing to verify a malformed backup manifest")
             return False
-        key = path_key(item["original_path"])
-        if key in items_by_path:
-            print("Refusing to verify a backup with duplicate source paths")
+        key = _windows_path_key(item["original_path"])
+        if any(_paths_overlap(item["original_path"], previous) for previous in seen_source_paths):
+            print("Refusing to verify a backup with duplicate or overlapping source paths")
             return False
+        seen_source_paths.append(item["original_path"])
         items_by_path[key] = item
 
     if requested is not None:
@@ -983,6 +1001,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     # avoids arbitrary/network/device destinations and partial restores caused
     # by a malformed later entry.
     validated_items = []
+    restore_destinations = []
     for item in manifest["items"]:
         if not isinstance(item, dict):
             print("Refusing to restore a malformed backup manifest")
@@ -994,6 +1013,10 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 backup_format not in {"file", "copy", "zip"}):
             print("Refusing to restore an invalid backup manifest entry")
             return False
+        if any(_paths_overlap(original_path, previous) for previous in restore_destinations):
+            print("Refusing duplicate or overlapping restore destinations in backup manifest")
+            return False
+        restore_destinations.append(original_path)
         backup_path = os.path.abspath(backup_path)
         try:
             contained = os.path.normcase(os.path.commonpath([os.path.abspath(backup_dir), backup_path])) == os.path.normcase(os.path.abspath(backup_dir))

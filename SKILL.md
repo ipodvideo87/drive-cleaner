@@ -1,6 +1,6 @@
 ---
 name: clean-c-drive
-description: Safe Windows drive cleanup. Use when the user wants to find reclaimable disk space or review cleanup candidates. Workflow: WizTree or WinDirStat scan -> conservative analysis with the pattern library and knowledge base -> user-approved item selection -> verified backup -> cleanup -> observation period. Safety first; do nothing when uncertain.
+description: "Safe Windows drive cleanup. Use when the user wants to find reclaimable disk space or review cleanup candidates. Workflow: WizTree or WinDirStat scan -> conservative analysis with the pattern library and knowledge base -> user-approved item selection -> verified backup -> cleanup -> observation period. Safety first; do nothing when uncertain."
 ---
 
 # /clean-c-drive Skill

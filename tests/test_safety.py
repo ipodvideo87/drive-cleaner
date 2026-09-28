@@ -2086,13 +2086,23 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertIn("Scan cancelled.", output.getvalue())
 
     def test_guided_entry_point_has_simple_exit(self):
-        with mock.patch("builtins.input", return_value="0"):
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="0"), redirect_stdout(output):
             drive_cleaner.main_menu()
+        welcome = output.getvalue()
+        self.assertIn("FIND SPACE. KEEP CONTROL.", welcome)
+        self.assertIn("Scan -> Review -> Select -> Back up -> Clean", welcome)
+        self.assertIn("Scans and reviews never delete files.", welcome)
+        self.assertLess(welcome.index("FIND SPACE."), welcome.index("1) Scan a drive"))
 
     def test_main_menu_opens_the_previous_scan_picker(self):
-        with mock.patch("builtins.input", side_effect=["2", "0"]), mock.patch.object(analyze, "run_tui") as review_scan:
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["2", "0"]), \
+             mock.patch.object(analyze, "run_tui") as review_scan, \
+             redirect_stdout(output):
             drive_cleaner.main_menu()
         review_scan.assert_called_once_with()
+        self.assertEqual(output.getvalue().count("FIND SPACE. KEEP CONTROL."), 1)
 
     def test_backup_menu_can_merge_without_overwriting(self):
         manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\Jordan\cache.bin"}]}]
@@ -2609,6 +2619,33 @@ class BackupSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "unsafe backup path"):
                     backup.create_backup([unsafe_path])
                 get_root.assert_not_called()
+
+    def test_backup_creation_rejects_duplicate_and_nested_paths_before_storage(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = str(Path(temp_dir) / "selected")
+            child = str(Path(parent) / "nested" / "cache.bin")
+            for paths in ([parent, parent], [parent, child]):
+                with self.subTest(paths=paths), mock.patch.object(backup, "get_backup_root") as get_root:
+                    with self.assertRaisesRegex(ValueError, "duplicate or overlap"):
+                        backup.create_backup(paths)
+                    get_root.assert_not_called()
+
+    def test_backup_verification_rejects_overlapping_manifest_sources(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent = str(Path(temp_dir) / "selected")
+            manifest = {
+                "status": "completed",
+                "items": [
+                    {"original_path": parent},
+                    {"original_path": str(Path(parent) / "nested" / "cache.bin")},
+                ],
+            }
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir), \
+                 mock.patch("builtins.print") as output:
+                self.assertFalse(backup.verify_backup("backup_test"))
+            message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+            self.assertIn("duplicate or overlapping source paths", message)
 
     def test_backup_source_beneath_a_reparse_parent_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3441,6 +3478,42 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             self.assertEqual(payload.read_bytes(), b"safe backup payload")
             self.assertFalse((root / "first-target.bin").exists())
+
+    def test_restore_manifest_rejects_duplicate_and_nested_destinations_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / "backup_20260927_123456_123456"
+            backup_dir.mkdir()
+            payloads = [backup_dir / "payload-1", backup_dir / "payload-2"]
+            payloads[0].write_bytes(b"first payload")
+            payloads[1].write_bytes(b"second payload")
+
+            for index in range(2):
+                with self.subTest(overlap=index):
+                    destination = root / f"restore-target-{index}.bin"
+                    destinations = (
+                        [str(destination), str(destination)] if index == 0 else
+                        [str(destination), str(destination) + r"\nested.bin"]
+                    )
+                    manifest = {
+                        "status": "completed",
+                        "timestamp": "2026-09-27T12:34:56",
+                        "items": [{
+                            "original_path": target,
+                            "backup_path": str(payload),
+                            "format": "file",
+                            "size": payload.stat().st_size,
+                        } for target, payload in zip(destinations, payloads)],
+                    }
+                    with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                         mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                         mock.patch("builtins.print") as output:
+                        self.assertFalse(backup.restore_backup(
+                            "backup_20260927_123456_123456", overwrite=True
+                        ))
+                    self.assertFalse(destination.exists())
+                    message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+                    self.assertIn("duplicate or overlapping restore destinations", message)
 
     def test_restore_manifest_refuses_directory_destinations_with_links(self):
         with tempfile.TemporaryDirectory() as temp_dir:
