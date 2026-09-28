@@ -65,7 +65,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 ## Tier 2: Require an item-by-item user decision
 
-- **Chrome and Edge IndexedDB profile data** can hold offline site data and sign-in state. Clear it through the browser when possible; Drive Cleanr only recognizes standard Chrome/Edge User Data profile paths, and custom profile paths are not automatically classified.
+- **Chrome and Edge IndexedDB profile data** can hold offline site data and sign-in state. Clear it through the browser when possible; Drive Cleanr only recognizes standard Chrome/Edge User Data profile paths, and custom browser data paths without those expected components are not automatically classified.
 - **NVIDIA App update artifacts** at ProgramData\NVIDIA Corporation\NVIDIA App\UpdateFramework\ota-artifacts or ProgramData\NVIDIA Corporation\NvApp-UpdateFramework\ota-artifacts: confirm that no driver download or installation is active. Treat these as update data, not disposable cache, until you know they are no longer needed.
 - **Driver backups**, such as `C:\MyDrivers\backup`: consider moving them to a data drive instead of deleting them.
 - **Development toolchains**, such as VS Build Tools, Windows Kits, and `.rustup`: ask whether the user builds native software. Native npm modules can depend on Build Tools.
