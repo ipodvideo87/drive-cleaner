@@ -1924,6 +1924,107 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertTrue(backup.restore_backup(manifest["id"], overwrite=True))
             self.assertEqual(source.read_bytes(), b"saved data")
 
+    def test_file_restore_copy_failure_preserves_overwrite_destination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"saved data")
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.write_bytes(b"keep this current data")
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup.shutil, "copy2", side_effect=OSError("simulated disk full")),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"], overwrite=True))
+
+            self.assertEqual(source.read_bytes(), b"keep this current data")
+            self.assertEqual([], list(Path(temp_dir).glob(".drive-cleanr-restore-*.tmp")))
+            self.assertIn("Restore incomplete", output.getvalue())
+
+    def test_file_restore_copy_failure_leaves_missing_destination_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"saved data")
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.unlink()
+
+            def write_partial_then_fail(_backup_path, staged_path):
+                Path(staged_path).write_bytes(b"partial")
+                raise OSError("simulated interrupted copy")
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup.shutil, "copy2", side_effect=write_partial_then_fail),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            self.assertFalse(source.exists())
+            self.assertEqual([], list(Path(temp_dir).glob(".drive-cleanr-restore-*.tmp")))
+            self.assertIn("Restore incomplete", output.getvalue())
+
+    def test_file_restore_rejects_corrupted_staged_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"saved data")
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.unlink()
+
+            def copy_corrupt_data(_backup_path, staged_path):
+                Path(staged_path).write_bytes(b"corrupted")
+
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup.shutil, "copy2", side_effect=copy_corrupt_data),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            self.assertFalse(source.exists())
+            self.assertEqual([], list(Path(temp_dir).glob(".drive-cleanr-restore-*.tmp")))
+
+    def test_file_restore_preserves_destination_created_during_staging(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"saved data")
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.unlink()
+
+            def create_destination(_backup_path, staged_path):
+                source.write_bytes(b"new user file")
+                Path(staged_path).write_bytes(b"saved data")
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup.shutil, "copy2", side_effect=create_destination),
+                mock.patch.object(backup.os, "rename", side_effect=FileExistsError("destination appeared")),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual(source.read_bytes(), b"new user file")
+            self.assertEqual([], list(Path(temp_dir).glob(".drive-cleanr-restore-*.tmp")))
+            self.assertIn("destination appeared during restore and was preserved", output.getvalue())
+
     def test_directory_restore_merges_without_replacing_existing_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

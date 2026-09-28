@@ -15,6 +15,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -146,6 +147,49 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool,
+                             expected_sha256: Optional[str], expected_size: Optional[int]) -> bool:
+    """Stage and verify a file restore before making it visible at its destination."""
+    if _path_has_reparse_component(destination):
+        raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
+
+    destination_dir = os.path.dirname(destination)
+    os.makedirs(destination_dir, exist_ok=True)
+    if _path_has_reparse_component(destination):
+        raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
+
+    descriptor, staged_path = tempfile.mkstemp(
+        prefix=".drive-cleanr-restore-", suffix=".tmp", dir=destination_dir
+    )
+    os.close(descriptor)
+    try:
+        shutil.copy2(backup_path, staged_path)
+        if expected_sha256:
+            if _sha256_file(staged_path).lower() != expected_sha256.lower():
+                raise RuntimeError("Staged restore copy failed its SHA-256 integrity check")
+        elif (not isinstance(expected_size, int) or
+              os.path.getsize(staged_path) != expected_size):
+            raise RuntimeError("Staged restore copy failed its size check")
+
+        if _path_has_reparse_component(destination):
+            raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
+        if overwrite:
+            os.replace(staged_path, destination)
+        else:
+            # On Windows, rename fails atomically if a destination appeared
+            # after the earlier conflict check, preserving that user's file.
+            try:
+                os.rename(staged_path, destination)
+            except FileExistsError:
+                return False
+        return True
+    finally:
+        try:
+            os.unlink(staged_path)
+        except FileNotFoundError:
+            pass
 
 
 def _directory_fingerprint(path: str) -> Dict[str, tuple]:
@@ -984,13 +1028,18 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                     conflict_count += 1
                     item_conflicts += 1
                     continue
-                os.makedirs(os.path.dirname(original_path), exist_ok=True)
-                if overwrite:
-                    shutil.copy2(backup_path, original_path)
-                else:
-                    with open(backup_path, "rb") as source, open(original_path, "xb") as destination:
-                        shutil.copyfileobj(source, destination, length=1024 * 1024)
-                    shutil.copystat(backup_path, original_path)
+                restored = _restore_file_atomically(
+                    backup_path,
+                    original_path,
+                    overwrite,
+                    item.get("integrity_sha256"),
+                    item.get("size"),
+                )
+                if not restored:
+                    print("        [Skipped; destination appeared during restore and was preserved.]\n")
+                    conflict_count += 1
+                    item_conflicts += 1
+                    continue
             elif backup_format == "copy":
                 os.makedirs(original_path, exist_ok=True)
                 # Restore by copying the saved directory.
