@@ -142,7 +142,7 @@ def check_admin():
     try:
         import ctypes
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
-    except:
+    except Exception:
         return False
 
 
@@ -181,7 +181,7 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
                     # Show progress
                     elapsed = int(time.time() - start)
                     print(f"\rScanning... {elapsed}s, current file size: {size / 1024 / 1024:.2f} MB", end="", flush=True)
-            except:
+            except OSError:
                 pass
 
         time.sleep(1)

@@ -2052,6 +2052,17 @@ class ScanSafetyTests(unittest.TestCase):
 
             self.assertTrue(scan.wait_for_scan_process(QuietProcess(), str(export_path), timeout=10))
 
+    def test_wait_for_file_does_not_swallow_unexpected_errors_or_interrupts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(scan.os.path, "getsize", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    scan.wait_for_file(str(export_path), timeout=1)
+            with mock.patch.object(scan.os.path, "getsize", side_effect=RuntimeError("unexpected")):
+                with self.assertRaisesRegex(RuntimeError, "unexpected"):
+                    scan.wait_for_file(str(export_path), timeout=1)
+
     def test_scan_export_validation_accepts_supported_headers_and_wiztree_note(self):
         cases = (
             ("File Name,Size\n", True),
