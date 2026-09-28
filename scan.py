@@ -294,6 +294,15 @@ def _normalize_scan_target(target):
     return os.path.normpath(target)
 
 
+def _is_whole_drive_target(target):
+    """Recognize drive roots whether entered as C: or C:\\."""
+    try:
+        normalized = _normalize_scan_target(target)
+    except (TypeError, ValueError):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z]:", normalized.rstrip("\\/")))
+
+
 def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree", wiztree_mode="auto"):
     """
     Run a WizTree scan
@@ -336,11 +345,14 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         return None
 
     elevated = check_admin() if app == "wiztree" else False
-    is_whole_drive = bool(re.fullmatch(r"[A-Za-z]:", drive))
+    is_whole_drive = _is_whole_drive_target(drive)
     if app == "wiztree":
         effective_wiztree_mode = wiztree_mode
         if effective_wiztree_mode == "auto":
             effective_wiztree_mode = "fast" if (elevated and is_whole_drive) else "standard"
+        if effective_wiztree_mode == "fast" and not is_whole_drive:
+            print("Error: fast MFT scanning is only available for whole-drive targets; choose standard mode for a folder")
+            return None
         if effective_wiztree_mode == "fast" and not elevated:
             print("Error: fast MFT scanning requires administrator privileges")
             print("Run this script as administrator, or choose standard scanning with --wiztree-mode standard")
@@ -542,7 +554,17 @@ def main():
     if not app:
         sys.exit(1)
 
-    wiztree_mode = choose_wiztree_mode() if app == "wiztree" and args.wiztree_mode == "auto" and sys.stdin.isatty() else args.wiztree_mode
+    wiztree_mode = args.wiztree_mode
+    if app == "wiztree" and wiztree_mode == "auto" and sys.stdin.isatty():
+        try:
+            normalized_target = _normalize_scan_target(args.drive)
+        except (TypeError, ValueError):
+            normalized_target = None
+        if normalized_target is not None and _is_whole_drive_target(normalized_target):
+            wiztree_mode = choose_wiztree_mode()
+        elif normalized_target is not None:
+            wiztree_mode = "standard"
+            print("Folder scans use standard mode; fast MFT is available only for whole-drive scans.")
     if wiztree_mode is None:
         sys.exit(1)
 

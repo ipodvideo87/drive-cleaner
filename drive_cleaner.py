@@ -56,16 +56,25 @@ def _scan_flow():
     if not app:
         return
     try:
-        wiztree_mode = scan.choose_wiztree_mode() if app == "wiztree" else "auto"
-        if not wiztree_mode:
-            return
         target = input("Drive or folder to scan [C:]: ").strip() or "C:"
         if target.lower() in {"q", "quit", "cancel"}:
             print("Scan cancelled.")
             return
+        wiztree_mode = "auto"
         include_files = True
         max_depth = 0
         if app == "wiztree":
+            try:
+                normalized_target = scan._normalize_scan_target(target)
+            except (TypeError, ValueError):
+                normalized_target = None
+            if normalized_target is not None and scan._is_whole_drive_target(normalized_target):
+                wiztree_mode = scan.choose_wiztree_mode()
+                if not wiztree_mode:
+                    return
+            elif normalized_target is not None:
+                wiztree_mode = "standard"
+                print("Folder scans use standard mode; fast MFT is available only for whole-drive scans.")
             include_choice = _prompt_yes_no("Include individual files in the export?", default=True)
             if include_choice is None:
                 print("Scan cancelled.")

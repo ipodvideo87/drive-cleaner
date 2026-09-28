@@ -1591,7 +1591,10 @@ class ScanSafetyTests(unittest.TestCase):
     def test_scan_target_accepts_drive_roots_and_existing_local_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertEqual(scan._normalize_scan_target("d:"), "D:")
+            self.assertEqual(scan._normalize_scan_target("C:\\"), "C:\\")
+            self.assertTrue(scan._is_whole_drive_target("C:\\"))
             self.assertEqual(scan._normalize_scan_target(temp_dir), os.path.normpath(temp_dir))
+            self.assertFalse(scan._is_whole_drive_target(temp_dir))
 
     def test_scan_target_rejects_missing_relative_and_network_folders(self):
         for target in ("relative\\folder", r"\\server\share", "Z:\\missing\\folder"):
@@ -1637,6 +1640,29 @@ class ScanSafetyTests(unittest.TestCase):
                 expected_mode = "standard" if expected_flag == "/admin=0" else "fast"
                 self.assertTrue(Path(result).name.startswith(f"scan_wiztree_{expected_mode}_"))
 
+    def test_wiztree_auto_mode_uses_standard_for_folders_even_when_elevated(self):
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            captured = {}
+
+            def fake_popen(command, **_kwargs):
+                captured["command"] = command
+                return object()
+
+            try:
+                with mock.patch.object(scan, "check_admin", return_value=True), \
+                     mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
+                     mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                     mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                     mock.patch("builtins.print"):
+                    result = scan.scan(folder, app="wiztree", wiztree_mode="auto")
+            finally:
+                scan.DATA_DIR = old_data_dir
+        self.assertTrue(result.endswith(".csv"))
+        self.assertIn("/admin=0", captured["command"])
+        self.assertIn("scan_wiztree_standard_", Path(result).name)
+
     def test_wiztree_fast_mode_refuses_non_admin_before_launch(self):
         with mock.patch.object(scan, "check_admin", return_value=False), \
              mock.patch.object(scan.subprocess, "Popen") as launch, \
@@ -1644,6 +1670,15 @@ class ScanSafetyTests(unittest.TestCase):
             self.assertIsNone(scan.scan("D:", app="wiztree", wiztree_mode="fast"))
         launch.assert_not_called()
         self.assertIn("requires administrator privileges", " ".join(str(c) for c in output.call_args_list))
+
+    def test_wiztree_fast_mode_refuses_folder_targets_before_launch(self):
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(scan, "check_admin", return_value=True), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             mock.patch("builtins.print") as output:
+            self.assertIsNone(scan.scan(folder, app="wiztree", wiztree_mode="fast"))
+        launch.assert_not_called()
+        self.assertIn("only available for whole-drive targets", " ".join(str(c) for c in output.call_args_list))
 
     def test_windirstat_launches_documented_save_to_csv_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1700,7 +1735,7 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["1", "D:", "n", "0", "30", "n"]) as input_mock:
+             mock.patch("builtins.input", side_effect=["D:", "1", "n", "0", "30", "n"]) as input_mock:
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(drive="D:", include_files=False, max_depth=0, timeout=1800,
                                          app="wiztree", wiztree_mode="auto")
@@ -1710,10 +1745,25 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["", "C:\\Users", "", "4", "30", "n"]):
+             mock.patch("builtins.input", side_effect=["C:", "", "", "4", "30", "n"]):
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="C:\\Users", include_files=True, max_depth=4,
+        run_scan.assert_called_once_with(drive="C:", include_files=True, max_depth=4,
                                          timeout=1800, app="wiztree", wiztree_mode="auto")
+
+    def test_guided_folder_scan_skips_fast_mft_mode_picker(self):
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "choose_wiztree_mode") as choose_mode, \
+             mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             mock.patch("builtins.input", side_effect=[folder, "n", "0", "30"]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+        choose_mode.assert_not_called()
+        run_scan.assert_called_once_with(drive=folder, include_files=False, max_depth=0,
+                                         timeout=1800, app="wiztree", wiztree_mode="standard")
+        self.assertIn("Folder scans use standard mode", output.getvalue())
 
     def test_guided_wiztree_prompts_retry_invalid_values(self):
         output = io.StringIO()
