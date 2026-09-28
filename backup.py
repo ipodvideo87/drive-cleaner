@@ -223,7 +223,8 @@ def _create_zip_backup(source_path: str, archive_path: str) -> Dict[str, tuple]:
                 info.external_attr = (info.external_attr & 0xFFFF0000) | getattr(file_attributes, "st_file_attributes", 0) & 0xFF
                 digest = hashlib.sha256()
                 written = 0
-                with open(file_path, "rb") as source, archive.open(info, "w", force_zip64=True) as destination:
+                with open(file_path, "rb") as source, archive.open(
+                        info, "w", force_zip64=info.file_size > zipfile.ZIP64_LIMIT) as destination:
                     for chunk in iter(lambda: source.read(1024 * 1024), b""):
                         destination.write(chunk)
                         digest.update(chunk)

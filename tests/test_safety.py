@@ -1865,8 +1865,8 @@ class BackupSafetyTests(unittest.TestCase):
                 with archive_path.open("rb") as archive_file:
                     archive_file.seek(file_info.header_offset)
                     local_header = archive_file.read(30)
-                self.assertEqual(struct.unpack_from("<H", local_header, 4)[0], 45)
-                self.assertEqual(struct.unpack_from("<II", local_header, 18), (0xFFFFFFFF, 0xFFFFFFFF))
+                self.assertEqual(struct.unpack_from("<H", local_header, 4)[0], 20)
+                self.assertNotEqual(struct.unpack_from("<II", local_header, 18), (0xFFFFFFFF, 0xFFFFFFFF))
                 self.assertEqual(archive.read("normal.bin"), b"visible payload")
                 if os.name == "nt":
                     attrs = {entry.filename: entry.external_attr & 0xFF for entry in archive.infolist()}
@@ -1878,6 +1878,32 @@ class BackupSafetyTests(unittest.TestCase):
             if os.name == "nt":
                 self.assertTrue(ctypes.windll.kernel32.GetFileAttributesW(str(destination / ".hidden-folder")) & 0x2)
                 self.assertTrue(ctypes.windll.kernel32.GetFileAttributesW(str(destination / ".hidden-folder" / "secret-cache.bin")) & 0x2)
+
+    def test_zip_backup_uses_zip64_for_large_known_members(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            source.mkdir()
+            (source / "large.bin").write_bytes(b"small synthetic payload")
+            archive_path = Path(temp_dir) / "backup.zip"
+            original_from_file = zipfile.ZipInfo.from_file
+
+            def report_large_file(filename, arcname=None, *, strict_timestamps=True):
+                info = original_from_file(filename, arcname, strict_timestamps=strict_timestamps)
+                if Path(filename).name == "large.bin":
+                    info.file_size = zipfile.ZIP64_LIMIT + 1
+                return info
+
+            with mock.patch.object(zipfile.ZipInfo, "from_file", side_effect=report_large_file):
+                backup._create_zip_backup(str(source), str(archive_path))
+
+            with zipfile.ZipFile(archive_path) as archive:
+                info = archive.getinfo("large.bin")
+                with archive_path.open("rb") as archive_file:
+                    archive_file.seek(info.header_offset)
+                    local_header = archive_file.read(30)
+                self.assertEqual(struct.unpack_from("<H", local_header, 4)[0], 45)
+                self.assertEqual(struct.unpack_from("<II", local_header, 18), (0xFFFFFFFF, 0xFFFFFFFF))
+                self.assertEqual(archive.read("large.bin"), b"small synthetic payload")
 
     def test_zip_restore_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as temp_dir:
