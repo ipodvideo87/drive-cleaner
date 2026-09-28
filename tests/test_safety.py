@@ -179,6 +179,29 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["project_candidate_count"], len(markers))
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_unreal_godot_and_unity_project_markers_protect_cache_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            marker_types = (
+                ("unreal-project", "Project.uproject", "file"),
+                ("unreal-plugin", "Plugin.uplugin", "file"),
+                ("godot", "project.godot", "file"),
+                ("unity", "ProjectSettings", "directory"),
+            )
+            for project_name, marker, marker_type in marker_types:
+                project = Path(temp_dir) / project_name
+                cache = project / "Cache"
+                cache.mkdir(parents=True)
+                marker_path = project / marker
+                if marker_type == "directory":
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+            results = self.analyze_rows(rows)
+        self.assertEqual(results["project_candidate_count"], len(marker_types))
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
     def test_project_marker_at_user_profile_root_is_checked_before_walking_stops(self):
         profile = r"C:\Users\Jordan"
         cache_path = profile + r"\AppData\Local\Temp\pip\cache"

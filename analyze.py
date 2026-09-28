@@ -135,10 +135,11 @@ PROJECT_MARKERS = (
     "deno.jsonc", "cargo.lock", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
     "settings.gradle.kts", "gradlew", "gradlew.bat", "composer.json", "composer.lock", "gemfile",
     "gemfile.lock", "rakefile", "dockerfile", "containerfile", "docker-compose.yml",
-    "docker-compose.yaml", "build.sbt", "mix.exs", "pubspec.yaml",
+    "docker-compose.yaml", "build.sbt", "mix.exs", "pubspec.yaml", "project.godot", "projectsettings",
 )
 PROJECT_MARKER_SUFFIXES = (
-    ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj", "-requirements.txt",
+    ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj",
+    ".uproject", ".uplugin", "-requirements.txt",
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
 _PROFILE_ROOT_IGNORED_MARKERS = frozenset({
