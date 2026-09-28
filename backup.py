@@ -56,6 +56,26 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
+def _safe_terminal_text(value, fallback="Unknown") -> str:
+    """Render manifest-controlled text without terminal control characters."""
+    if value is None:
+        value = fallback
+    text = str(value)
+    escaped = []
+    for character in text:
+        if character.isprintable():
+            escaped.append(character)
+        else:
+            codepoint = ord(character)
+            if codepoint <= 0xFF:
+                escaped.append(f"\\x{codepoint:02x}")
+            elif codepoint <= 0xFFFF:
+                escaped.append(f"\\u{codepoint:04x}")
+            else:
+                escaped.append(f"\\U{codepoint:08x}")
+    return "".join(escaped)
+
+
 def _is_reparse_point(path: str) -> bool:
     try:
         metadata = os.lstat(path)
@@ -1190,23 +1210,29 @@ def print_backups_table(backups: List[Dict]):
         print("No backups found")
         return
 
-    print("=" * 70)
+    print("=" * 96)
     print("                         Backup List")
-    print("=" * 70)
-    print(f"{'ID':<30} {'Time':<20} {'Size':<12} {'Items':<8}")
-    print("-" * 70)
+    print("=" * 96)
+    print(f"{'ID':<30} {'Time':<20} {'Size':<12} {'Items':<8} {'Status':<14}")
+    print("-" * 96)
 
     for backup in backups:
         backup_id = backup["id"]
-        timestamp = backup["timestamp"][:19].replace("T", " ")
-        size = backup.get("total_size_formatted", "Unknown")
+        timestamp = _safe_terminal_text(backup.get("timestamp", "Unknown")[:19].replace("T", " "))
+        size = _safe_terminal_text(backup.get("total_size_formatted", "Unknown"))
         items = len(backup.get("items", []))
-        print(f"{backup_id:<30} {timestamp:<20} {size:<12} {items:<8}")
+        status = {
+            "completed": "Completed",
+            "partial": "Partial",
+            "in_progress": "In progress",
+        }.get(backup.get("status"), "Unknown")
+        print(f"{backup_id:<30} {timestamp:<20} {size:<12} {items:<8} {status:<14}")
         backup_root = backup.get("backup_root")
         if isinstance(backup_root, str) and backup_root:
-            print(f"  Saved to: {ntpath.join(backup_root, backup_id)}")
+            location = _safe_terminal_text(ntpath.join(backup_root, backup_id))
+            print(f"  Saved to: {location}")
 
-    print("=" * 70)
+    print("=" * 96)
 
 
 def main():

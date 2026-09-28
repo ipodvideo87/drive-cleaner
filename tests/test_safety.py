@@ -2440,12 +2440,35 @@ class BackupSafetyTests(unittest.TestCase):
             "timestamp": "2026-09-28T12:34:56",
             "backup_root": r"D:\CleanBackups",
             "total_size_formatted": "12 MB",
+            "status": "completed",
             "items": [{"original_path": r"C:\Users\A\cache.bin"}],
         }
         output = io.StringIO()
         with redirect_stdout(output):
             backup.print_backups_table([manifest])
         self.assertIn(r"Saved to: D:\CleanBackups\backup_20260928_123456_123456", output.getvalue())
+        self.assertIn("Completed", output.getvalue())
+
+    def test_backup_list_shows_partial_status_and_escapes_manifest_controls(self):
+        manifests = [
+            {
+                "id": "backup_20260928_123456_000001",
+                "timestamp": "2026-09-28T12:34:56",
+                "backup_root": "D:\\CleanBackups\x1b[31m",
+                "total_size_formatted": "12 MB\nInjected output",
+                "status": "partial",
+                "items": [],
+            },
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            backup.print_backups_table(manifests)
+        rendered = output.getvalue()
+        self.assertIn("Partial", rendered)
+        self.assertNotIn("\x1b", rendered)
+        self.assertNotIn("Injected output\n", rendered)
+        self.assertIn(r"\x1b[31m", rendered)
+        self.assertIn(r"\x0aInjected output", rendered)
 
     def test_delete_refuses_backup_tree_with_reparse_point(self):
         output = io.StringIO()
