@@ -5,9 +5,13 @@
 - Leave unclear paths untouched. Treat an unfamiliar file or application as protected until the user identifies it.
 - Review every exact path before cleanup. A classification is a suggestion, not permission to delete.
 - Create and verify a complete backup on a different drive before removing anything. Stop if any selected target is skipped or the backup is incomplete.
+- Treat restore manifests and archives as untrusted: validate every destination before writing, reject network/device/traversal targets, and do not extract through reparse points.
 - Never directly remove Windows component stores, restore points, installed-program repair data, personal files, messaging data, or credentials.
 - Prefer allocated size when available. Hard links and nested folder totals can inflate estimated reclaimable space.
-- The Windows Update cleanup candidate is only `SoftwareDistribution\\Download`; never select the entire `SoftwareDistribution` tree.
+- Omit cache-like candidates beneath recognized project roots (for example `.git`, `pyproject.toml`, `package.json`, or `Cargo.toml`) because project contents can mix generated files with source and local state.
+- For a project without a recognized marker, the user can place `.drive-cleanr-protect` in the project root to exclude that entire tree.
+- Do not directly clean `SoftwareDistribution\\Download`; Windows update state can be hard to assess, so use Windows Storage or Disk Cleanup.
+- Do not suggest recovered previous-installation data, `$WinREAgent`, Windows Update logs, or Service Worker storage for direct cleanup.
 - A scan is complete when the selected scanner exits and its export is stable, not merely when file growth pauses.
 
 These rules are based on practical cleanup cases. In one case, 28.9 GB was recovered from one computer; roughly two-thirds came from items that required case-by-case review beyond the pattern list. These figures are examples only. Results vary by system and scan.
@@ -22,11 +26,15 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | `C:\System Volume Information\` | System restore points; manage only through Windows tools |
 | `pagefile.sys`, `swapfile.sys`, and `hiberfil.sys` | Virtual memory and hibernation; change through Windows settings, never by deleting the files |
 | `C:\Windows\Installer\` | Repair and uninstall data required by installed software |
+| `C:\Windows\SoftwareDistribution\Download\` | Windows Update state can be difficult to assess; use Windows Storage or Disk Cleanup |
 | `C:\ProgramData\Package Cache\` and application `InstallerCache` folders | Installer repair data |
 | `C:\Windows\System32\config\` and its `.bak` files | Registry data and backups |
 | `C:\Windows\System32\DriverStore\FileRepository\` | Active driver packages; driver maintenance is an advanced operation |
 | The WinSxS component store, including `WinSxS\Temp` | Use DISM for supported maintenance; do not delete files directly |
-| `Documents`, `Desktop`, `Pictures`, `Tencent Files`, and `xwechat_files` | Personal files and messaging data |
+| `C:\$WinREAgent`, `C:\ProgramData\USOShared\Logs`, and `Recovered-WindowsOld` | Windows recovery/update state and data retained from a previous installation |
+| Browser `Service Worker` storage | Can contain offline site data and application state; clear it only through the browser or app |
+| `.codex`, `.agents`, and container-machine cache trees | Hold tool configuration, installed skills, extension data, or container state that may be actively in use |
+| `Documents`, `Desktop`, `Pictures`, `Videos`, `Downloads`, `Tencent Files`, and `xwechat_files` | Personal files, project sources, installers, and messaging data |
 | `.ssh`, `.gnupg`, certificates, and application settings folders | Credentials and configuration |
 | Anything the user does not recognize | Ask first; leave it untouched if its purpose is still unclear |
 
@@ -35,8 +43,7 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Item | Example paths | Notes |
 |---|---|---|
 | Crash dumps | `C:\Windows\LiveKernelReports\*.dmp`, `C:\Windows\MEMORY.DMP`, `Minidump` | Diagnostic snapshots that can occupy several gigabytes; review before removal |
-| Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | In-use files may be skipped. Preserve every `claude*` item and subtree under `%TEMP%`. |
-| Update recovery staging | `C:\$WinREAgent\` | Consider only after an update has worked successfully for more than 10 days |
+| Temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Confirm the user does not need to recover anything first |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | May be incomplete installer downloads |
 | Package-manager caches | npm, pip, Scoop, and Electron caches | Prefer each package manager's own cleanup command |

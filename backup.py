@@ -29,6 +29,15 @@ if hasattr(sys.stderr, "reconfigure"):
 # Configuration
 BACKUP_DIR_NAME = "CleanBackups"
 SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # Compress directories at or above 1 GB.
+WINDOWS_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+})
+
+
+def _is_windows_reserved_name(part: str) -> bool:
+    return part.split(".")[0].rstrip(" .").upper() in WINDOWS_RESERVED_NAMES
 
 
 def format_size(size_bytes: int) -> str:
@@ -54,6 +63,56 @@ def _is_reparse_point(path: str) -> bool:
     return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
+def _path_has_reparse_component(path: str) -> bool:
+    """Check every existing component so reads and writes do not cross links."""
+    absolute = os.path.abspath(path)
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.sep if drive else os.path.abspath(os.sep)
+    for part in tail.strip("\\/").replace("/", os.sep).split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        if os.path.lexists(current) and _is_reparse_point(current):
+            return True
+    return False
+
+
+def _tree_has_reparse_point(path: str) -> bool:
+    """Check an existing destination tree without following directory links."""
+    if not os.path.lexists(path):
+        return False
+    if _is_reparse_point(path):
+        return True
+    if not os.path.isdir(path):
+        return False
+    with os.scandir(path) as entries:
+        for entry in entries:
+            if _is_reparse_point(entry.path):
+                return True
+            if entry.is_dir(follow_symlinks=False) and _tree_has_reparse_point(entry.path):
+                return True
+    return False
+
+
+def _valid_restore_target(path: str) -> bool:
+    """Accept only normalized, non-root local Windows paths from manifests."""
+    if not isinstance(path, str) or not path or path.startswith(("\\\\", "//")):
+        return False
+    normalized = path.replace("/", "\\")
+    drive, tail = ntpath.splitdrive(normalized)
+    if (len(drive) != 2 or not drive[0].isalpha() or drive[1] != ":" or
+            not tail.startswith("\\") or not tail.strip("\\")):
+        return False
+    parts = tail.split("\\")
+    if any(part in {".", ".."} for part in parts):
+        return False
+    if (any(character in tail for character in "*?:") or
+            any(part.endswith((".", " ")) or _is_windows_reserved_name(part) or
+                any(ord(character) < 32 for character in part) for part in parts if part)):
+        return False
+    return ntpath.normpath(normalized) == normalized.rstrip("\\")
+
+
 def get_dir_size(path: str) -> int:
     """Get the complete size without following links or hiding read errors."""
     if os.path.isfile(path):
@@ -68,6 +127,52 @@ def get_dir_size(path: str) -> int:
             elif entry.is_dir(follow_symlinks=False):
                 total += get_dir_size(entry.path)
     return total
+
+
+def _sha256_file(path: str) -> str:
+    """Hash a file in bounded memory for content-level backup verification."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _directory_fingerprint(path: str) -> Dict[str, tuple]:
+    """Map directory entries to content hashes without following reparse points."""
+    root = os.path.abspath(path)
+
+    def raise_walk_error(error):
+        raise error
+
+    entries = {}
+    for current, directories, files in os.walk(root, topdown=True, onerror=raise_walk_error, followlinks=False):
+        directories.sort()
+        files.sort()
+        for name in directories:
+            item_path = os.path.join(current, name)
+            if _is_reparse_point(item_path):
+                raise RuntimeError(f"Refusing to verify a reparse point: {item_path}")
+            relative = os.path.normcase(os.path.relpath(item_path, root))
+            entries[relative] = ("directory",)
+        for name in files:
+            item_path = os.path.join(current, name)
+            if _is_reparse_point(item_path):
+                raise RuntimeError(f"Refusing to verify a reparse point: {item_path}")
+            relative = os.path.normcase(os.path.relpath(item_path, root))
+            size = os.path.getsize(item_path)
+            entries[relative] = ("file", size, _sha256_file(item_path))
+    return entries
+
+
+def _directory_fingerprint_sha256(path: str) -> str:
+    """Hash a directory's names, types, sizes, and file contents deterministically."""
+    entries = _directory_fingerprint(path)
+    canonical = json.dumps(
+        [(name, *entries[name]) for name in sorted(entries)],
+        ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _create_zip_backup(source_path: str, archive_path: str) -> None:
@@ -107,19 +212,40 @@ def _create_zip_backup(source_path: str, archive_path: str) -> None:
 def _extract_zip_backup(archive_path: str, destination: str) -> None:
     """Extract a generated archive only when every member stays under destination."""
     destination = os.path.abspath(destination)
+    if _path_has_reparse_component(destination):
+        raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
+
+    planned_entries = []
     archived_attributes = []
     with zipfile.ZipFile(archive_path, "r") as archive:
         for info in archive.infolist():
             member = info.filename.replace("\\", "/")
             parts = member.split("/")
-            if member.startswith("/") or any(part == ".." for part in parts) or ntpath.splitdrive(member)[0]:
+            safe_parts = [part for part in parts if part]
+            if (member.startswith("/") or any(part in {".", ".."} for part in parts) or
+                    not safe_parts or any(":" in part for part in safe_parts) or
+                    any(part.endswith((".", " ")) for part in safe_parts) or
+                    any(_is_windows_reserved_name(part) or
+                        any(ord(character) < 32 for character in part)
+                        for part in safe_parts) or ntpath.splitdrive(member)[0]):
                 raise RuntimeError(f"Unsafe path inside backup archive: {info.filename}")
             mode = (info.external_attr >> 16) & 0xFFFF
             if stat.S_ISLNK(mode):
                 raise RuntimeError(f"Refusing a link inside backup archive: {info.filename}")
-            target = os.path.abspath(os.path.join(destination, *[part for part in parts if part]))
-            if os.path.commonpath([destination, target]) != destination:
+            target = os.path.abspath(os.path.join(destination, *safe_parts))
+            try:
+                contained = os.path.normcase(os.path.commonpath([destination, target])) == os.path.normcase(destination)
+            except ValueError:
+                contained = False
+            if not contained:
                 raise RuntimeError(f"Unsafe path inside backup archive: {info.filename}")
+            if _path_has_reparse_component(target):
+                raise RuntimeError(f"Refusing to restore through a reparse point: {info.filename}")
+            planned_entries.append((info, target))
+
+        # Validate every member before writing any of them, avoiding partial
+        # restoration when a later entry is unsafe.
+        for info, target in planned_entries:
             if info.is_dir():
                 os.makedirs(target, exist_ok=True)
             else:
@@ -203,7 +329,8 @@ def _find_backup_dir(backup_id: str):
         return None
     for root in _existing_backup_roots():
         candidate = os.path.join(root, backup_id)
-        if os.path.isdir(candidate):
+        if (not _path_has_reparse_component(root) and
+                not _is_reparse_point(candidate) and os.path.isdir(candidate)):
             return candidate
     return None
 
@@ -222,15 +349,28 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
     Create a backup
 
     Args:
-        paths: list of directories to back up
+        paths: list of absolute local files or directories to back up
         priority: priority label (high/medium/low)
 
     Returns:
         dict: backup information (including manifest)
     """
+    if not paths:
+        raise ValueError("At least one backup path is required")
+    normalized_paths = []
+    for path in paths:
+        try:
+            source_path = os.fspath(path)
+        except TypeError as exc:
+            raise ValueError("Backup paths must be absolute local paths below a drive root") from exc
+        if not _valid_restore_target(source_path):
+            raise ValueError(f"Refusing an unsafe backup path: {source_path}")
+        normalized_paths.append(source_path)
+    paths = normalized_paths
+
     source_drives = {
-        os.path.splitdrive(os.path.abspath(path))[0].rstrip(":\\/").upper()
-        for path in paths if os.path.splitdrive(os.path.abspath(path))[0]
+        os.path.splitdrive(path)[0].rstrip(":\\/").upper()
+        for path in paths if os.path.splitdrive(path)[0]
     }
     backup_root = get_backup_root(exclude_drives=source_drives)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -340,15 +480,22 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
 
         if backup_format == "copy":
             try:
-                if not os.path.isdir(backup_path) or get_dir_size(backup_path) != dir_size:
-                    manifest["errors"].append(f"Backup output is missing or incomplete for {path}")
+                if (not os.path.isdir(backup_path) or get_dir_size(backup_path) != dir_size or
+                        _directory_fingerprint(path) != _directory_fingerprint(backup_path)):
+                    manifest["errors"].append(f"Backup output is missing, incomplete, or has different file contents for {path}")
                     continue
             except (OSError, RuntimeError) as exc:
                 manifest["errors"].append(f"Could not verify backup output for {path}: {exc}")
                 continue
-        if backup_format == "file" and (not os.path.isfile(backup_path) or os.path.getsize(backup_path) != dir_size):
-            manifest["errors"].append(f"Backup output is incomplete for {path}")
-            continue
+        if backup_format == "file":
+            try:
+                if (not os.path.isfile(backup_path) or os.path.getsize(backup_path) != dir_size or
+                        _sha256_file(path) != _sha256_file(backup_path)):
+                    manifest["errors"].append(f"Backup output is incomplete or has different file contents for {path}")
+                    continue
+            except OSError as exc:
+                manifest["errors"].append(f"Could not verify backup output for {path}: {exc}")
+                continue
         if backup_format == "zip":
             try:
                 with zipfile.ZipFile(backup_path) as archive:
@@ -361,12 +508,24 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 manifest["errors"].append(f"Could not verify backup archive for {path}: {exc}")
                 continue
 
+        try:
+            if backup_format == "file":
+                integrity_sha256 = _sha256_file(backup_path)
+            elif backup_format == "copy":
+                integrity_sha256 = _directory_fingerprint_sha256(backup_path)
+            else:
+                integrity_sha256 = _sha256_file(backup_path)
+        except (OSError, RuntimeError) as exc:
+            manifest["errors"].append(f"Could not fingerprint backup output for {path}: {exc}")
+            continue
+
         manifest["items"].append({
             "original_path": path,
             "backup_path": backup_path,
             "size": dir_size,
             "size_formatted": format_size(dir_size),
-            "format": backup_format
+            "format": backup_format,
+            "integrity_sha256": integrity_sha256
         })
         manifest["total_size"] += dir_size
 
@@ -379,7 +538,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
 
     print("-" * 50)
-    print(f"Backup complete! {len(manifest['items'])} directories backed up, total {manifest['total_size_formatted']}")
+    print(f"Backup complete! {len(manifest['items'])} items backed up, total {manifest['total_size_formatted']}")
     print(f"Backup ID: {backup_id}")
 
     return manifest
@@ -470,34 +629,104 @@ def restore_backup(backup_id: str) -> bool:
     if not manifest:
         print(f"Backup not found: {backup_id}")
         return False
-    if manifest.get("status") != "completed" or not manifest.get("items"):
+    if (not isinstance(manifest, dict) or manifest.get("status") != "completed" or
+            not isinstance(manifest.get("items"), list) or not manifest["items"]):
         print("Refusing to restore an incomplete or empty backup")
         return False
 
+    backup_dir = _find_backup_dir(backup_id)
+    if not backup_dir or _path_has_reparse_component(backup_dir):
+        print("Refusing to restore from an unavailable or linked backup location")
+        return False
+
+    # Validate the complete untrusted manifest before restoring any item. This
+    # avoids arbitrary/network/device destinations and partial restores caused
+    # by a malformed later entry.
+    validated_items = []
+    for item in manifest["items"]:
+        if not isinstance(item, dict):
+            print("Refusing to restore a malformed backup manifest")
+            return False
+        original_path = item.get("original_path")
+        backup_path = item.get("backup_path")
+        backup_format = item.get("format")
+        if (not _valid_restore_target(original_path) or not isinstance(backup_path, str) or
+                backup_format not in {"file", "copy", "zip"}):
+            print("Refusing to restore an invalid backup manifest entry")
+            return False
+        backup_path = os.path.abspath(backup_path)
+        try:
+            contained = os.path.normcase(os.path.commonpath([os.path.abspath(backup_dir), backup_path])) == os.path.normcase(os.path.abspath(backup_dir))
+        except ValueError:
+            contained = False
+        if (not contained or _path_has_reparse_component(backup_path) or
+                not os.path.exists(backup_path) or _path_has_reparse_component(original_path)):
+            print("Refusing to restore through an unsafe or missing path")
+            return False
+        if ((backup_format == "file" and not os.path.isfile(backup_path)) or
+                (backup_format == "copy" and not os.path.isdir(backup_path)) or
+                (backup_format == "zip" and not os.path.isfile(backup_path))):
+            print("Refusing to restore mismatched backup data")
+            return False
+        if os.path.lexists(original_path):
+            if ((backup_format == "file" and not os.path.isfile(original_path)) or
+                    (backup_format in {"copy", "zip"} and not os.path.isdir(original_path))):
+                print("Refusing to overwrite a path with a different item type")
+                return False
+        if backup_format in {"copy", "zip"} and _tree_has_reparse_point(original_path):
+            print("Refusing to restore into a directory tree containing a reparse point")
+            return False
+        validated_items.append((item, original_path, backup_path, backup_format))
+
+    # Verify every saved payload before writing any restored data. This catches
+    # later disk corruption (including same-size changes) without allowing a
+    # failed later item to leave an earlier item partially restored.
+    for item, _original_path, backup_path, backup_format in validated_items:
+        expected_digest = item.get("integrity_sha256")
+        if expected_digest is not None:
+            if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest):
+                print("Refusing to restore a backup with an invalid integrity hash")
+                return False
+            try:
+                if backup_format == "copy":
+                    actual_digest = _directory_fingerprint_sha256(backup_path)
+                else:
+                    actual_digest = _sha256_file(backup_path)
+            except (OSError, RuntimeError) as exc:
+                print(f"Refusing to restore an unreadable backup payload: {exc}")
+                return False
+            if actual_digest.lower() != expected_digest.lower():
+                print("Refusing to restore: backup contents changed after verification")
+                return False
+        else:
+            # Older manifests predate persistent hashes. Preserve their restore
+            # support with structural/size checks, and tell users the limit.
+            try:
+                expected_size = item.get("size")
+                if backup_format == "file":
+                    legacy_valid = isinstance(expected_size, int) and os.path.getsize(backup_path) == expected_size
+                elif backup_format == "copy":
+                    legacy_valid = isinstance(expected_size, int) and get_dir_size(backup_path) == expected_size
+                else:
+                    with zipfile.ZipFile(backup_path) as archive:
+                        archive_size = sum(entry.file_size for entry in archive.infolist() if not entry.is_dir())
+                        legacy_valid = archive.testzip() is None and archive_size == expected_size
+            except (OSError, RuntimeError, zipfile.BadZipFile):
+                legacy_valid = False
+            if not legacy_valid:
+                print("Refusing to restore: legacy backup data is incomplete or damaged")
+                return False
+            print("Warning: this older backup has no content hash; only size and structure were checked.")
+
     print(f"Restoring backup: {backup_id}")
-    print(f"Backup time: {manifest['timestamp']}")
-    print(f"Items: {len(manifest['items'])}")
+    print(f"Backup time: {manifest.get('timestamp', 'Unknown')}")
+    print(f"Items: {len(validated_items)}")
     print("-" * 50)
 
     success_count = 0
 
-    for item in manifest["items"]:
-        original_path = item["original_path"]
-        backup_path = item["backup_path"]
-        backup_format = item["format"]
-
-        drive, tail = os.path.splitdrive(original_path)
-        if not drive or not tail.startswith(("\\", "/")) or tail.rstrip("\\/") == "":
-            print("        [Skipped] Invalid original path or drive root")
-            continue
-
+    for item, original_path, backup_path, backup_format in validated_items:
         print(f"[Restore] {original_path}")
-
-        backup_dir = _find_backup_dir(backup_id)
-        if (not backup_dir or not os.path.exists(backup_path) or
-                os.path.commonpath([os.path.abspath(backup_dir), os.path.abspath(backup_path)]) != os.path.abspath(backup_dir)):
-            print("        [Skipped] Backup data is missing")
-            continue
 
         try:
             if backup_format == "file":
@@ -613,7 +842,7 @@ def main():
 
     # Create command.
     create_parser = subparsers.add_parser('create', help='Create a backup')
-    create_parser.add_argument('--paths', nargs='+', required=True, help='Directories to back up')
+    create_parser.add_argument('--paths', nargs='+', required=True, help='Absolute local files or directories to back up')
     create_parser.add_argument('--priority', default='high', choices=['high', 'medium', 'low', 'all'],
                                help='Priority label')
     create_parser.add_argument('--json', action='store_true', help='Print only the JSON manifest (for automation)')
@@ -654,7 +883,7 @@ def main():
             print(json.dumps(manifest, ensure_ascii=bool(args.json), indent=2))
             if manifest.get("status") != "completed":
                 sys.exit(1)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
             print(f"Error: {e}")
             sys.exit(1)
 

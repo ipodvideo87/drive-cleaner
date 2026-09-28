@@ -21,11 +21,18 @@ def _scan_flow():
     if not app:
         return
     try:
-        drive = input("Drive to scan [C:]: ").strip() or "C:"
-        if drive.lower() in {"q", "quit", "cancel"}:
+        target = input("Drive or folder to scan [C:]: ").strip() or "C:"
+        if target.lower() in {"q", "quit", "cancel"}:
             print("Scan cancelled.")
             return
-        include_files = input("Include individual files in the export? [Y/n]: ").strip().lower() not in {"n", "no"}
+        include_files = True
+        max_depth = 0
+        if app == "wiztree":
+            include_files = input("Include individual files in the export? [Y/n]: ").strip().lower() not in {"n", "no"}
+            depth_text = input("Maximum export depth (0 = unlimited) [0]: ").strip() or "0"
+            max_depth = int(depth_text)
+            if max_depth < 0:
+                raise ValueError("Export depth must be zero or greater.")
         timeout_text = input("Maximum scan time in minutes [30]: ").strip() or "30"
         timeout = int(timeout_text) * 60
         if timeout <= 0:
@@ -34,9 +41,8 @@ def _scan_flow():
         print(f"Scan setup cancelled: {exc}")
         return
 
-    if app == "windirstat" and not include_files:
-        print("WinDirStat exports files and folders together; this option is ignored by WinDirStat.")
-    csv_path = scan.scan(drive=drive, include_files=include_files, timeout=timeout, app=app)
+    csv_path = scan.scan(drive=target, include_files=include_files, max_depth=max_depth,
+                         timeout=timeout, app=app)
     if not csv_path:
         _pause()
         return
@@ -118,7 +124,7 @@ def main_menu():
     while True:
         print("\nDrive Cleanr")
         print("=" * 48)
-        print("1) Scan a drive (choose WizTree or WinDirStat)")
+        print("1) Scan a drive or folder (choose WizTree or WinDirStat)")
         print("2) Use a previous scan")
         print("3) Manage backups")
         print("0) Exit")

@@ -7,6 +7,7 @@ import sys
 import time
 import shutil
 import subprocess
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -116,7 +117,42 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
     return False
 
 
-def wait_for_scan_process(process, filepath, timeout=1800):
+def _stop_scan_process(process):
+    """Terminate a started scanner, escalating to kill if it will not exit."""
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
+            return
+    except OSError:
+        return
+    try:
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    except OSError:
+        pass
+
+
+def _remove_partial_scan_export(filepath):
+    try:
+        os.unlink(filepath)
+    except OSError:
+        pass
+
+
+def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner"):
     """Wait for the scanner itself to finish, then verify its closed export file."""
     started = time.monotonic()
     last_report = -5
@@ -124,13 +160,8 @@ def wait_for_scan_process(process, filepath, timeout=1800):
     while process.poll() is None:
         elapsed = int(time.monotonic() - started)
         if elapsed >= timeout:
-            print(f"\nScan timed out after {timeout} seconds; stopping WizTree")
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            print(f"\nScan timed out after {timeout} seconds; stopping {scanner_name}")
+            _stop_scan_process(process)
             return False
 
         if elapsed - last_report >= 5:
@@ -147,6 +178,18 @@ def wait_for_scan_process(process, filepath, timeout=1800):
     return wait_for_file(filepath, timeout=30, stable_time=2)
 
 
+def _normalize_scan_target(target):
+    """Accept a local drive root or an existing absolute local folder."""
+    target = str(target).strip().strip('"')
+    if re.fullmatch(r"[A-Za-z]:", target):
+        return target.upper()
+    drive, _ = os.path.splitdrive(target)
+    if (not drive or target.startswith(("\\\\", "//"))
+            or not os.path.isabs(target) or not os.path.isdir(target)):
+        raise ValueError("target must be a drive such as C: or an existing absolute local folder")
+    return os.path.normpath(target)
+
+
 def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree"):
     """
     Run a WizTree scan
@@ -161,9 +204,10 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     Returns:
         str: exported CSV file path, or None on failure
     """
-    drive = drive.strip().upper().rstrip("\\/")
-    if len(drive) != 2 or drive[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" or drive[1] != ":":
-        print("Error: drive must be a letter such as C:")
+    try:
+        drive = _normalize_scan_target(drive)
+    except (TypeError, ValueError):
+        print("Error: target must be a drive such as C: or an existing absolute local folder")
         return None
     if max_depth < 0 or timeout <= 0:
         print("Error: max-depth must be nonnegative and timeout must be positive")
@@ -172,6 +216,12 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     app = app.lower().strip()
     if app not in {"wiztree", "windirstat"}:
         print("Error: app must be 'wiztree' or 'windirstat'")
+        return None
+    if app == "windirstat" and max_depth != 0:
+        print("Error: --max-depth is supported only by WizTree")
+        return None
+    if app == "windirstat" and not include_files:
+        print("Error: WinDirStat exports files and folders together; --folders-only is supported only by WizTree")
         return None
 
     # WizTree's MFT-based scan requires elevation. WinDirStat can scan as a
@@ -210,6 +260,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
 
     print(f"Starting {app_name} scan: {drive}")
 
+    process = None
     try:
         # Wait on the scanner's real process lifetime. File size can pause during
         # large exports and is not a reliable completion signal.
@@ -220,26 +271,31 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
         )
 
-        if wait_for_scan_process(process, output_file, timeout=timeout):
+        if wait_for_scan_process(process, output_file, timeout=timeout, scanner_name=app_name):
             print("\nScan complete.")
             print(f"Results: {output_file}")
             print("Previous scans and cleanup plans were kept.")
 
             return output_file
         else:
-            # Timeout, terminate the process
-            try:
-                os.unlink(output_file)
-            except OSError:
-                pass
+            # The export belongs to this failed run and is incomplete.
+            _remove_partial_scan_export(output_file)
             print("Scan timed out or failed")
             return None
 
     except subprocess.TimeoutExpired:
-        process.terminate()
+        _stop_scan_process(process)
+        _remove_partial_scan_export(output_file)
         print("Process timed out")
         return None
+    except KeyboardInterrupt:
+        _stop_scan_process(process)
+        _remove_partial_scan_export(output_file)
+        print("\nScan cancelled; the scanner was stopped and its partial export was removed.")
+        return None
     except Exception as e:
+        _stop_scan_process(process)
+        _remove_partial_scan_export(output_file)
         print(f"Scan error: {e}")
         return None
 
@@ -309,9 +365,9 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description='Drive Cleanr disk usage scan tool')
-    parser.add_argument('drive', nargs='?', default='C:', help='Drive to scan (default: C:)')
+    parser.add_argument('drive', nargs='?', default='C:', help='Drive or existing absolute local folder to scan (default: C:)')
     parser.add_argument('--folders-only', action='store_true', help='Export folders only (default also includes file rows so large single files stay visible)')
-    parser.add_argument('--max-depth', type=int, default=0, help='Maximum export depth; 0 means unlimited (default: 0)')
+    parser.add_argument('--max-depth', type=int, default=0, help='WizTree maximum export depth; 0 means unlimited (default: 0)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
     parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')

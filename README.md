@@ -31,7 +31,9 @@ Open PowerShell in this folder (use an elevated terminal when choosing WizTree):
 python drive_cleaner.py
 ```
 
-The guided command-line menu lets you scan with WizTree or WinDirStat, review a new or existing scan, and manage backups. During a scan it asks for the scanner, drive, file-row preference, and timeout. After the scan it can open the results in the review menu. Existing scripts remain available for direct commands and automation.
+The guided command-line menu lets you scan with WizTree or WinDirStat, review a new or existing scan, and manage backups. During a scan it asks for the scanner, a drive or existing local folder, applicable scan options, and timeout. For WizTree, you can choose whether to export individual file rows and set a maximum export depth (0 means unlimited). WinDirStat always exports its scan tree and applies its saved filters and exclusions. Press Ctrl+C to stop the active scanner; Drive Cleanr removes only that interrupted run's incomplete export and keeps previous scans. After the scan it can open the results in the review menu. Existing scripts remain available for direct commands and automation.
+
+Both scanners have native command-line options. Drive Cleanr uses a safety-focused subset for cleanup scans: WizTree gets explicit file/folder export, allocated-size sorting, capacity, and depth options; WinDirStat gets `/SaveTo` with a CSV destination and scan target. WinDirStat also offers other modes such as loading saved scans and exporting duplicate or permission reports, but those are separate workflows and are not treated as cleanup candidate scans. Its filters and scan exclusions come from WinDirStat's saved settings, so review those before scanning. See the official [WizTree command-line guide](https://www.diskanalyzer.com/guide) and [WinDirStat command-line and export reference](https://github.com/windirstat/windirstat/wiki/Command-Line-and-CSV) for their complete native options.
 
 ```powershell
 python analyze.py .\data\scan.csv --min-size 50 --list-items
@@ -44,7 +46,9 @@ Review every path in the report and script. Then run the script from PowerShell:
 & .\clean_review.ps1
 ```
 
-The script lists numbered targets and lets you choose individual items, choose all, or cancel. It then shows the selected paths, asks you to type `CLEAN`, and backs up only those targets. Cleanup stops if the selected backup is missing or incomplete. Review the generated script itself before running it. For a reviewed noninteractive selection, use `-Select 1,3 -Force`; `-Force` skips only the final typed confirmation and never selects targets for you.
+The script lists numbered targets and lets you choose individual items, choose all, or cancel. It then shows the selected paths, asks you to type `CLEAN`, and backs up only those targets. Cleanup stops if the selected backup is missing or incomplete. When cleaning a selected directory, the script preserves nested protected locations, detected project roots, and Claude data even when they sit inside that directory; it reports when it preserved nested data and refuses trees containing reparse points. Review the generated script itself before running it. Generated plans and candidate lists never overwrite existing files and cannot be written inside a selected cleanup target. For a reviewed noninteractive selection, use `-Select 1,3 -Force`; `-Force` skips only the final typed confirmation and never selects targets for you.
+
+Folder size totals are estimates: a folder can contain protected nested data that the cleanup script deliberately preserves, so the recovered space can be lower. The cleanup script reports the size of files it actually removed.
 
 ## Common options
 
@@ -55,6 +59,9 @@ python scan.py D:
 # Choose the scanner directly (WinDirStat 2.6+ required for automated export)
 python scan.py C: --app windirstat
 python scan.py C: --app wiztree
+
+# Scan a specific folder instead of the whole drive; limit the WizTree export depth
+python scan.py "$env:USERPROFILE\Videos" --app wiztree --max-depth 3
 
 # Start directly in the analysis menu or show scan options
 python analyze.py --tui
@@ -78,6 +85,10 @@ python analyze.py .\data\scan.csv --output clean_review.ps1 --priority all
 
 All menus, prompts, reports, and documentation are in English. The analyzer also accepts WizTree CSV files with Chinese column headings for compatibility, as well as WinDirStat 2.x CSV exports. WinDirStat uses its saved scan filters, so check those settings before scanning the whole drive; it can run without elevation, though protected items may be missed. Drive Cleanr requires an elevated terminal for any WizTree scan. Both formats exclude protected locations, accept only absolute local-drive paths, and refuse drive roots, UNC paths, device paths, and traversal paths.
 
+Downloads, recovered previous-installation data, Windows Update downloads, Windows recovery staging, Windows Update logs, browser Service Worker data, Codex and agent configuration, and container-machine state are excluded from direct cleanup suggestions. Candidate entries inside folders marked by common project files such as `.git`, `pyproject.toml`, `package.json`, or `Cargo.toml` are also omitted to help protect source and project data. To protect a project without one of those files, place an empty `.drive-cleanr-protect` file in its root. Use Windows Storage or Disk Cleanup to manage update downloads. Temporary-folder candidates are labeled for review; confirm that no installer or build is using them before selecting them. The cleanup plan warns if common browser, editor, Java, Node.js, Rust, Go, .NET build, Windows installer, updater, or package-manager processes are running. A candidate report is not a deletion recommendation, and “lower risk” means usually recreatable, not guaranteed safe.
+
+The analyzer checks that candidate paths still exist before including them in the report. Paths that disappeared after the scan are omitted from reclaimable totals and reported as stale. WinDirStat exports do not record volume capacity; when the scanned local drive is available, Drive Cleanr shows current capacity and free space with a clear note that these values were checked at analysis time.
+
 Scans retain previous exports and reviewed scripts. To prune old scan files and generated plans intentionally, run `python scan.py --cleanup --keep-latest 1`.
 
 ## Backups
@@ -90,7 +101,7 @@ python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds
 python backup.py delete --id backup_YYYYMMDD_HHMMSS_microseconds
 ```
 
-Keep backups through an observation period after cleanup. Restore a backup if an affected app or system feature stops working. Large directory backups use ZIP64, include hidden/system entries, and are verified before cleanup. `backup.py create --json` emits a machine-readable manifest and returns a nonzero exit code when any target was skipped or incompletely backed up.
+Keep backups through an observation period after cleanup. Restore a backup if an affected app or system feature stops working. New file, directory-copy, and ZIP backups record SHA-256 integrity fingerprints, which restore verifies for every item before writing any restored data. Large directory archives use ZIP64, include hidden/system entries, and are also checked with CRC and byte totals when created. Older manifests without hashes remain supported with size/structure checks and a warning. Backup creation accepts only absolute local paths below a drive root; it refuses a drive root, network/device path, or traversal path before creating backup storage. Restore also validates saved paths and refuses archive members that could escape through traversal, alternate streams, or reparse points. `backup.py create --json` emits a machine-readable manifest and returns a nonzero exit code when any target was skipped or incompletely backed up.
 
 ## Safety model
 

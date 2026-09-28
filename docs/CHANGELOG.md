@@ -1,6 +1,35 @@
 # Changelog
 
 ## Unreleased
+- Store SHA-256 integrity hashes in new file, directory-copy, and ZIP backup manifests; verify every payload before any restore writes, while retaining warned size/structure checks for older backups.
+- Reject drive roots and unsafe/non-local paths as direct backup sources before creating backup storage.
+- Document the useful scanner-native command-line modes and which modes Drive Cleanr uses for cleanup scans.
+- Preserve excluded locations and nested project roots when a user selects a parent directory for cleanup, and refuse directory trees with reparse points; explain that priority subtotals can overlap across tiers.
+- Clarify that reported folder totals may include protected nested data that cleanup will preserve.
+- Allow guided and direct scans of an existing local folder as well as a drive root.
+- Expose WizTree export depth in the guided scan setup and clarify that WinDirStat exports use its saved scan filters/settings.
+- Reject WizTree-only export settings when WinDirStat is selected instead of silently ignoring them.
+- Reject scan CSVs that lack required path/size columns and let the review menu return cleanly to scan selection.
+- Omit cleanup candidates beneath detected project roots, remove unreachable `$WinREAgent` candidate labeling, and describe risk tiers without promising an item is safe.
+- Honor an empty `.drive-cleanr-protect` file as a user-defined project-root exclusion marker.
+- Deduplicate overlapping candidate sizes in text-list exports so they match the report's cross-tier estimate.
+- Detect the CSV header after a single GUI WizTree generated-note line, and return a useful format error when required headers are absent.
+- Refuse to overwrite existing generated plans or candidate reports, and revalidate imported plan paths and types before writing PowerShell.
+- Handle refused candidate-report destinations in the interactive menu without terminating the review session.
+- Protect Codex/agent settings and container machine data from generic cache rules, and warn during Windows installer/update/package-manager activity.
+- Correct WinDirStat 2.x folder detection from hexadecimal attributes and item counts.
+- Exclude Downloads from cleanup suggestions and warn users to check for active installers or builds before cleaning temporary folders.
+- Recheck protected paths when generating cleanup plans from imported or edited candidate data.
+- Protect recovered installation data, Windows Update downloads, Windows recovery/update logs, and Service Worker storage from direct cleanup; add process warnings for Node.js and Rust package/build tools.
+- Show row-count progress while analyzing large scan exports and read CSV rows by precomputed column index.
+- Skip candidate paths that disappeared after the scan so stale entries do not inflate reclaimable totals.
+- Validate every restore manifest destination before writing, limit restores to normalized local paths, and preflight ZIP entries against traversal, alternate streams, reserved device names, and existing reparse points.
+- Keep cleanup-plan selection numbers tied to the original targets when a path goes missing before execution.
+- Ask about file-row exports only for WizTree; WinDirStat's guided flow no longer prompts for an option it ignores.
+- When WinDirStat omits capacity metadata, show current local-volume space with an explicit analysis-time label.
+- Stop the scanner and remove only its partial export after Ctrl+C or an unexpected scan error.
+- Make protected Claude subtree lookups scale with folder entries instead of repeatedly scanning all protected paths.
+- Verify file and small-directory backup contents with SHA-256 fingerprints so same-size corruption cannot pass as a complete backup.
 - Add a guided `python drive_cleaner.py` menu for scanning, reviewing, and managing backups.
 - Add scanner selection for WizTree and WinDirStat 2.6+, with WinDirStat CSV parsing and physical-size handling.
 - Document that official portable archives need no installation and are supported, with the correct WinDirStat CLI version and WizTree elevation requirements.
