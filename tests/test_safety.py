@@ -448,7 +448,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 self.assertFalse(analyze._is_local_drive_path(path))
 
     def test_recovery_data_update_staging_logs_and_service_workers_are_protected(self):
-        results = self.analyze_rows([
+        rows = [
             {"File Name": r"C:\Users\A\Recovered-WindowsOld\Previous-settings\.gradle\caches", "Size": "6000000"},
             {"File Name": "C:\\$WinREAgent\\", "Size": "1500000"},
             {"File Name": r"C:\ProgramData\USOShared\Logs\System", "Size": "90000"},
@@ -457,9 +457,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
             {"File Name": r"C:\Users\A\.codex\plugins\cache\extension", "Size": "5000000"},
             {"File Name": r"C:\Users\A\.agents\cache\skills", "Size": "5000000"},
             {"File Name": r"C:\Users\A\.local\share\containers\podman\cache\machine.tar", "Size": "5000000"},
-        ])
-        self.assertFalse(results["categories"]["high"]["items"])
-        self.assertFalse(results["categories"]["medium"]["items"])
+            {"File Name": r"C:\Users\A\Downloads\PhoenixPE\Workbench\PhoenixPE\Temp\dotnet", "Size": "5000000"},
+        ]
+        # These were false positives in an earlier real report. Stub all
+        # filesystem metadata so the regression test never inspects local data.
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+             mock.patch.object(analyze.shutil, "disk_usage", side_effect=OSError):
+            results = self.analyze_rows(rows)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
     def test_store_app_package_data_is_excluded_from_candidates_and_imported_plans(self):
         paths = (
