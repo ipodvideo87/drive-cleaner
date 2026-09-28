@@ -1444,6 +1444,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             # resolve through the newly-created junction if it is not checked.
             outside_sentinel = outside / "cache.tmp"
             outside_sentinel.write_bytes(b"outside sentinel")
+            source_attributes = (nested / "cache.tmp").stat()
+            os.utime(outside_sentinel, ns=(source_attributes.st_atime_ns, source_attributes.st_mtime_ns))
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(selected) + "\\",
                 "name": "Temporary files (check for installers or builds in progress)",
