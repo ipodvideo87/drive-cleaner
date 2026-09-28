@@ -429,19 +429,35 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = self.analyze_rows([
                 {"File Name": r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp", "Size": "104857600"},
                 {"File Name": r"C:\Windows\Minidump\memory.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Windows\MEMORY.DMP", "Size": "104857600"},
+                {"File Name": r"D:\Windows\Minidump\system.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Windows\Archives\Minidump\project.dmp", "Size": "104857600"},
+                {"File Name": r"C:\Windows\Logs\CrashDumps\old.zip", "Size": "104857600"},
                 {"File Name": r"C:\Users\A\Archives\CrashDumps\customer-data.zip", "Size": "104857600"},
                 {"File Name": r"C:\Users\A\Projects\Minidump\sample.dmp", "Size": "104857600"},
                 {"File Name": r"C:\Users\A\Archives\CrashDump.dmp", "Size": "104857600"},
             ])
         medium = results["categories"]["medium"]["items"]
-        self.assertEqual({item["path"] for item in medium}, {
+        crash_dump_items = [item for item in medium if "memory data" in item["name"]]
+        self.assertEqual({item["path"] for item in crash_dump_items}, {
             r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp",
             r"C:\Windows\Minidump\memory.dmp",
+            r"C:\Windows\MEMORY.DMP",
+            r"D:\Windows\Minidump\system.dmp",
         })
-        self.assertTrue(all(not item["safe"] for item in medium))
-        self.assertTrue(all("memory data" in item["name"] for item in medium))
+        self.assertTrue(all(not item["safe"] for item in crash_dump_items))
+        self.assertTrue(any(item["path"] == r"C:\Windows\Logs\CrashDumps\old.zip" and
+                            "Logs data" in item["name"] for item in medium))
         self.assertFalse(analyze._matches_cleanup_rule(
             r"C:\Users\A\Archives\CrashDumps\customer-data.zip", ("medium",),
+            "Windows crash diagnostics (keep if troubleshooting; may contain memory data)"
+        ))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Windows\Archives\Minidump\project.dmp", ("medium",),
+            "Windows crash diagnostics (keep if troubleshooting; may contain memory data)"
+        ))
+        self.assertFalse(analyze._matches_cleanup_rule(
+            r"C:\Windows\Logs\CrashDumps\old.zip", ("medium",),
             "Windows crash diagnostics (keep if troubleshooting; may contain memory data)"
         ))
         arbitrary_dump = {

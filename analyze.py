@@ -39,13 +39,13 @@ CLEANABLE_PATTERNS = {
     "medium": {
         "name": "Medium Priority (Use Caution)",
         "patterns": [
-            {"pattern": "livekernelreports", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
-            {"pattern": "crashdump", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
-            {"pattern": "crashdumps", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
-            {"pattern": "crashdump.dmp", "root": "windows", "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
-            {"pattern": "minidump.dmp", "root": "windows", "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
-            {"pattern": "memory.dmp", "root": "windows", "name": "Windows memory dump (may contain memory data; keep if troubleshooting)", "safe": False},
-            {"pattern": "minidump", "root": "windows", "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "livekernelreports", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdump", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdumps", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "crashdump.dmp", "root": "windows", "root_child": True, "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "minidump.dmp", "root": "windows", "root_child": True, "name": "Windows crash dump file (keep if troubleshooting; may contain memory data)", "safe": False},
+            {"pattern": "memory.dmp", "root": "windows", "root_child": True, "name": "Windows memory dump (may contain memory data; keep if troubleshooting)", "safe": False},
+            {"pattern": "minidump", "root": "windows", "root_child": True, "name": "Windows crash diagnostics (keep if troubleshooting; may contain memory data)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\logs\\", "name": "Logs data (review contents; may include user or diagnostic history)", "safe": False},
@@ -310,6 +310,14 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
     if root:
         root_components = tuple(_path_components(root))
         if tuple(components[:len(root_components)]) != root_components:
+            return False
+    else:
+        root_components = ()
+    if pattern_info.get("root_child"):
+        # Diagnostic rules can require a known directory/file directly under
+        # the Windows root instead of matching similarly named user subtrees.
+        required_prefix = root_components + pattern_components
+        if tuple(components[:len(required_prefix)]) != required_prefix:
             return False
     component_match = (
         (len(pattern_components) == 1 and pattern_components[0] in component_set) or
