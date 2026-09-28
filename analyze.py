@@ -787,6 +787,8 @@ def generate_clean_script(results, output_path, priority="high"):
             raise ValueError("Cleanup plan contains a malformed target")
         if not _is_local_drive_path(path):
             raise ValueError("Cleanup plan contains an unsafe path; only absolute non-root local paths are allowed")
+        if scan._path_has_reparse_component(path.rstrip("\\/")):
+            raise ValueError("Cleanup plan contains a path that crosses a junction or symbolic link; rescan before cleanup")
         if _is_excluded_path(path):
             raise ValueError("Cleanup plan contains a protected path; remove it and rescan")
         if not _matches_cleanup_rule(path, allowed_priorities, item["name"]):

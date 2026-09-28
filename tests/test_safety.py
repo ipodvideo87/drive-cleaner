@@ -1202,6 +1202,19 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     priority="high'; Remove-Item C:\\ -Recurse",
                 )
 
+    def test_generated_plan_rejects_paths_that_became_reparse_points(self):
+        results = {"categories": {"high": {"name": "High", "items": [{
+            "path": r"C:\Users\A\AppData\Local\Temp\cache.bin",
+            "name": "Temporary files (check for installers or builds in progress)",
+            "size": 100, "size_formatted": "100 B", "kind": "File",
+        }]}}}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "clean.ps1"
+            with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True):
+                with self.assertRaisesRegex(ValueError, "crosses a junction or symbolic link"):
+                    analyze.generate_clean_script(results, str(output))
+            self.assertFalse(output.exists())
+
     def test_generated_reports_never_overwrite_existing_files(self):
         results = self.analyze_rows([{
             "File Name": r"C:\Users\A\AppData\Local\Temp\cache.tmp", "Size": "104857600",
