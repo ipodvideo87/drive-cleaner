@@ -57,13 +57,21 @@ def find_windirstat():
 
 def _is_reparse_point(path):
     """Detect symlinks, junctions, and other Windows reparse points."""
-    if os.path.islink(path):
-        return True
-    if hasattr(os.path, "isjunction") and os.path.isjunction(path):
-        return True
     try:
+        if os.path.islink(path):
+            return True
+        if hasattr(os.path, "isjunction") and os.path.isjunction(path):
+            return True
         attributes = os.stat(path, follow_symlinks=False).st_file_attributes
-    except (AttributeError, OSError):
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        # If an existing path cannot be inspected, it must not be trusted as
+        # ordinary scan storage or removed as a partial scan export.
+        return True
+    except AttributeError:
+        # Non-Windows platforms do not expose Windows file attributes; the
+        # explicit symbolic-link checks above still apply there.
         return False
     return bool(attributes & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
@@ -77,7 +85,7 @@ def _path_has_reparse_component(path):
         if not part:
             continue
         current = os.path.join(current, part)
-        if os.path.lexists(current) and _is_reparse_point(current):
+        if _is_reparse_point(current):
             return True
     return False
 

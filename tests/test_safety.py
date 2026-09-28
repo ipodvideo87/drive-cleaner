@@ -1241,6 +1241,20 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
 
 class ScanSafetyTests(unittest.TestCase):
+    def test_scan_reparse_checks_fail_closed_when_metadata_is_unreadable(self):
+        with mock.patch.object(scan.os.path, "islink", return_value=False), \
+             mock.patch.object(scan.os.path, "isjunction", return_value=False, create=True), \
+             mock.patch.object(scan.os, "stat", side_effect=PermissionError("access denied")):
+            self.assertTrue(scan._is_reparse_point("unreadable-path"))
+            self.assertTrue(scan._path_has_reparse_component(r"C:\blocked\data"))
+
+    def test_missing_scan_storage_components_are_not_treated_as_reparse_points(self):
+        with mock.patch.object(scan.os.path, "islink", return_value=False), \
+             mock.patch.object(scan.os.path, "isjunction", return_value=False, create=True), \
+             mock.patch.object(scan.os, "stat", side_effect=FileNotFoundError("not found")):
+            self.assertFalse(scan._is_reparse_point("missing-path"))
+            self.assertFalse(scan._path_has_reparse_component(r"C:\missing\data"))
+
     def test_wiztree_discovery_prefers_64_bit_worker_for_configured_launcher(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             launcher = Path(temp_dir) / "WizTree.exe"
