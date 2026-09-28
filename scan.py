@@ -387,7 +387,12 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     # Generate output filename
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     mode_label = f"wiztree_{effective_wiztree_mode}" if app == "wiztree" else "windirstat"
-    output_file = os.path.join(DATA_DIR, f"scan_{mode_label}_{timestamp}.csv")
+    output_stem = os.path.join(DATA_DIR, f"scan_{mode_label}_{timestamp}")
+    output_file = f"{output_stem}.csv"
+    collision_index = 1
+    while os.path.lexists(output_file):
+        output_file = f"{output_stem}_{collision_index}.csv"
+        collision_index += 1
 
     if app == "wiztree":
         # Admin mode enables MFT scanning. Standard mode uses normal filesystem

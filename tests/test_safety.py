@@ -2088,6 +2088,27 @@ class ScanSafetyTests(unittest.TestCase):
             finally:
                 scan.DATA_DIR = old_data_dir
 
+    def test_scan_export_collision_preserves_existing_scans(self):
+        fixed_time = datetime(2026, 9, 28, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            data_dir.mkdir()
+            base = data_dir / "scan_windirstat_20260928120000000000.csv"
+            first_suffix = data_dir / "scan_windirstat_20260928120000000000_1.csv"
+            base.write_text("keep original scan", encoding="utf-8")
+            first_suffix.write_text("keep earlier collision", encoding="utf-8")
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
+                 mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                 mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                 mock.patch.object(scan.subprocess, "Popen") as launch:
+                output = scan.scan("D:", app="windirstat")
+
+            self.assertEqual(output, str(data_dir / "scan_windirstat_20260928120000000000_2.csv"))
+            self.assertEqual(base.read_text(encoding="utf-8"), "keep original scan")
+            self.assertEqual(first_suffix.read_text(encoding="utf-8"), "keep earlier collision")
+            launch.assert_called_once()
+
     def test_wait_uses_process_exit_after_a_quiet_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "scan.csv"
