@@ -2289,6 +2289,58 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual((destination / "changed.bin").read_bytes(), b"newer user data")
             self.assertEqual((destination / "removed.bin").read_bytes(), b"restore me")
 
+    @unittest.skipUnless(os.name == "nt", "Robocopy and Windows file attributes are required")
+    def test_windows_directory_backup_restore_preserves_hidden_and_system_files(self):
+        import ctypes
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source"
+            source.mkdir()
+            backup_root = root / "backups"
+            backup_root.mkdir()
+            hidden_file = source / "hidden.dat"
+            system_file = source / "system.dat"
+            hidden_file.write_bytes(b"hidden fixture")
+            system_file.write_bytes(b"system fixture")
+
+            set_attributes = ctypes.windll.kernel32.SetFileAttributesW
+            set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+            set_attributes.restype = ctypes.c_int
+            get_attributes = ctypes.windll.kernel32.GetFileAttributesW
+            get_attributes.argtypes = [ctypes.c_wchar_p]
+            get_attributes.restype = ctypes.c_uint32
+            hidden_flag = 0x2
+            system_flag = 0x4
+            normal_flag = 0x80
+            self.assertTrue(set_attributes(str(hidden_file), hidden_flag))
+            self.assertTrue(set_attributes(str(system_file), system_flag))
+
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+                redirect_stdout(io.StringIO()),
+            ):
+                manifest = backup.create_backup([str(source)])
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["items"][0]["format"], "copy")
+
+            for fixture_file in (hidden_file, system_file):
+                self.assertTrue(set_attributes(str(fixture_file), normal_flag))
+                fixture_file.unlink()
+
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual(hidden_file.read_bytes(), b"hidden fixture")
+            self.assertEqual(system_file.read_bytes(), b"system fixture")
+            self.assertNotEqual(get_attributes(str(hidden_file)) & hidden_flag, 0)
+            self.assertNotEqual(get_attributes(str(system_file)) & system_flag, 0)
+
     def test_directory_restore_rechecks_destination_before_robocopy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
