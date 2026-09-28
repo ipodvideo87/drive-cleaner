@@ -2652,6 +2652,10 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertGreaterEqual(info.extract_version, 45)
                 self.assertEqual(archive.read("large.bin"), b"small synthetic payload")
 
+            destination = Path(temp_dir) / "restored"
+            backup._extract_zip_backup(str(archive_path), str(destination))
+            self.assertEqual((destination / "large.bin").read_bytes(), b"small synthetic payload")
+
     def test_zip_restore_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "unsafe.zip"
