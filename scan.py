@@ -27,7 +27,15 @@ def find_wiztree():
         r"C:\Program Files (x86)\WizTree\WizTree64.exe",
     ]
     for c in candidates:
-        if c and os.path.exists(c):
+        if c and os.path.isfile(c):
+            candidate = Path(c)
+            # On 64-bit Windows, WizTree.exe is the 32-bit launcher and may
+            # return before its WizTree64.exe worker finishes exporting. Use
+            # the paired 64-bit executable whenever it is available.
+            if candidate.name.casefold() == "wiztree.exe":
+                wide_candidate = candidate.with_name("WizTree64.exe")
+                if wide_candidate.is_file():
+                    return str(wide_candidate)
             return c
     return shutil.which("WizTree64.exe") or shutil.which("WizTree64")
 

@@ -21,7 +21,7 @@ cd drive-cleaner
 
 ### Portable versions
 
-Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. WizTree's fast MFT mode requires an elevated terminal; its standard file-system scan can run without elevation but may miss files the current account cannot access. If automatic discovery misses either executable, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path.
+Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. WizTree's fast MFT mode requires an elevated terminal; its standard file-system scan can run without elevation but may miss files the current account cannot access. If automatic discovery misses either executable, set `WIZTREE_PATH` to the 64-bit `WizTree64.exe` or `WINDIRSTAT_PATH` to the `WinDirStat.exe` full path.
 
 ## Quick start
 

@@ -1169,6 +1169,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
 
 class ScanSafetyTests(unittest.TestCase):
+    def test_wiztree_discovery_prefers_64_bit_worker_for_configured_launcher(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher = Path(temp_dir) / "WizTree.exe"
+            worker = Path(temp_dir) / "WizTree64.exe"
+            launcher.touch()
+            worker.touch()
+            with mock.patch.dict(os.environ, {"WIZTREE_PATH": str(launcher)}):
+                self.assertEqual(scan.find_wiztree(), str(worker))
+
     def test_scan_target_accepts_drive_roots_and_existing_local_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertEqual(scan._normalize_scan_target("d:"), "D:")
