@@ -842,11 +842,12 @@ Write-Host "========================================" -ForegroundColor Cyan
     targets_str = ""
     for item in items:
         path = _ps_literal(item["path"])
+        is_directory = item.get('kind', '').lower() in ('directory', 'folder', '\u76ee\u5f55')
         targets_str += f'''    @{{
         Name = {_ps_literal(item['name'])}
         Path = {path}
         Size = {_ps_literal(item['size_formatted'])}
-        IsDirectory = ${str(item.get('kind', '').lower() in ('directory', 'folder', '\u76ee\u5f55')).lower()}
+        IsDirectory = ${str(is_directory).lower()}
     }},
 '''
 

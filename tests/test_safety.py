@@ -331,7 +331,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        # Use the long profile path explicitly: Windows' default temp path can
+        # use an 8.3 alias that PowerShell expands while enumerating children.
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
             root = Path(temp_dir)
             selected = root / "selected"
             unselected = root / "unselected"

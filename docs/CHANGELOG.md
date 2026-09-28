@@ -4,6 +4,7 @@
 - Match automated cleanup and protection patterns on complete Windows path components, preventing embedded names such as `CacheInspector` and `OneDriveBackup` from inheriting unrelated classifications.
 - Correct the WizTree elevation guidance: standard scans are available without elevation; only fast MFT scanning requires an administrator terminal.
 - Run the Windows mock and safety suite in GitHub Actions on Python 3.10 and 3.13 for pushes and pull requests.
+- Keep cleanup-script generation compatible with Python 3.10 and use a long Windows temp path in the nested-preservation integration test.
 - Store SHA-256 integrity hashes in new file, directory-copy, and ZIP backup manifests; verify every payload before any restore writes, while retaining warned size/structure checks for older backups.
 - Reject drive roots and unsafe/non-local paths as direct backup sources before creating backup storage.
 - Document the useful scanner-native command-line modes and which modes Drive Cleanr uses for cleanup scans.
