@@ -3333,6 +3333,41 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertIn("Restore incomplete: 0/1 items; 1 failed", restore_summary)
             self.assertNotIn("Restore complete", restore_summary)
 
+    def test_zip_restore_preflights_timestamps_before_writing_any_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "invalid-timestamp.zip"
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("first.txt", b"must not be partially restored")
+                archive.writestr("later.txt", b"invalid timestamp")
+
+            archive_bytes = bytearray(archive_path.read_bytes())
+            offset = archive_bytes.find(b"PK\x01\x02")
+            while offset >= 0:
+                name_length = struct.unpack_from("<H", archive_bytes, offset + 28)[0]
+                extra_length = struct.unpack_from("<H", archive_bytes, offset + 30)[0]
+                comment_length = struct.unpack_from("<H", archive_bytes, offset + 32)[0]
+                name_start = offset + 46
+                name = bytes(archive_bytes[name_start:name_start + name_length]).decode("utf-8")
+                if name == "later.txt":
+                    # DOS date month 15 is structurally readable by zipfile,
+                    # but datetime.timestamp() rejects it during extraction.
+                    invalid_dos_date = (15 << 5) | 1
+                    struct.pack_into("<H", archive_bytes, offset + 14, invalid_dos_date)
+                    break
+                offset = archive_bytes.find(
+                    b"PK\x01\x02", name_start + name_length + extra_length + comment_length
+                )
+            else:
+                self.fail("Could not find the later ZIP central directory entry")
+            archive_path.write_bytes(archive_bytes)
+
+            destination = root / "restore"
+            with self.assertRaises((RuntimeError, ValueError, OSError)):
+                backup._extract_zip_backup(str(archive_path), str(destination))
+            self.assertFalse((destination / "first.txt").exists())
+            self.assertFalse((destination / "later.txt").exists())
+
     def test_zip_restore_rejects_windows_alternate_stream_names(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             archive_path = Path(temp_dir) / "ads.zip"

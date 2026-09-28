@@ -390,7 +390,13 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
                     raise RuntimeError(f"Refusing to replace a directory with a file: {info.filename}")
                 if not info.is_dir() and not overwrite:
                     conflicts.append(target)
-            planned_entries.append((info, target))
+            try:
+                timestamp = datetime(*info.date_time).timestamp()
+            except (OverflowError, OSError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Refusing an invalid timestamp inside backup archive: {info.filename}"
+                ) from exc
+            planned_entries.append((info, target, timestamp))
 
         # Validate every member before writing any of them, avoiding partial
         # restoration when a later entry is unsafe or has damaged contents.
@@ -399,7 +405,7 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
         if damaged_member is not None:
             raise RuntimeError(f"Refusing a damaged backup archive member: {damaged_member}")
 
-        for info, target in planned_entries:
+        for info, target, timestamp in planned_entries:
             if info.is_dir():
                 existed = os.path.lexists(target)
                 os.makedirs(target, exist_ok=True)
@@ -412,7 +418,6 @@ def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = F
                     with archive.open(info, "r") as source, open(staged_path, "wb") as output:
                         shutil.copyfileobj(source, output, length=1024 * 1024)
 
-                timestamp = datetime(*info.date_time).timestamp()
                 restored = _write_file_atomically(
                     target,
                     write_member,
