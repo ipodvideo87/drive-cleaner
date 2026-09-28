@@ -167,7 +167,11 @@ def _directory_fingerprint(path: str) -> Dict[str, tuple]:
 
 def _directory_fingerprint_sha256(path: str) -> str:
     """Hash a directory's names, types, sizes, and file contents deterministically."""
-    entries = _directory_fingerprint(path)
+    return _fingerprint_entries_sha256(_directory_fingerprint(path))
+
+
+def _fingerprint_entries_sha256(entries: Dict[str, tuple]) -> str:
+    """Hash a previously collected directory fingerprint."""
     canonical = json.dumps(
         [(name, *entries[name]) for name in sorted(entries)],
         ensure_ascii=False, separators=(",", ":")
@@ -471,6 +475,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         digest = hashlib.sha256(os.path.normcase(os.path.abspath(path)).encode("utf-8")).hexdigest()[:10]
         safe_name = f"{sanitize_path_name(path) or 'item'}_{digest}"
         is_file = os.path.isfile(path)
+        source_integrity_sha256 = None
 
         # Choose a backup format based on the target type and size.
         if is_file:
@@ -531,17 +536,20 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
 
         if backup_format == "copy":
             try:
+                source_entries = _directory_fingerprint(path)
                 if (not os.path.isdir(backup_path) or get_dir_size(backup_path) != dir_size or
-                        _directory_fingerprint(path) != _directory_fingerprint(backup_path)):
+                        source_entries != _directory_fingerprint(backup_path)):
                     manifest["errors"].append(f"Backup output is missing, incomplete, or has different file contents for {path}")
                     continue
+                source_integrity_sha256 = _fingerprint_entries_sha256(source_entries)
             except (OSError, RuntimeError) as exc:
                 manifest["errors"].append(f"Could not verify backup output for {path}: {exc}")
                 continue
         if backup_format == "file":
             try:
+                source_integrity_sha256 = _sha256_file(path)
                 if (not os.path.isfile(backup_path) or os.path.getsize(backup_path) != dir_size or
-                        _sha256_file(path) != _sha256_file(backup_path)):
+                        source_integrity_sha256 != _sha256_file(backup_path)):
                     manifest["errors"].append(f"Backup output is incomplete or has different file contents for {path}")
                     continue
             except OSError as exc:
@@ -549,6 +557,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
                 continue
         if backup_format == "zip":
             try:
+                source_integrity_sha256 = _fingerprint_entries_sha256(source_fingerprint)
                 with zipfile.ZipFile(backup_path) as archive:
                     damaged = archive.testzip()
                     archive_size = sum(entry.file_size for entry in archive.infolist() if not entry.is_dir())
@@ -576,7 +585,8 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             "size": dir_size,
             "size_formatted": format_size(dir_size),
             "format": backup_format,
-            "integrity_sha256": integrity_sha256
+            "integrity_sha256": integrity_sha256,
+            "source_integrity_sha256": source_integrity_sha256,
         })
         manifest["total_size"] += dir_size
 
@@ -664,6 +674,119 @@ def get_backup(backup_id: str) -> Optional[Dict]:
             return json.load(f)
 
     return None
+
+
+def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
+    """Verify saved payloads and ensure current sources still match them."""
+    manifest = get_backup(backup_id)
+    if (not isinstance(manifest, dict) or manifest.get("status") != "completed" or
+            not isinstance(manifest.get("items"), list) or not manifest["items"]):
+        print("Refusing to verify an incomplete or empty backup")
+        return False
+
+    backup_dir = _find_backup_dir(backup_id)
+    if not backup_dir or _path_has_reparse_component(backup_dir):
+        print("Refusing to verify through an unavailable or linked backup location")
+        return False
+
+    def path_key(path):
+        return ntpath.normcase(ntpath.normpath(path.replace("/", "\\")))
+
+    requested = None
+    if paths is not None:
+        if not isinstance(paths, list) or not paths:
+            print("At least one source path is required")
+            return False
+        requested = set()
+        for path in paths:
+            if not _valid_restore_target(path):
+                print(f"Refusing to verify an unsafe source path: {path}")
+                return False
+            requested.add(path_key(path))
+
+    items_by_path = {}
+    for item in manifest["items"]:
+        if not isinstance(item, dict) or not isinstance(item.get("original_path"), str):
+            print("Refusing to verify a malformed backup manifest")
+            return False
+        key = path_key(item["original_path"])
+        if key in items_by_path:
+            print("Refusing to verify a backup with duplicate source paths")
+            return False
+        items_by_path[key] = item
+
+    if requested is not None:
+        missing = requested - items_by_path.keys()
+        if missing:
+            print("Requested source path is not present in this backup")
+            return False
+        selected_items = [items_by_path[key] for key in requested]
+    else:
+        selected_items = list(manifest["items"])
+
+    backup_root = os.path.abspath(backup_dir)
+    for item in selected_items:
+        original_path = item["original_path"]
+        backup_path = item.get("backup_path")
+        backup_format = item.get("format")
+        source_digest = item.get("source_integrity_sha256")
+        payload_digest = item.get("integrity_sha256")
+        if (backup_format not in {"file", "copy", "zip"} or
+                not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_digest) or
+                not isinstance(payload_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", payload_digest) or
+                not isinstance(backup_path, str)):
+            print(f"Backup lacks verifiable integrity data for: {original_path}")
+            return False
+
+        backup_path = os.path.abspath(backup_path)
+        try:
+            contained = os.path.normcase(os.path.commonpath([backup_root, backup_path])) == os.path.normcase(backup_root)
+        except ValueError:
+            contained = False
+        if (not contained or _path_has_reparse_component(backup_path) or
+                not os.path.exists(backup_path) or _path_has_reparse_component(original_path) or
+                not os.path.exists(original_path)):
+            print(f"Backup or source path is unavailable or linked: {original_path}")
+            return False
+
+        try:
+            if backup_format == "file":
+                if not os.path.isfile(backup_path) or not os.path.isfile(original_path):
+                    print(f"Source item type changed since backup: {original_path}")
+                    return False
+                current_source_digest = _sha256_file(original_path)
+                current_payload_digest = _sha256_file(backup_path)
+            elif backup_format == "copy":
+                if not os.path.isdir(backup_path) or not os.path.isdir(original_path):
+                    print(f"Source item type changed since backup: {original_path}")
+                    return False
+                if _tree_has_reparse_point(backup_path) or _tree_has_reparse_point(original_path):
+                    print(f"Source or backup tree contains a reparse point: {original_path}")
+                    return False
+                current_source_digest = _directory_fingerprint_sha256(original_path)
+                current_payload_digest = _directory_fingerprint_sha256(backup_path)
+            else:
+                if not os.path.isfile(backup_path) or not os.path.isdir(original_path):
+                    print(f"Source item type changed since backup: {original_path}")
+                    return False
+                if _tree_has_reparse_point(original_path):
+                    print(f"Source tree contains a reparse point: {original_path}")
+                    return False
+                current_source_digest = _directory_fingerprint_sha256(original_path)
+                current_payload_digest = _sha256_file(backup_path)
+        except (OSError, RuntimeError) as exc:
+            print(f"Could not verify source or backup contents for {original_path}: {exc}")
+            return False
+
+        if current_payload_digest.lower() != payload_digest.lower():
+            print(f"Backup contents changed since verification: {original_path}")
+            return False
+        if current_source_digest.lower() != source_digest.lower():
+            print(f"Source changed since backup; refusing cleanup: {original_path}")
+            return False
+
+    print("Backup and selected source contents match.")
+    return True
 
 
 def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
@@ -950,6 +1073,11 @@ def main():
     info_parser = subparsers.add_parser('info', help='Show backup details')
     info_parser.add_argument('--id', required=True, help='Backup ID')
 
+    # Verify command: confirm both the saved payload and current source contents.
+    verify_parser = subparsers.add_parser('verify', help='Verify backup and current source contents')
+    verify_parser.add_argument('--id', required=True, help='Backup ID')
+    verify_parser.add_argument('--paths', nargs='+', help='Specific source paths to verify (defaults to all items)')
+
     # Backup-drive command.
     subparsers.add_parser('drive', help='Show backup drive information')
 
@@ -1012,6 +1140,10 @@ def main():
         else:
             print(f"Backup not found: {args.id}")
             sys.exit(1)
+
+    elif args.command == 'verify':
+        success = verify_backup(args.id, args.paths)
+        sys.exit(0 if success else 1)
 
     elif args.command == 'drive':
         backup_root = find_backup_drive()

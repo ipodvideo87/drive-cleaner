@@ -42,7 +42,7 @@ The analyzer rejects UNC/device paths, traversal paths, and drive roots from imp
 
 ## 4. Run, back up, and verify
 
-Before deleting anything, the script invokes `backup.py` for every selected target. A missing or partial backup stops the cleanup. Backups go to a non-system drive with at least 5 GB free; there also needs to be sufficient room for the selected data. File backups are copied directly; smaller directories are copied; larger directories are compressed.
+Before deleting anything, the script invokes `backup.py` for every selected target. A missing or partial backup stops the cleanup. Immediately before removing each target, it verifies the backup payload and confirms the source still matches the content saved at backup time. A changed target is left in place. Backups go to a non-system drive with at least 5 GB free; there also needs to be sufficient room for the selected data. File backups are copied directly; smaller directories are copied; larger directories are compressed.
 
 Keep the backup until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. For unattended use, `--yes` explicitly approves overwriting conflicts:
 
@@ -72,6 +72,7 @@ python analyze.py .\data\scan.csv --list-output candidates.txt
 python backup.py drive
 python backup.py list
 python backup.py info --id backup_YYYYMMDD_HHMMSS_microseconds
+python backup.py verify --id backup_YYYYMMDD_HHMMSS_microseconds
 ```
 
 ## Troubleshooting a scan

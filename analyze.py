@@ -854,6 +854,7 @@ Write-Host "Backup created: $($backup.id)" -ForegroundColor Green
 Write-Host "`nStarting cleanup..." -ForegroundColor Cyan
 
 $totalCleaned = 0
+$cleanupFailed = $false
 foreach ($target in $cleanTargets) {{
     Write-Host "Cleaning: $($target.Name)..." -NoNewline
     if (-not (Test-Path $target.Path)) {{
@@ -927,16 +928,21 @@ foreach ($target in $cleanTargets) {{
                 -not $preservePaths.Contains($_.FullName)
             }})
             $before = ($deletable | Where-Object {{ -not $_.PSIsContainer }} | Measure-Object -Property Length -Sum).Sum
+            $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
+            if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             $deletable | Sort-Object {{ $_.FullName.Length }} -Descending | Remove-Item -Force -EA Stop
             if ($preservePaths.Count -gt 0) {{ Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow }}
         }} else {{
             $before = $item.Length
+            $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
+            if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             Remove-Item -LiteralPath $target.Path -Force -EA Stop
         }}
         $cleanedMB = [math]::Round($before / 1MB, 2)
         $totalCleaned += $cleanedMB
         Write-Host " [Done - $cleanedMB MB]" -ForegroundColor Green
     }} catch {{
+        $cleanupFailed = $true
         Write-Host " [Failed] $($_.Exception.Message)" -ForegroundColor Red
     }}
 }}
@@ -944,6 +950,7 @@ foreach ($target in $cleanTargets) {{
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Cleanup complete! Total: $([math]::Round($totalCleaned / 1024, 2)) GB" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Cyan
+if ($cleanupFailed) {{ exit 1 }}
 '''
 
     # Build the target list.

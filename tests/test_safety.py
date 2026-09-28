@@ -369,6 +369,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("$protectedPathPattern", script)
         self.assertIn("HashSet[string]", script)
         self.assertIn("$projectMarkers", script)
+        self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)
 
     def test_generated_script_parses_in_powershell_when_available(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
@@ -444,6 +445,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             fake_backup = root / "backup.py"
             fake_backup.write_text(
                 "import json, os, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
                 "start=sys.argv.index('--paths')+1\n"
                 "end=sys.argv.index('--json')\n"
                 "paths=sys.argv[start:end]\n"
@@ -495,7 +497,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
             (root / "backup.py").write_text(
-                "import json\nprint(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                "import json, sys\nif len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
                 encoding="utf-8",
             )
             result = subprocess.run(
@@ -506,6 +509,41 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((outside / "keep.bin").read_bytes(), b"outside")
             self.assertTrue((selected / "linked-outside").exists())
             self.assertIn("containing a reparse point", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_refuses_target_changed_after_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            target = root / "target"
+            target.mkdir()
+            marker = target / "cache.bin"
+            marker.write_bytes(b"before backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\", "name": "Temporary files (check for installers or builds in progress)",
+                "size": 13, "size_formatted": "13 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, pathlib, sys\n"
+                "if sys.argv[1] == 'verify': sys.exit(1)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "path=pathlib.Path(sys.argv[start])\n"
+                "(path/'cache.bin').write_bytes(b'changed after backup')\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_bytes(), b"changed after backup")
+            self.assertIn("refusing cleanup", result.stdout)
+
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_selection_indices_do_not_shift_when_target_disappears(self):
@@ -531,6 +569,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_log = root / "backup-targets.txt"
             (root / "backup.py").write_text(
                 "import json, os, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
                 "start=sys.argv.index('--paths')+1\n"
                 "end=sys.argv.index('--json')\n"
                 "paths=sys.argv[start:end]\n"
@@ -1168,6 +1207,19 @@ class BackupSafetyTests(unittest.TestCase):
             item = result["items"][0]
             self.assertEqual(item["format"], "file")
             self.assertEqual(Path(item["backup_path"]).read_bytes(), b"mock cache data")
+
+    def test_backup_verification_detects_source_changes_after_backup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"mock cache data")
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10):
+                result = backup.create_backup([str(source)])
+            self.assertEqual(result["status"], "completed")
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]):
+                self.assertTrue(backup.verify_backup(result["id"], [str(source)]))
+                source.write_bytes(b"changed after backup")
+                self.assertFalse(backup.verify_backup(result["id"], [str(source)]))
 
     def test_file_backup_rejects_same_size_corruption(self):
         with tempfile.TemporaryDirectory() as temp_dir:
