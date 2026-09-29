@@ -1730,7 +1730,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertTrue(outside_sentinel.exists(), result.stdout + result.stderr)
             self.assertEqual(outside_sentinel.read_bytes(), b"outside sentinel")
             self.assertTrue((moved_original / selected_file.name).exists(), result.stdout + result.stderr)
-            self.assertTrue((selected / "nested").is_junction(), result.stdout + result.stderr)
+            nested_attributes = (selected / "nested").lstat().st_file_attributes
+            self.assertTrue(
+                nested_attributes & 0x00000400,
+                result.stdout + result.stderr,
+            )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertRegex(result.stdout + result.stderr, r"reparse point|replaced after review")
 
