@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Preserve nested candidates from more cautious tiers when a selected parent folder covers them, and show those paths in the cleanup review preview.
 - Delete selected cleanup items through verified Windows handles, holding a shared byte-range lock during the final hash and deletion so ordinary file-handle writes and last-moment junction/path replacements cannot redirect or change the item being removed; keep changed files and nonempty folders in place.
 - Preserve cleanup support for read-only selected files by clearing the read-only attribute only on the verified file handle before removal.
 - Label Cargo install build output and Chocolatey package staging inside known temp roots as caution candidates, since they can contain compiled executables or installer payloads.

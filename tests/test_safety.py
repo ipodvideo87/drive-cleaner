@@ -1299,6 +1299,84 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"synthetic cache data")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_folder_cleanup_preserves_candidates_from_more_cautious_tiers(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "Temp"
+            nested_cache = selected / "Cache"
+            nested_gradle_cache = nested_cache / ".gradle" / "caches"
+            nested_gradle_cache.mkdir(parents=True)
+            (selected / "ordinary.tmp").write_bytes(b"selected temporary fixture")
+            (nested_cache / "ordinary-cache.tmp").write_bytes(b"ordinary cache fixture")
+            cache_file = nested_cache / "offline-state.bin"
+            cache_file.write_bytes(b"caution fixture")
+            gradle_file = nested_gradle_cache / "offline-package.bin"
+            gradle_file.write_bytes(b"confirm-first fixture")
+            results = {"categories": {
+                "high": {"name": "High", "items": [{
+                    "path": str(selected) + "\\",
+                    "name": "Temporary files (check for installers or builds in progress)",
+                    "size": 80, "size_formatted": "80 B", "kind": "Directory",
+                }]},
+                "medium": {"name": "Medium", "items": [{
+                    "path": str(nested_cache) + "\\",
+                    "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+                    "size": 48, "size_formatted": "48 B", "kind": "Directory",
+                }]},
+                "low": {"name": "Low", "items": [{
+                    "path": str(nested_gradle_cache) + "\\",
+                    "name": "Gradle cache",
+                    "size": gradle_file.stat().st_size, "size_formatted": "22 B", "kind": "Directory",
+                }]},
+            }}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path), priority="high")
+            (root / "backup.py").write_text(
+                "import json, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            all_script = root / "clean-all.ps1"
+            analyze.generate_clean_script(results, str(all_script), priority="all")
+            all_result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(all_script), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(all_result.returncode, 0, all_result.stderr or all_result.stdout)
+            self.assertTrue(cache_file.exists(), all_result.stdout + all_result.stderr)
+            self.assertEqual(cache_file.read_bytes(), b"caution fixture")
+            self.assertFalse((selected / "ordinary.tmp").exists(), all_result.stdout + all_result.stderr)
+            self.assertIn("Nested candidates from more cautious tiers will be preserved", all_result.stdout)
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            self.assertTrue(cache_file.exists(), result.stdout + result.stderr)
+            self.assertEqual(cache_file.read_bytes(), b"caution fixture")
+            self.assertFalse((selected / "ordinary.tmp").exists(), result.stdout + result.stderr)
+
+            medium_script = root / "clean-medium.ps1"
+            analyze.generate_clean_script(results, str(medium_script), priority="medium")
+            medium_result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(medium_script), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(medium_result.returncode, 0, medium_result.stderr or medium_result.stdout)
+            self.assertTrue(gradle_file.exists(), medium_result.stdout + medium_result.stderr)
+            self.assertEqual(gradle_file.read_bytes(), b"confirm-first fixture")
+            self.assertFalse((nested_cache / "ordinary-cache.tmp").exists(), medium_result.stdout + medium_result.stderr)
+            self.assertIn("Nested candidates from more cautious tiers will be preserved", medium_result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_nested_protected_and_project_data(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

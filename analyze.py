@@ -1237,21 +1237,31 @@ def generate_clean_script(results, output_path, priority="high"):
     """Generate a reviewed PowerShell cleanup script."""
     if priority not in {"high", "medium", "low", "all"}:
         raise ValueError("priority must be high, medium, low, or all")
+    categories = results.get("categories")
+    if not isinstance(categories, dict):
+        raise ValueError("Cleanup plan contains malformed candidate categories")
+    priority_order = ("high", "medium", "low")
     if priority == "all":
-        items = []
-        for key in ["high", "medium", "low"]:
-            items.extend(results["categories"][key]["items"])
+        source_items = []
+        for key in priority_order:
+            category = categories.get(key)
+            if not isinstance(category, dict) or not isinstance(category.get("items"), list):
+                raise ValueError("Cleanup plan contains malformed candidate categories")
+            source_items.extend((key, item) for item in category["items"])
         priority_name = "All priorities (high / medium / low)"
-        allowed_priorities = ("high", "medium", "low")
     else:
-        items = results["categories"][priority]["items"]
+        category = categories.get(priority)
+        if not isinstance(category, dict) or not isinstance(category.get("items"), list):
+            raise ValueError("Cleanup plan contains malformed candidate categories")
+        source_items = [(priority, item) for item in category["items"]]
         priority_name = CLEANABLE_PATTERNS[priority]["name"]
-        allowed_priorities = (priority,)
+    items = [item for _candidate_priority, item in source_items]
 
     # Candidate data can come from imported or edited results, so reapply the
     # path and project protections at the plan-generation boundary as well.
     project_path_cache = {}
-    for item in items:
+
+    def validate_candidate(item, candidate_priority):
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise ValueError("Cleanup plan contains a malformed target")
         path = item["path"]
@@ -1265,7 +1275,7 @@ def generate_clean_script(results, output_path, priority="high"):
             raise ValueError("Cleanup plan contains a path that crosses a junction or symbolic link; rescan before cleanup")
         if _is_excluded_path(path):
             raise ValueError("Cleanup plan contains a protected path; remove it and rescan")
-        if not _matches_cleanup_rule(path, allowed_priorities, item["name"]):
+        if not _matches_cleanup_rule(path, (candidate_priority,), item["name"]):
             raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
         kind = item.get("kind", classify_path(path))
         if not isinstance(kind, str) or kind.lower() not in ("file", "directory", "folder", "\u76ee\u5f55"):
@@ -1273,6 +1283,43 @@ def generate_clean_script(results, output_path, priority="high"):
         is_directory = kind.lower() in ("directory", "folder", "\u76ee\u5f55")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
+        return is_directory
+
+    source_types = {}
+    for candidate_priority, item in source_items:
+        source_types[id(item)] = validate_candidate(item, candidate_priority)
+
+    # A selected folder may contain a candidate from a more cautious tier.
+    # Keep that nested path out of this plan's recursive cleanup, even when
+    # the user selected the parent folder or requested all priorities.
+    preserved_candidates = {}
+    for outer_priority, outer_item in source_items:
+        if not source_types[id(outer_item)]:
+            continue
+        outer_path = outer_item["path"]
+        outer_key = _path_key(outer_path)
+        nested_paths = preserved_candidates.setdefault(outer_key, [])
+        for nested_priority in priority_order:
+            if _CLEANUP_TIE_BREAK_RANK[nested_priority] >= _CLEANUP_TIE_BREAK_RANK[outer_priority]:
+                continue
+            nested_category = categories.get(nested_priority)
+            if nested_category is None:
+                continue
+            if not isinstance(nested_category, dict) or not isinstance(nested_category.get("items"), list):
+                raise ValueError("Cleanup plan contains malformed candidate categories")
+            for nested_item in nested_category["items"]:
+                if not isinstance(nested_item, dict) or not isinstance(nested_item.get("path"), str):
+                    raise ValueError("Cleanup plan contains a malformed nested candidate")
+                nested_path = nested_item["path"]
+                if not _is_under(nested_path, outer_path):
+                    continue
+                validate_candidate(nested_item, nested_priority)
+                nested_path = ntpath.normpath(nested_path.replace("/", "\\"))
+                if not any(
+                        _path_key(nested_path) == _path_key(existing) or
+                        _is_under(nested_path, existing)
+                        for existing in nested_paths):
+                    nested_paths.append(nested_path)
 
     if priority == "all":
         # Validate each source-tier entry before deduplicating so malformed
@@ -1515,6 +1562,16 @@ if ($directoryTargets.Count -gt 0) {{
     Write-Host "`nFolder contents preview (direct children only; up to 12 per folder):" -ForegroundColor Cyan
     foreach ($target in $directoryTargets) {{
         Write-Host "  [$($target.Index)] $($target.Path)" -ForegroundColor White
+        $nestedCautionPaths = @($target.PreservePaths | Where-Object {{ Test-Path -LiteralPath $_ }})
+        if ($nestedCautionPaths.Count -gt 0) {{
+            Write-Host "    Nested candidates from more cautious tiers will be preserved:" -ForegroundColor Yellow
+            foreach ($nestedCautionPath in ($nestedCautionPaths | Select-Object -First $previewLimit)) {{
+                Write-Host "      $nestedCautionPath" -ForegroundColor Yellow
+            }}
+            if ($nestedCautionPaths.Count -gt $previewLimit) {{
+                Write-Host "      Additional nested caution-tier candidates will also be preserved." -ForegroundColor Yellow
+            }}
+        }}
         $previewEntries = @(Get-ChildItem -LiteralPath $target.Path -Force -EA Stop | Select-Object -First ($previewLimit + 1))
         if ($previewEntries.Count -eq 0) {{
             Write-Host "    (empty)" -ForegroundColor Gray
@@ -1596,9 +1653,15 @@ foreach ($target in $cleanTargets) {{
             if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $($reparseEntry.FullName)" }}
             # Preserve excluded paths and nested projects even when the user
             # selected a parent folder that contains them.
-            $targetRoot = $target.Path.TrimEnd('\\') + '\\'
+            $targetRoot = [System.IO.Path]::GetFullPath($target.Path).TrimEnd('\\') + '\\'
             $targetRootPath = $targetRoot.TrimEnd('\\')
             $protectedRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($preservePath in $target.PreservePaths) {{
+                $normalizedPreservePath = [System.IO.Path]::GetFullPath($preservePath)
+                if ($normalizedPreservePath.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{
+                    [void]$protectedRoots.Add($normalizedPreservePath.TrimEnd('\\'))
+                }}
+            }}
             foreach ($entry in $entries) {{
                 $protectedRoot = $null
                 if ($entry.Name -like 'claude*') {{ $protectedRoot = $entry.FullName }}
@@ -1786,11 +1849,14 @@ Write-Host "========================================" -ForegroundColor Cyan
     for item in items:
         path = _ps_literal(item["path"])
         is_directory = item.get('kind', '').lower() in ('directory', 'folder', '\u76ee\u5f55')
+        preserve_paths = preserved_candidates.get(_path_key(item["path"]), [])
+        preserve_paths_str = ", ".join(_ps_literal(value) for value in preserve_paths)
         targets_str += f'''    @{{
         Name = {_ps_literal(item['name'])}
         Path = {path}
         Size = {_ps_literal(item['size_formatted'])}
         IsDirectory = ${str(is_directory).lower()}
+        PreservePaths = @({preserve_paths_str})
     }},
 '''
 
