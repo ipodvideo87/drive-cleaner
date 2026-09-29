@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import struct
 import tempfile
+import time
 import unittest
 import zipfile
 from contextlib import redirect_stdout
@@ -1079,7 +1080,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("A Go process is running", script)
         self.assertIn("A .NET build process is running", script)
         self.assertIn("Windows installer, updater, or package manager is running", script)
-        self.assertLess(script.index("Creating backup before cleanup"), script.index("Remove-Item -LiteralPath"))
+        self.assertLess(script.index("Creating backup before cleanup"), script.index("::DeleteFileIfUnchanged("))
+        self.assertIn("::DeleteEmptyDirectoryIfUnchanged(", script)
+        self.assertNotIn("Remove-Item -LiteralPath $target.Path", script)
         self.assertIn("$target.IsDirectory", script)
         self.assertIn("Preserve excluded paths and nested projects", script)
         self.assertIn("$protectedPathPattern", script)
@@ -1414,6 +1417,130 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse(selected.exists(), result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_can_remove_a_read_only_selected_file(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "readonly-cache.bin"
+            selected.write_bytes(b"read only fixture")
+            os.chmod(selected, 0o444)
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": selected.stat().st_size, "size_formatted": "17 B", "kind": "File",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                    capture_output=True, text=True, timeout=90,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+                self.assertFalse(selected.exists(), result.stdout + result.stderr)
+            finally:
+                if selected.exists():
+                    os.chmod(selected, 0o666)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_preserves_file_with_conflicting_write_lock(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "locked-cache.bin"
+            selected.write_bytes(b"locked fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": selected.stat().st_size, "size_formatted": "14 B", "kind": "File",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            generated_script = script_path.read_text(encoding="utf-8-sig")
+            delete_call = next(
+                line for line in reversed(generated_script.splitlines())
+                if "::DeleteFileIfUnchanged(" in line
+            )
+            trigger = root / "lock-trigger"
+            lock_ready = root / "lock-ready"
+            lock_release = root / "lock-release"
+            ps_literal = lambda path: "'" + str(path).replace("'", "''") + "'"
+            indent = delete_call[:len(delete_call) - len(delete_call.lstrip())]
+            injection = (
+                f"{indent}[System.IO.File]::WriteAllText({ps_literal(trigger)}, 'lock')\n"
+                f"{indent}$lockDeadline = (Get-Date).AddSeconds(10)\n"
+                f"{indent}while (-not (Test-Path -LiteralPath {ps_literal(lock_ready)}) -and (Get-Date) -lt $lockDeadline) {{ Start-Sleep -Milliseconds 20 }}\n"
+                f"{indent}if (-not (Test-Path -LiteralPath {ps_literal(lock_ready)})) {{ throw 'The mock lock process did not start' }}\n"
+                + delete_call
+            )
+            call_line = "\n" + delete_call + "\n"
+            self.assertEqual(generated_script.count(call_line), 1)
+            script_path.write_text(
+                generated_script.replace(call_line, "\n" + injection + "\n", 1),
+                encoding="utf-8-sig",
+            )
+            lock_script = root / "hold-lock.ps1"
+            lock_script.write_text(
+                "$target = $args[0]\n"
+                "$trigger = $args[1]\n"
+                "$ready = $args[2]\n"
+                "$release = $args[3]\n"
+                "while (-not [System.IO.File]::Exists($trigger)) { Start-Sleep -Milliseconds 20 }\n"
+                "$share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete\n"
+                "$stream = [System.IO.File]::Open($target, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)\n"
+                "$stream.Lock(0, [long]::MaxValue)\n"
+                "[System.IO.File]::WriteAllText($ready, 'locked')\n"
+                "while (-not [System.IO.File]::Exists($release)) { Start-Sleep -Milliseconds 20 }\n"
+                "$stream.Unlock(0, [long]::MaxValue)\n"
+                "$stream.Dispose()\n",
+                encoding="utf-8",
+            )
+            lock_process = subprocess.Popen(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(lock_script),
+                 str(selected), str(trigger), str(lock_ready), str(lock_release)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                    capture_output=True, text=True, timeout=90,
+                )
+                self.assertTrue(lock_ready.exists(), result.stdout + result.stderr)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertRegex(result.stdout + result.stderr, r"in use|unavailable")
+            finally:
+                lock_release.write_text("release", encoding="utf-8")
+                try:
+                    lock_process.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    lock_process.kill()
+                    lock_process.communicate(timeout=5)
+            self.assertTrue(selected.exists(), result.stdout + result.stderr)
+            self.assertEqual(selected.read_bytes(), b"locked fixture")
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_keeps_new_child_added_after_backup_verification(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
@@ -1545,6 +1672,67 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertTrue((moved_original / "cache.tmp").exists(), result.stdout + result.stderr)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("reparse point", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_detects_junction_swap_at_file_removal_boundary(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        if not temp_root.is_dir():
+            self.skipTest("Windows temporary folder is unavailable")
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected"
+            nested = selected / "nested"
+            moved_original = selected / "nested-original"
+            outside = root / "outside"
+            nested.mkdir(parents=True)
+            outside.mkdir()
+            selected_file = nested / "cache.tmp"
+            selected_file.write_bytes(b"selected fixture")
+            outside_sentinel = outside / selected_file.name
+            outside_sentinel.write_bytes(b"outside sentinel")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": selected_file.stat().st_size, "size_formatted": "16 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, sys\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
+                "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+
+            def ps_literal(value):
+                return "'" + str(value).replace("'", "''") + "'"
+
+            generated_script = script_path.read_text(encoding="utf-8-sig")
+            delete_call = next(
+                line.strip() for line in generated_script.splitlines()
+                if "::DeleteFileIfUnchanged(" in line
+            )
+            injection = (
+                f"Move-Item -LiteralPath {ps_literal(nested)} -Destination {ps_literal(moved_original)}\n"
+                f"New-Item -ItemType Junction -Path {ps_literal(nested)} -Target {ps_literal(outside)} | Out-Null\n"
+                + delete_call
+            )
+            self.assertEqual(generated_script.count(delete_call), 2)
+            script_path.write_text(
+                generated_script.replace(delete_call, injection, 1), encoding="utf-8-sig")
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertTrue(outside_sentinel.exists(), result.stdout + result.stderr)
+            self.assertEqual(outside_sentinel.read_bytes(), b"outside sentinel")
+            self.assertTrue((moved_original / selected_file.name).exists(), result.stdout + result.stderr)
+            self.assertTrue((selected / "nested").is_junction(), result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertRegex(result.stdout + result.stderr, r"reparse point|replaced after review")
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_file_changed_after_backup_verification(self):

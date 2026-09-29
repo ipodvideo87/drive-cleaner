@@ -3,6 +3,7 @@
 """Analyze WizTree and WinDirStat CSV exports and find cleanup candidates."""
 
 import csv
+import hashlib
 import ntpath
 import os
 import shutil
@@ -16,6 +17,369 @@ from pathlib import Path
 import scan
 from scan import get_latest_scan
 from error_messages import describe_error
+
+_CLEANUP_NATIVE_GUARD_SOURCE = r"""
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
+
+public static class __CLASS_NAME__
+{
+    private const uint DeleteAccess = 0x00010000;
+    private const uint GenericRead = 0x80000000;
+    private const uint ReadAttributes = 0x00000080;
+    private const uint WriteAttributes = 0x00000100;
+    private const uint ShareRead = 0x00000001;
+    private const uint ShareAll = 0x00000007;
+    private const uint OpenExisting = 3;
+    private const uint OpenReparsePoint = 0x00200000;
+    private const uint BackupSemantics = 0x02000000;
+    private const uint AttributeDirectory = 0x00000010;
+    private const uint AttributeReadOnly = 0x00000001;
+    private const uint AttributeReparsePoint = 0x00000400;
+    private const int FileDispositionInfo = 4;
+    private const int FileBasicInfo = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileInformation
+    {
+        public uint Attributes;
+        public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileDisposition
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool DeleteFile;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct FileBasicInformation
+    {
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long ChangeTime;
+        public uint Attributes;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, uint shareMode, IntPtr securityAttributes,
+        uint creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        SafeFileHandle handle, out FileInformation information);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool LockFileEx(
+        SafeFileHandle handle, uint flags, uint reserved, uint bytesToLockLow,
+        uint bytesToLockHigh, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle handle, int informationClass, ref FileDisposition information,
+        uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandleEx(
+        SafeFileHandle handle, int informationClass, out FileBasicInformation information,
+        uint bufferSize);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetFileInformationByHandle(
+        SafeFileHandle handle, int informationClass, ref FileBasicInformation information,
+        uint bufferSize);
+
+    private sealed class LockedPath : IDisposable
+    {
+        public SafeFileHandle Target;
+        public readonly List<SafeFileHandle> Parents = new List<SafeFileHandle>();
+
+        public void Dispose()
+        {
+            if (Target != null) Target.Dispose();
+            for (int index = Parents.Count - 1; index >= 0; index--)
+                Parents[index].Dispose();
+        }
+    }
+
+    private static string ExtendedPath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (fullPath.StartsWith("\\\\?\\", StringComparison.Ordinal)) return fullPath;
+        if (fullPath.StartsWith("\\\\", StringComparison.Ordinal))
+            return "\\\\?\\UNC\\" + fullPath.Substring(2);
+        return "\\\\?\\" + fullPath;
+    }
+
+    private static SafeFileHandle Open(string path, uint access)
+    {
+        return Open(path, access, ShareRead);
+    }
+
+    private static SafeFileHandle Open(string path, uint access, uint shareMode)
+    {
+        SafeFileHandle handle = CreateFile(
+            ExtendedPath(path), access, shareMode, IntPtr.Zero, OpenExisting,
+            OpenReparsePoint | BackupSemantics, IntPtr.Zero);
+        if (handle == null || handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (handle != null) handle.Dispose();
+            throw new Win32Exception(error, "Could not securely open a cleanup path.");
+        }
+        return handle;
+    }
+
+    private static FileInformation Information(SafeFileHandle handle)
+    {
+        FileInformation information;
+        if (!GetFileInformationByHandle(handle, out information))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect a cleanup path.");
+        return information;
+    }
+
+    private static void RequireOrdinaryType(FileInformation information, bool isDirectory)
+    {
+        if ((information.Attributes & AttributeReparsePoint) != 0)
+            throw new IOException("A cleanup path became a reparse point; refusing deletion");
+        bool actualDirectory = (information.Attributes & AttributeDirectory) != 0;
+        if (actualDirectory != isDirectory)
+            throw new IOException("A cleanup path changed type; refusing deletion");
+    }
+
+    private static string Identity(FileInformation information)
+    {
+        return String.Format(
+            "{0:X8}:{1:X8}:{2:X8}", information.VolumeSerialNumber,
+            information.FileIndexHigh, information.FileIndexLow);
+    }
+
+    private static List<SafeFileHandle> LockParentDirectories(string path)
+    {
+        string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string root = Path.GetPathRoot(fullPath);
+        if (String.IsNullOrEmpty(root))
+            throw new IOException("Cleanup paths must be absolute local paths.");
+        List<SafeFileHandle> parents = new List<SafeFileHandle>();
+        try
+        {
+            SafeFileHandle rootHandle = Open(root, ReadAttributes);
+            parents.Add(rootHandle);
+            RequireOrdinaryType(Information(rootHandle), true);
+
+            string relative = fullPath.Substring(root.Length);
+            string[] parts = relative.Split(new char[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            string current = root;
+            for (int index = 0; index < parts.Length - 1; index++)
+            {
+                current = Path.Combine(current, parts[index]);
+                SafeFileHandle parent = Open(current, ReadAttributes);
+                parents.Add(parent);
+                RequireOrdinaryType(Information(parent), true);
+            }
+            return parents;
+        }
+        catch
+        {
+            for (int index = parents.Count - 1; index >= 0; index--)
+                parents[index].Dispose();
+            throw;
+        }
+    }
+
+    private static LockedPath OpenLockedPath(string path, bool isDirectory, uint targetAccess)
+    {
+        string fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string root = Path.GetPathRoot(fullPath);
+        if (String.IsNullOrEmpty(root) || String.Equals(fullPath, root.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Drive roots are not valid cleanup targets");
+
+        LockedPath locked = new LockedPath();
+        try
+        {
+            locked.Parents.AddRange(LockParentDirectories(fullPath));
+            locked.Target = Open(fullPath, targetAccess);
+            RequireOrdinaryType(Information(locked.Target), isDirectory);
+            return locked;
+        }
+        catch
+        {
+            locked.Dispose();
+            throw;
+        }
+    }
+
+    private static void RequireIdentity(FileInformation information, string expectedIdentity)
+    {
+        if (!String.Equals(Identity(information), expectedIdentity, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("A cleanup path was replaced after review; refusing deletion");
+    }
+
+    private static void LockFileContents(SafeFileHandle handle)
+    {
+        // Share-lock the full range representable by .NET file offsets,
+        // including future growth. This blocks writes while allowing readers.
+        // A zeroed OVERLAPPED structure starts at byte zero; fail immediately
+        // when another process holds a conflicting exclusive range.
+        IntPtr overlapped = Marshal.AllocHGlobal(64);
+        try
+        {
+            Marshal.Copy(new byte[64], 0, overlapped, 64);
+            if (!LockFileEx(handle, 0x00000001, 0, 0xFFFFFFFF, 0x7FFFFFFF, overlapped))
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 33)
+                    throw new IOException("The selected file is in use; refusing cleanup");
+                throw new Win32Exception(error, "Could not lock selected file contents for cleanup.");
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(overlapped);
+        }
+    }
+
+    private static void MarkForDeletion(SafeFileHandle handle)
+    {
+        FileDisposition disposition = new FileDisposition();
+        disposition.DeleteFile = true;
+        if (!SetFileInformationByHandle(
+                handle, FileDispositionInfo, ref disposition,
+                (uint)Marshal.SizeOf(typeof(FileDisposition))))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Windows refused to remove the selected item.");
+    }
+
+    private static bool ClearReadOnly(SafeFileHandle handle)
+    {
+        FileBasicInformation information;
+        uint informationSize = (uint)Marshal.SizeOf(typeof(FileBasicInformation));
+        if (!GetFileInformationByHandleEx(handle, FileBasicInfo, out information, informationSize))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect selected file attributes.");
+        if ((information.Attributes & AttributeReadOnly) == 0) return false;
+        information.Attributes &= ~AttributeReadOnly;
+        if (information.Attributes == 0) information.Attributes = 0x00000080;
+        if (!SetFileInformationByHandle(handle, FileBasicInfo, ref information, informationSize))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not clear the selected file's read-only attribute.");
+        return true;
+    }
+
+    private static void RestoreReadOnly(SafeFileHandle handle)
+    {
+        FileBasicInformation information;
+        uint informationSize = (uint)Marshal.SizeOf(typeof(FileBasicInformation));
+        if (!GetFileInformationByHandleEx(handle, FileBasicInfo, out information, informationSize))
+            throw new IOException("Windows refused removal, and the original read-only attribute could not be restored");
+        information.Attributes |= AttributeReadOnly;
+        if (!SetFileInformationByHandle(handle, FileBasicInfo, ref information, informationSize))
+            throw new IOException("Windows refused removal, and the original read-only attribute could not be restored");
+    }
+
+    public static string GetIdentity(string path, bool isDirectory)
+    {
+        using (LockedPath locked = OpenLockedPath(path, isDirectory, ReadAttributes))
+            return Identity(Information(locked.Target));
+    }
+
+    public static string GetFileIdentityAndHash(string path)
+    {
+        using (SafeFileHandle handle = Open(path, GenericRead | ReadAttributes))
+        {
+            FileInformation information = Information(handle);
+            RequireOrdinaryType(information, false);
+            FileStream stream = new FileStream(handle, FileAccess.Read, 4096, false);
+            using (stream)
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                string hash = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "");
+                return Identity(information) + "|" + hash;
+            }
+        }
+    }
+
+    public static void DeleteFileIfUnchanged(string path, string expectedIdentity, string expectedHash)
+    {
+        SafeFileHandle handle = Open(path, DeleteAccess | GenericRead | ReadAttributes | WriteAttributes);
+        FileInformation openedInformation;
+        try
+        {
+            openedInformation = Information(handle);
+            RequireOrdinaryType(openedInformation, false);
+            RequireIdentity(openedInformation, expectedIdentity);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+
+        FileStream stream = new FileStream(handle, FileAccess.Read, 4096, false);
+        using (stream)
+        {
+            LockFileContents(stream.SafeFileHandle);
+            stream.Position = 0;
+            string currentHash;
+            using (SHA256 sha256 = SHA256.Create())
+            {
+                currentHash = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "");
+            }
+            if (!String.Equals(currentHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("The selected file's contents changed after backup verification; refusing cleanup");
+
+            List<SafeFileHandle> parentLocks = LockParentDirectories(path);
+            try
+            {
+                using (SafeFileHandle pathHandle = Open(path, ReadAttributes, ShareAll))
+                {
+                    FileInformation currentInformation = Information(pathHandle);
+                    RequireOrdinaryType(currentInformation, false);
+                    RequireIdentity(currentInformation, expectedIdentity);
+                }
+                bool readOnlyCleared = ClearReadOnly(stream.SafeFileHandle);
+                try
+                {
+                    MarkForDeletion(stream.SafeFileHandle);
+                }
+                catch
+                {
+                    if (readOnlyCleared) RestoreReadOnly(stream.SafeFileHandle);
+                    throw;
+                }
+            }
+            finally
+            {
+                for (int index = parentLocks.Count - 1; index >= 0; index--)
+                    parentLocks[index].Dispose();
+            }
+        }
+    }
+
+    public static void DeleteEmptyDirectoryIfUnchanged(string path, string expectedIdentity)
+    {
+        using (LockedPath locked = OpenLockedPath(
+                path, true, DeleteAccess | ReadAttributes))
+        {
+            RequireIdentity(Information(locked.Target), expectedIdentity);
+            MarkForDeletion(locked.Target);
+        }
+    }
+}
+"""
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
@@ -925,6 +1289,17 @@ def generate_clean_script(results, output_path, priority="high"):
         raise ValueError("No cleanup candidates were found for the selected priority")
     _ensure_output_outside_targets(output_path, items)
 
+    native_class_name = "DriveCleanrCleanupGuard_" + hashlib.sha256(
+        _CLEANUP_NATIVE_GUARD_SOURCE.encode("utf-8")
+    ).hexdigest()[:12]
+    native_source = _CLEANUP_NATIVE_GUARD_SOURCE.replace("__CLASS_NAME__", native_class_name)
+    native_guard = (
+        f'if (-not ("{native_class_name}" -as [type])) {{\n'
+        "Add-Type -TypeDefinition @'\n"
+        + native_source
+        + "\n'@ -ErrorAction Stop\n}\n"
+    )
+
     script = '''# Disk Cleanup Script - {priority_name}
 # Auto-generated: {timestamp}
 # Source scan last modified: {scan_file_time}
@@ -936,6 +1311,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+__NATIVE_CLEANUP_GUARD__
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "       Disk Cleanup Tool - {priority_name}" -ForegroundColor Cyan
@@ -1078,19 +1455,6 @@ function Assert-CleanupEntryPathMatchesScan([object]$Target, [object]$Entry) {{
     }}
 }}
 
-function Assert-CleanupEntryMatchesScan([object]$Target, [object]$Entry) {{
-    Assert-CleanupEntryPathMatchesScan $Target $Entry
-    if (-not [bool]$Entry.PSIsContainer) {{
-        $currentHash = (Get-FileHash -LiteralPath $Entry.FullName -Algorithm SHA256 -EA Stop).Hash
-        if ($currentHash -ne [string]$Entry.CleanupSha256) {{
-            throw "A cleanup file's contents changed after backup verification; refusing cleanup: $($Entry.FullName)"
-        }}
-        # Recheck every path after hashing so a junction introduced during the
-        # read is caught before Remove-Item reopens the path.
-        Assert-CleanupEntryPathMatchesScan $Target $Entry
-    }}
-}}
-
 $available = @()
 Write-Host "Choose exactly which items to clean:" -ForegroundColor White
 for ($i = 0; $i -lt $cleanTargets.Count; $i++) {{
@@ -1141,6 +1505,8 @@ foreach ($target in $cleanTargets) {{
     if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory)) {{
         throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
     }}
+    $cleanupIdentity = [{native_class_name}]::GetIdentity($target.Path, [bool]$target.IsDirectory)
+    $target | Add-Member -NotePropertyName CleanupIdentity -NotePropertyValue $cleanupIdentity -Force | Out-Null
 }}
 
 $directoryTargets = @($cleanTargets | Where-Object {{ [bool]$_.IsDirectory }})
@@ -1221,6 +1587,10 @@ foreach ($target in $cleanTargets) {{
             throw "The item type changed since the scan; rescan before cleanup"
         }}
         if ($item.PSIsContainer) {{
+            $currentTargetIdentity = [{native_class_name}]::GetIdentity($target.Path, $true)
+            if ($currentTargetIdentity -ne $target.CleanupIdentity) {{
+                throw "The selected folder was replaced after review; refusing cleanup: $($target.Path)"
+            }}
             $entries = @(Get-ChildItem -LiteralPath $target.Path -Recurse -Force -EA Stop)
             $reparseEntry = $entries | Where-Object {{ ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }} | Select-Object -First 1
             if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $($reparseEntry.FullName)" }}
@@ -1284,14 +1654,27 @@ foreach ($target in $cleanTargets) {{
                 Write-Host "Checking the contents of $fileHashTotal selected files; large files may take a while." -ForegroundColor Gray
             }}
             foreach ($entry in $deletable) {{
-                if (-not $entry.PSIsContainer) {{
+                if ($entry.PSIsContainer) {{
+                    $entryIdentity = [{native_class_name}]::GetIdentity($entry.FullName, $true)
+                    Add-Member -InputObject $entry -NotePropertyName CleanupIdentity -NotePropertyValue $entryIdentity -Force
+                }} else {{
                     $fileHashIndex++
                     Write-Progress -Activity "Checking selected file contents" -Status "$fileHashIndex of $fileHashTotal" -PercentComplete ([int](100 * ($fileHashIndex - 1) / $fileHashTotal))
                     $entry.Refresh()
                     Add-Member -InputObject $entry -NotePropertyName CleanupLength -NotePropertyValue ([long]$entry.Length) -Force
                     Add-Member -InputObject $entry -NotePropertyName CleanupLastWriteTimeUtc -NotePropertyValue $entry.LastWriteTimeUtc -Force
-                    $cleanupHash = (Get-FileHash -LiteralPath $entry.FullName -Algorithm SHA256 -EA Stop).Hash
-                    Add-Member -InputObject $entry -NotePropertyName CleanupSha256 -NotePropertyValue $cleanupHash -Force
+                    $entrySnapshot = [{native_class_name}]::GetFileIdentityAndHash($entry.FullName)
+                    $snapshotParts = $entrySnapshot -split '\\|', 2
+                    if ($snapshotParts.Count -ne 2) {{
+                        throw "Could not verify a selected file's identity and contents: $($entry.FullName)"
+                    }}
+                    Add-Member -InputObject $entry -NotePropertyName CleanupIdentity -NotePropertyValue $snapshotParts[0] -Force
+                    $entry.Refresh()
+                    if ([long]$entry.Length -ne [long]$entry.CleanupLength -or
+                        $entry.LastWriteTimeUtc -ne $entry.CleanupLastWriteTimeUtc) {{
+                        throw "A cleanup file changed while its contents were checked; refusing cleanup: $($entry.FullName)"
+                    }}
+                    Add-Member -InputObject $entry -NotePropertyName CleanupSha256 -NotePropertyValue $snapshotParts[1] -Force
                 }}
             }}
             if ($fileHashTotal -gt 0) {{ Write-Progress -Activity "Checking selected file contents" -Completed }}
@@ -1299,6 +1682,10 @@ foreach ($target in $cleanTargets) {{
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             Assert-TargetMatchesScan $target
+            $verifiedTargetIdentity = [{native_class_name}]::GetIdentity($target.Path, $true)
+            if ($verifiedTargetIdentity -ne $target.CleanupIdentity) {{
+                throw "The selected folder was replaced after backup verification; refusing cleanup: $($target.Path)"
+            }}
             if (Test-PathInsideProject $target.Path $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
@@ -1313,8 +1700,14 @@ foreach ($target in $cleanTargets) {{
                     $fileRecheckIndex++
                     Write-Progress -Activity "Rechecking selected file contents" -Status "$fileRecheckIndex of $fileRecheckTotal" -PercentComplete ([int](100 * ($fileRecheckIndex - 1) / $fileRecheckTotal))
                 }}
-                Assert-CleanupEntryMatchesScan $target $entry
-                Remove-Item -LiteralPath $entry.FullName -Force -EA Stop
+                Assert-CleanupEntryPathMatchesScan $target $entry
+                if ($entry.PSIsContainer) {{
+                    [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
+                        $entry.FullName, [string]$entry.CleanupIdentity)
+                }} else {{
+                    [{native_class_name}]::DeleteFileIfUnchanged(
+                        $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupSha256)
+                }}
             }}
             if ($fileRecheckTotal -gt 0) {{ Write-Progress -Activity "Rechecking selected file contents" -Completed }}
             if ($preservePaths.Count -gt 0) {{
@@ -1323,13 +1716,19 @@ foreach ($target in $cleanTargets) {{
                 # Delete only an empty root. A new child may have appeared after
                 # the earlier enumeration; recursive removal here could erase
                 # data that was never included in the verified backup.
-                [System.IO.Directory]::Delete($target.Path, $false)
+                [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
+                    $target.Path, [string]$target.CleanupIdentity)
             }}
         }} else {{
             $before = $item.Length
             Write-Host "Rechecking selected file contents before removal..." -ForegroundColor Gray
             Write-Progress -Activity "Checking selected file contents" -Status "Comparing file contents" -PercentComplete 50
-            $cleanupHash = (Get-FileHash -LiteralPath $target.Path -Algorithm SHA256 -EA Stop).Hash
+            $fileSnapshot = [{native_class_name}]::GetFileIdentityAndHash($target.Path)
+            $snapshotParts = $fileSnapshot -split '\\|', 2
+            if ($snapshotParts.Count -ne 2 -or $snapshotParts[0] -ne $target.CleanupIdentity) {{
+                throw "The selected file was replaced while its contents were checked; refusing cleanup: $($target.Path)"
+            }}
+            $cleanupHash = $snapshotParts[1]
             Write-Progress -Activity "Checking selected file contents" -Completed
             $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
             if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
@@ -1337,17 +1736,10 @@ foreach ($target in $cleanTargets) {{
             if (Test-PathInsideProject $target.Path $false) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
-            Write-Progress -Activity "Checking selected file contents" -Status "Confirming contents" -PercentComplete 50
-            $currentHash = (Get-FileHash -LiteralPath $target.Path -Algorithm SHA256 -EA Stop).Hash
+            Write-Progress -Activity "Checking selected file contents" -Status "Confirming and removing the reviewed file" -PercentComplete 50
+            [{native_class_name}]::DeleteFileIfUnchanged(
+                $target.Path, [string]$target.CleanupIdentity, [string]$cleanupHash)
             Write-Progress -Activity "Checking selected file contents" -Completed
-            if ($currentHash -ne $cleanupHash) {{
-                throw "The selected file's contents changed after backup verification; refusing cleanup: $($target.Path)"
-            }}
-            Assert-TargetMatchesScan $target
-            if (Test-PathInsideProject $target.Path $false) {{
-                throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
-            }}
-            Remove-Item -LiteralPath $target.Path -Force -EA Stop
         }}
         $cleanedMB = [math]::Round($before / 1MB, 2)
         $totalCleaned += $cleanedMB
@@ -1359,7 +1751,18 @@ foreach ($target in $cleanTargets) {{
         if ($exception -is [System.UnauthorizedAccessException]) {{
             $failureReason = "Access was denied"
         }} elseif ($exception -is [System.IO.IOException]) {{
-            $failureReason = "The file or folder is unavailable, in use, or changed"
+            if ($exception.Message -in @(
+                "A cleanup path became a reparse point; refusing deletion",
+                "A cleanup path changed type; refusing deletion",
+                "A cleanup path was replaced after review; refusing deletion",
+                "The selected file's contents changed after backup verification; refusing cleanup",
+                "Windows refused removal, and the original read-only attribute could not be restored",
+                "Drive roots are not valid cleanup targets"
+            )) {{
+                $failureReason = $exception.Message
+            }} else {{
+                $failureReason = "The file or folder is unavailable, in use, or changed"
+            }}
         }} elseif ($exception -is [System.Management.Automation.RuntimeException]) {{
             $failureReason = $exception.Message
         }} else {{
@@ -1401,6 +1804,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 
     script = script.format(
         priority_name=priority_name,
+        native_class_name=native_class_name,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         scan_file_time=_safe_scan_timestamp(results),
         targets=targets_str.rstrip(",\n"),
@@ -1409,6 +1813,7 @@ Write-Host "========================================" -ForegroundColor Cyan
         project_marker_suffix_pattern=_ps_literal(project_suffix_pattern),
         priority_arg=priority if priority != "all" else "low"
     )
+    script = script.replace("__NATIVE_CLEANUP_GUARD__", native_guard)
 
     # The BOM lets Windows PowerShell 5.1 read Unicode paths correctly.
     with open(output_path, 'x', encoding='utf-8-sig') as f:

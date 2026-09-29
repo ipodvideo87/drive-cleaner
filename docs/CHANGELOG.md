@@ -3,6 +3,8 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Delete selected cleanup items through verified Windows handles, holding a shared byte-range lock during the final hash and deletion so ordinary file-handle writes and last-moment junction/path replacements cannot redirect or change the item being removed; keep changed files and nonempty folders in place.
+- Preserve cleanup support for read-only selected files by clearing the read-only attribute only on the verified file handle before removal.
 - Label Cargo install build output and Chocolatey package staging inside known temp roots as caution candidates, since they can contain compiled executables or installer payloads.
 - Hash each selected-folder file before backup verification and again immediately before removal; leave a changed file in place even when its replacement has the same size and preserved timestamp.
 - Write scanner output to an isolated incomplete-scan folder and publish it to the previous-scan list only after process exit and CSV validation; preserve and isolate partial output if the scanner cannot be confirmed stopped.
