@@ -7,6 +7,7 @@ import sys
 import time
 import shutil
 import subprocess
+import ctypes
 import re
 import csv
 from datetime import datetime
@@ -57,6 +58,61 @@ def find_windirstat():
     return shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
 
 
+def _get_windows_file_version(path):
+    """Read a Windows executable's fixed product version, or return None."""
+    if os.name != "nt":
+        return None
+
+    class FixedFileInfo(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_uint32) for name in (
+            "dwSignature", "dwStrucVersion", "dwFileVersionMS", "dwFileVersionLS",
+            "dwProductVersionMS", "dwProductVersionLS", "dwFileFlagsMask", "dwFileFlags",
+            "dwFileOS", "dwFileType", "dwFileSubtype", "dwFileDateMS", "dwFileDateLS",
+        )]
+
+    try:
+        version_api = ctypes.WinDLL("version", use_last_error=True)
+        get_size = version_api.GetFileVersionInfoSizeW
+        get_size.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint32)]
+        get_size.restype = ctypes.c_uint32
+        get_info = version_api.GetFileVersionInfoW
+        get_info.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        get_info.restype = ctypes.c_int
+        query = version_api.VerQueryValueW
+        query.argtypes = [
+            ctypes.c_void_p, ctypes.c_wchar_p,
+            ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint32),
+        ]
+        query.restype = ctypes.c_int
+
+        ignored_handle = ctypes.c_uint32()
+        size = get_size(os.fspath(path), ctypes.byref(ignored_handle))
+        if not size:
+            return None
+        version_data = ctypes.create_string_buffer(size)
+        if not get_info(os.fspath(path), 0, size, ctypes.byref(version_data)):
+            return None
+
+        info_pointer = ctypes.c_void_p()
+        info_size = ctypes.c_uint32()
+        if not query(ctypes.byref(version_data), "\\", ctypes.byref(info_pointer), ctypes.byref(info_size)):
+            return None
+        if info_size.value < ctypes.sizeof(FixedFileInfo):
+            return None
+
+        info = ctypes.cast(info_pointer, ctypes.POINTER(FixedFileInfo)).contents
+        if info.dwSignature != 0xFEEF04BD:
+            return None
+        version_ms = info.dwProductVersionMS or info.dwFileVersionMS
+        version_ls = info.dwProductVersionLS if info.dwProductVersionMS else info.dwFileVersionLS
+        return (
+            version_ms >> 16, version_ms & 0xFFFF,
+            version_ls >> 16, version_ls & 0xFFFF,
+        )
+    except (AttributeError, ctypes.ArgumentError, OSError, TypeError, ValueError):
+        return None
+
+
 def _is_reparse_point(path):
     """Detect symlinks, junctions, and other Windows reparse points."""
     try:
@@ -94,12 +150,12 @@ def _path_has_reparse_component(path):
 
 def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
-    print("Choose a disk usage scanner:")
-    print("  1. WizTree (fast MFT or standard scan)")
-    print("  2. WinDirStat 2.6+ (standard scan; administrator rights optional)")
+    print("Choose which scanner to use:")
+    print("  1. WizTree (fast full-drive scan or standard scan)")
+    print("  2. WinDirStat 2.6+ (standard scan; Administrator access optional)")
     while True:
         try:
-            choice = input("Scanner [1/2]: ").strip().lower()
+            choice = input("Select scanner [1/2]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
             return None
@@ -115,13 +171,13 @@ def choose_scanner():
 
 def choose_wiztree_mode():
     """Ask which WizTree scan mode to use; auto balances speed and access."""
-    print("Choose a WizTree scan mode:")
-    print("  1. Automatic (fast MFT for a whole drive when elevated; standard otherwise)")
-    print("  2. Fast MFT (requires administrator rights; recommended for a whole drive)")
-    print("  3. Standard file-system scan (no elevation required; inaccessible files may be missed)")
+    print("Choose a WizTree scan mode for the selected drive or folder:")
+    print("  1. Automatic (fast for a whole drive when run as Administrator; standard otherwise)")
+    print("  2. Fast full-drive scan (requires an Administrator terminal)")
+    print("  3. Standard scan (no Administrator access; may miss files this account cannot access)")
     while True:
         try:
-            choice = input("Mode [1/2/3]: ").strip().lower()
+            choice = input("Select scan mode [1/2/3]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
             return None
@@ -134,7 +190,7 @@ def choose_wiztree_mode():
             return "fast"
         if choice in ("3", "standard", "normal"):
             return "standard"
-        print("Enter 1 for automatic, 2 for fast MFT, or 3 for standard scanning.")
+        print("Enter 1 for automatic, 2 for fast full-drive scanning, or 3 for standard scanning.")
 
 
 def check_admin():
@@ -158,12 +214,12 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
     Returns:
         bool: whether the file is ready
     """
-    print("Waiting for scan to finish...")
-    start = time.time()
+    print("Waiting for the scan to finish...")
+    start = time.monotonic()
     last_size = -1
     stable_count = 0
 
-    while time.time() - start < timeout:
+    while time.monotonic() - start < timeout:
         if os.path.exists(filepath):
             try:
                 size = os.path.getsize(filepath)
@@ -172,26 +228,46 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
                         stable_count += 1
                         if stable_count >= stable_time:
                             # File size is stable; scan is complete
-                            print(f"Scan complete! File size: {size / 1024 / 1024:.2f} MB")
+                            print(f"\nScan complete! Results file size: {size / 1024 / 1024:.2f} MB")
                             return True
                     else:
                         stable_count = 0
                     last_size = size
 
                     # Show progress
-                    elapsed = int(time.time() - start)
-                    print(f"\rScanning... {elapsed}s, current file size: {size / 1024 / 1024:.2f} MB", end="", flush=True)
+                    elapsed = int(time.monotonic() - start)
+                    print(f"\rScanning... {elapsed}s | Saved so far: {size / 1024 / 1024:.2f} MB", end="", flush=True)
             except OSError:
                 pass
 
         time.sleep(1)
 
-    print(f"\nTimed out after waiting {timeout} seconds")
+    print(f"\nThe scan did not finish within {timeout} seconds.")
     return False
 
 
+def _looks_like_localized_windirstat_row(headers, row):
+    """Recognize WinDirStat's localized CSV schema from its documented field order and values."""
+    if len(headers) not in (9, 10) or len(row) != len(headers):
+        return False
+    path = str(row[0] or "").strip()
+    if not re.match(r"^[A-Za-z]:[\\/]", path):
+        return False
+    for index in (1, 2, 3, 4):
+        if not re.fullmatch(r"\d+", str(row[index] or "").strip()):
+            return False
+    try:
+        flags_text = str(row[7] or "").strip()
+        index_text = str(row[8] or "").strip()
+        flags = int(flags_text[2:] if flags_text.casefold().startswith("0x") else flags_text, 16)
+        int(index_text[2:] if index_text.casefold().startswith("0x") else index_text, 16)
+    except ValueError:
+        return False
+    return (flags & 0xF) in {0x4, 0x8}
+
+
 def validate_scan_export(filepath):
-    """Check the first CSV header without loading a potentially huge export."""
+    """Check a CSV header and sample row without loading a potentially huge export."""
     path_headers = {"\u6587\u4ef6\u540d\u79f0", "filename", "name"}
     size_headers = {"\u5927\u5c0f", "size", "logicalsize"}
 
@@ -205,9 +281,21 @@ def validate_scan_export(filepath):
             first_row = next(reader, [])
             if is_header(first_row):
                 return True, None
+            first_sample = next(reader, [])
+            if _looks_like_localized_windirstat_row(first_row, first_sample):
+                return True, None
             # GUI-generated WizTree exports can have one informational line
             # before the actual column headings.
-            if is_header(next(reader, [])):
+            second_row = first_sample
+            if is_header(second_row):
+                return True, None
+            second_sample = next(reader, [])
+            if _looks_like_localized_windirstat_row(second_row, second_sample):
+                return True, None
+            scan_mode_hint = Path(filepath).name.casefold().startswith("scan_windirstat_")
+            if scan_mode_hint and not first_sample and len(first_row) in (9, 10):
+                return True, None
+            if scan_mode_hint and is_header(second_row) is False and not second_sample and len(second_row) in (9, 10):
                 return True, None
             return False, "CSV is missing a recognized path and size header"
     except (OSError, UnicodeError, csv.Error) as exc:
@@ -286,9 +374,9 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
             try:
                 size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
             except OSError:
-                print(f"\rScanning... {elapsed}s, export size temporarily unavailable", end="", flush=True)
+                print(f"\rScanning... {elapsed}s | Checking scan file...", end="", flush=True)
             else:
-                print(f"\rScanning... {elapsed}s, exported {size / 1024 / 1024:.1f} MB", end="", flush=True)
+                print(f"\rScanning... {elapsed}s | Saved so far: {size / 1024 / 1024:.1f} MB", end="", flush=True)
             last_report = elapsed
         time.sleep(1)
 
@@ -296,12 +384,12 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
     if return_code != 0:
         print(f"\nScanner exited with code {return_code}")
         return False
-    print("\nScanner finished; checking the export file...")
+    print("\nScan finished; checking the results file...")
     if not wait_for_file(filepath, timeout=30, stable_time=2):
         return False
     valid, error = validate_scan_export(filepath)
     if not valid:
-        print(f"\nScan export is invalid: {error}")
+        print(f"\nScan results could not be validated: {error}")
         return False
     return True
 
@@ -337,7 +425,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
                        are only visible in file rows and often provide the biggest cleanup win)
         max_depth: maximum export depth; 0 means unlimited
         app: scanner to invoke ("wiztree" or "windirstat")
-        wiztree_mode: "auto", "fast" (MFT/elevated), or "standard" (Windows API scan)
+        wiztree_mode: "auto", "fast" (full-drive scan; Administrator required), or "standard"
 
     Returns:
         str: exported CSV file path, or None on failure
@@ -348,7 +436,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         print("Error: target must be a drive such as C: or an existing absolute local folder")
         return None
     if max_depth < 0 or timeout <= 0:
-        print("Error: max-depth must be nonnegative and timeout must be positive")
+        print("Error: folder depth must be zero or more, and the scan time limit must be positive")
         return None
 
     app = app.lower().strip()
@@ -359,7 +447,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         print("Error: --max-depth is supported only by WizTree")
         return None
     if app == "windirstat" and not include_files:
-        print("Error: WinDirStat exports files and folders together; --folders-only is supported only by WizTree")
+        print("Error: Drive Cleanr cannot hide individual files in WinDirStat results; use WizTree to scan folders only")
         return None
     if wiztree_mode not in {"auto", "fast", "standard"}:
         print("Error: WizTree mode must be 'auto', 'fast', or 'standard'")
@@ -375,16 +463,16 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         if effective_wiztree_mode == "auto":
             effective_wiztree_mode = "fast" if (elevated and is_whole_drive) else "standard"
         if effective_wiztree_mode == "fast" and not is_whole_drive:
-            print("Error: fast MFT scanning is only available for whole-drive targets; choose standard mode for a folder")
+            print("Error: fast full-drive scanning is only available for drives; choose standard scanning for a folder")
             return None
         if effective_wiztree_mode == "fast" and not elevated:
-            print("Error: fast MFT scanning requires administrator privileges")
-            print("Run this script as administrator, or choose standard scanning with --wiztree-mode standard")
+            print("Error: fast full-drive scanning requires an Administrator terminal")
+            print("Run this command in an Administrator terminal, or choose standard scanning with --wiztree-mode standard")
             return None
         if effective_wiztree_mode == "standard":
             print("WizTree standard scan selected; it may be slower and can miss files the current account cannot access.")
         else:
-            print("WizTree fast MFT scan selected.")
+            print("WizTree fast full-drive scan selected.")
 
     executable = find_wiztree() if app == "wiztree" else find_windirstat()
     app_name = "WizTree" if app == "wiztree" else "WinDirStat"
@@ -394,8 +482,18 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         folder_name = "WizTree" if app == "wiztree" else "WinDirStat"
         print(f"Place the executable in this project's {folder_name}\\ folder, or set the {env_name} environment variable")
         if app == "windirstat":
-            print("Automated CSV scanning requires WinDirStat 2.6.0 or newer.")
+            print("Scanning with Drive Cleanr requires WinDirStat 2.6.0 or newer.")
         return None
+
+    if app == "windirstat":
+        version = _get_windows_file_version(executable)
+        if version is None:
+            print("Warning: Could not verify WinDirStat's version. Drive Cleanr needs version 2.6.0 or newer for CSV export; continuing may fail.")
+        elif version[:2] < (2, 6):
+            detected_version = ".".join(str(part) for part in version)
+            print(f"Error: WinDirStat {detected_version} is too old for automated CSV export.")
+            print("Update to WinDirStat 2.6.0 or newer, then try again.")
+            return None
 
     # Keep completed exports visible at the top level; unfinished scans stay
     # isolated so the review menu and retention cleanup cannot mistake them for
@@ -464,8 +562,8 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
                 print(f"The verified export remains at: {partial_file}")
                 return None
             print("\nScan complete.")
-            print(f"Results: {output_file}")
-            print("Previous scans and cleanup plans were kept.")
+            print(f"Scan saved to: {output_file}")
+            print("Earlier scans and cleanup plans were kept.")
 
             return output_file
         else:
@@ -577,10 +675,10 @@ def main():
 
     parser = argparse.ArgumentParser(description='Drive Cleanr disk usage scan tool')
     parser.add_argument('drive', nargs='?', default='C:', help='Drive or existing absolute local folder to scan (default: C:)')
-    parser.add_argument('--folders-only', action='store_true', help='Export folders only (default also includes file rows so large single files stay visible)')
-    parser.add_argument('--max-depth', type=int, default=0, help='WizTree maximum export depth; 0 means unlimited (default: 0)')
+    parser.add_argument('--folders-only', action='store_true', help='Do not include individual files in results (default includes files and folders)')
+    parser.add_argument('--max-depth', type=int, default=0, help='Limit how many folder levels appear in WizTree results; 0 includes all levels (default: 0)')
     parser.add_argument('--wiztree-mode', choices=['auto', 'fast', 'standard'], default='auto',
-                        help='WizTree scan mode: fast MFT when elevated, standard otherwise (default: auto)')
+                        help='WizTree scan mode: fast full-drive scan when run as Administrator, standard scan otherwise (default: auto)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
     parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')
@@ -621,7 +719,7 @@ def main():
             wiztree_mode = choose_wiztree_mode()
         elif normalized_target is not None:
             wiztree_mode = "standard"
-            print("Folder scans use standard mode; fast MFT is available only for whole-drive scans.")
+            print("WizTree fast scanning is available only for a full drive; this folder will use standard scanning.")
     if wiztree_mode is None:
         sys.exit(1)
 
@@ -635,8 +733,7 @@ def main():
     )
 
     if result:
-        print(f"\nYou can analyze it with:")
-        print(f'python analyze.py "{result}" --min-size 50')
+        print("This scan is available in Drive Cleanr's main menu under 'Review a previous scan'.")
         sys.exit(0)
     else:
         sys.exit(1)

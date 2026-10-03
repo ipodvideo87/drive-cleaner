@@ -1,12 +1,12 @@
 # Drive Cleanr user guide
 
-Drive Cleanr is a conservative Windows CLI workflow. It finds disk usage with WizTree or WinDirStat, screens candidate paths against safety exclusions, creates a reviewable PowerShell plan, and requires a verified backup before cleanup.
+Drive Cleanr is a conservative Windows cleanup workflow. WizTree or WinDirStat scans a drive or folder, then Drive Cleanr lists suggestions for review. You choose individual files, folders, or both for the cleanup plan. Choosing a folder also includes its contents, even when they are not separate scan suggestions. Protected paths and detected projects are kept. Higher-risk candidates are kept unless you explicitly select a listed nested candidate too; the preview calls out that choice. Agent/editor settings and authentication state are also protected. The preview shows up to 12 direct items; other contents may also be removed. You can choose whether to make a verified recovery backup before cleanup.
 
 ## 1. Install and scan
 
-Install Python 3.10+ and have either WizTree or WinDirStat available. WinDirStat 2.6.0 or newer is required for automated CSV export. Standard WizTree scans can run without elevation; only fast MFT scanning requires an administrator terminal. Standard WizTree and WinDirStat scans may miss files the current account cannot access.
+Install Python 3.10+, have Windows PowerShell 5.1 (included with Windows) or PowerShell 7 available for generated cleanup plans, and have either WizTree or WinDirStat available. WinDirStat 2.6.0 or newer is required for scanning through Drive Cleanr. Standard WizTree scans can run without elevation; only its fast full-drive scan requires an administrator terminal. Standard WizTree and WinDirStat scans may miss files this account cannot access.
 
-Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). For WinDirStat, use 2.6.0 or newer; this project uses the current `/SaveTo` form. If a portable executable isn't discovered, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path. WinDirStat applies its saved filters, so check those before a full-drive scan.
+Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). For WinDirStat, use 2.6.0 or newer; this project uses the current `/SaveTo` form. If Windows reports an older version, Drive Cleanr stops before scanning and asks you to update. If the version cannot be read, it warns and tries the scan. If a portable executable isn't discovered, set `WIZTREE_PATH` or `WINDIRSTAT_PATH` to its full path. WinDirStat applies its saved filters, so check those before a full-drive scan.
 
 Start the guided workflow with:
 
@@ -14,47 +14,53 @@ Start the guided workflow with:
 python drive_cleaner.py
 ```
 
-Choose **Scan a drive**, then select WizTree or WinDirStat and answer the drive, export, and timeout prompts. Invalid yes/no or numeric answers are re-prompted; enter `Q` at an option prompt to cancel setup. The menu can open the completed scan in the review interface. You can also run `python scan.py --app wiztree C:` or `python scan.py --app windirstat C:` directly. Set `WIZTREE_PATH` or `WINDIRSTAT_PATH` if an executable isn't found automatically.
+Choose **Scan a drive or folder**, then select WizTree or WinDirStat and enter the scan target and time limit. With WizTree, choose whether results should include individual files as well as folders. This is on by default; if you choose folders only, individual files cannot be selected later. Invalid answers are re-prompted; enter `Q` at an option prompt to cancel setup. The menu can open the completed scan for review. Scans started directly with `scan.py` also appear under **Review a previous scan** in the main menu. Set `WIZTREE_PATH` or `WINDIRSTAT_PATH` if an executable isn't found automatically.
 
-Scans include file rows so large individual files remain visible. The default timeout is 30 minutes; for a larger or slower volume, increase it with `--timeout 3600`. Progress shows elapsed time and bytes written. The scan is complete only after the selected scanner exits, its CSV is stable, and its path and size headers are recognized. WinDirStat applies its saved filters to command-line scans, so review its filter settings before scanning a whole drive.
+Scans can include individual files as well as folders so large files can be reviewed and selected on their own. The default timeout is 30 minutes; for a larger or slower drive, increase it with `--timeout 3600`. Progress shows elapsed time and how much of the scan file has been saved. A scan is ready only after the scanner exits and Drive Cleanr verifies the results file. WinDirStat uses its saved filters, so check those before scanning a whole drive.
 
 Scans retain earlier exports and review plans. Run `python scan.py --cleanup --keep-latest 1` only when you intend to remove older CSVs; increase `--keep-latest` to preserve more exports. Cleanup removes a default `.clean.ps1` plan only when its matching scan CSV is pruned. It leaves custom plan paths and unrelated PowerShell files alone.
 
-## 2. Review candidates
+## 2. Review the scan
 
 ```powershell
 python analyze.py --tui
 ```
 
-Choose the latest scan or enter a CSV path. Review the disk summary, candidate tier, exact path, size, and description. You can list all candidates, export a text report, change the minimum size, or generate a plan. To use a fixed CSV instead, run `python analyze.py .\data\scan.csv --min-size 50 --list-items`.
+Choose the most recent scan or enter a scan file path. Review the disk summary and the suggested files and folders, including each exact path, size, and reason it was listed. You can view all suggestions, save the list to a text file, change the minimum item size, or create a cleanup plan. To review a specific scan from the command line, run `python analyze.py .\data\scan.csv --min-size 50 --list-items`.
 
-The report shows when the scan export was last modified. Candidate paths and contents can change after a scan; rescan before generating a cleanup plan if the system has changed since then.
+The report shows when the scan file last changed. Files and folders can change after a scan; scan again before creating a cleanup plan if anything may have changed.
 
-High, medium, and low are review tiers, not a guarantee of safety. Only standard Windows/user temp roots and the configured `TEMP`/`TMP` locations receive the lower-risk temporary-files label. The recognized temp root itself is omitted so qualifying items inside it can be reviewed and selected individually; folders merely named `Temp` or `Tmp` elsewhere stay in the caution tier. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Directory size estimates may overlap or include hard-linked data, so actual free-space gains can be smaller.
+Each selectable entry is labeled **File** or **Folder**. The selection screen lists the exact files and folders available to choose. A file will not appear if it was not included in the scan.
 
-Drive Cleanr checks candidate file/folder types against the current filesystem. If WinDirStat did not include reliable type metadata, the current path type is used. If a row's exported type conflicts with the current path, it is skipped and counted in the report; rescan to refresh it.
+High, medium, and low are review levels, not a guarantee of safety. Only standard Windows/user temp roots and the configured `TEMP`/`TMP` locations receive the lower-risk temporary-files label. The recognized temp root itself is omitted so qualifying items inside it can be reviewed and selected individually; folders merely named `Temp` or `Tmp` elsewhere stay in the caution tier. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Folder sizes may include data that the cleanup plan keeps, so actual free-space gains can be smaller.
 
-When a path matches both a broad cache rule and a recognized package-manager rule, Drive Cleanr uses the more specific package-manager category and caution tier.
+Drive Cleanr checks each file or folder against the current filesystem. WinDirStat localizes CSV column names with its interface language; Drive Cleanr recognizes the documented scan layout and keeps its own prompts and reports in English. If WinDirStat did not include reliable type information, Drive Cleanr checks the current path. If the scan's reported type conflicts with the current path, that entry is skipped and counted in the report; rescan to refresh it.
 
-Crash-dump rules only apply under the drive's `Windows` directory, not to user archives or project folders with similar names. They appear in the caution tier because dumps can help investigate crashes and some types can contain memory data; keep them while troubleshooting or waiting for support.
+When a path matches both a broad cache rule and a recognized package-manager rule, Drive Cleanr uses the more specific package-manager label and caution level.
 
-Cache-like paths inside recognized projects are omitted from cleanup candidates. Project markers include common manifests, Git files such as `.gitignore`, IDE workspace folders such as `.idea` and `.vs`, Unreal descriptors (`.uproject` and `.uplugin`), Godot `project.godot`, Unity `ProjectSettings`, and Visual Studio project/solution files. A root `.editorconfig` under the user profile is treated as shared editor settings; it does not mark the entire profile as a project. For a project with no recognized marker, add an empty `.drive-cleanr-protect` file at its root.
+Crash-dump rules only apply under the drive's `Windows` directory, not to user archives or project folders with similar names. They appear at the caution level because dumps can help investigate crashes and some types can contain memory data; keep them while troubleshooting or waiting for support.
 
-## 3. Generate and inspect a cleanup plan
+Cache-like paths inside recognized projects are omitted from cleanup candidates. Project markers include common manifests, Git files such as `.gitignore`, project guidance files such as `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, and `copilot-instructions.md`, agent/editor settings folders such as `.claude`, `.cursor`, `.gemini`, `.github`, `.opencode`, and `.windsurf`, IDE workspace folders such as `.idea`, `.vscode`, and `.vs`, VS Code `*.code-workspace` files, Unreal descriptors (`.uproject` and `.uplugin`), Godot `project.godot`, Unity `ProjectSettings`, and Visual Studio project/solution files. The analysis report lists detected project roots and the marker that caused candidate paths there to be skipped, when available. VS Code's user-profile `.vscode` extension folder is protected, but it does not mark the whole profile as a project; a `*.code-workspace` file stored directly at the profile root has the same project-detection exception. Shared editor and AI-assistant guidance files and settings folders at the profile root are also ignored as project markers. For a project with no recognized marker, add an empty `.drive-cleanr-protect` file at its root.
+
+## 3. Choose what to clean and create a plan
+
+In the review menu, choose which review group to include, then choose the listed files, folders, or both by number. Every row is labeled **File** or **Folder**. Nothing is selected automatically. Enter numbers separated by commas, `A` to choose every listed entry, or `Q`/Enter to cancel. The saved plan contains only the entries you chose. Choosing a folder also includes its contents, even when the children are not separate scan suggestions. Protected paths and detected projects are kept. A higher-risk nested candidate is kept unless you explicitly select its listed entry too; the plan preview shows selected nested entries. The plan preview shows up to 12 direct items; other contents may also be removed.
+
+If Drive Cleanr is already running as Administrator, it says so and asks whether to run the new plan in that window. Enter `Y` to start it; press Enter or `N` to save it for later. The plan shows the saved entries again, lets you choose which to clean, and asks you to confirm. Direct `--output` plan generation never runs a plan automatically.
 
 ```powershell
 python analyze.py .\data\scan.csv --min-size 50 --output clean_review.ps1 --priority high
 ```
 
-Use `--priority medium`, `low`, or `all` for a different reviewed scope. Inspect the script and verify every exact path before running it. At runtime, select individual numbered targets, choose all, or cancel. Before asking for `CLEAN`, the script previews up to 12 direct children of each selected folder and lists nested candidates from more cautious tiers that this plan will preserve. It backs up only the selected paths. Run it in a normal PowerShell session first; use an administrator session only when a reviewed target requires elevated access. `-Select 1,3 -Force` supplies an explicit reviewed selection and skips only the final confirmation prompt.
+Use `--priority medium`, `low`, or `all` to change which review groups the plan includes. Inspect every file and folder path in the saved plan. At run time, choose listed entries by number, choose all, or cancel. Choosing a folder includes its contents except protected paths and detected projects. A higher-risk candidate inside the folder is kept unless you explicitly select its listed entry too; the preview shows these nested selections. The preview shows up to 12 direct items; other contents may also be removed. Cleanup progress numbers selected items in processing order and shows each item's type, label, and exact path. The first item says that nothing has been removed yet; later items say files from earlier selections may already have been removed. Each check names its current step and reports counts from the start of folder and file work, with updates during long checks. Project-marker checks also report the first entry and when each pass finishes; the cleanup loop rechecks targets before processing them. Before removal, all selected files are inventoried and checked. The plan then checks and removes each file in turn; if a later check fails, earlier files may have been removed. Its final summary reports the files, folders, and file-data lengths removed, including partial results when a later check fails; those lengths can differ from actual space freed. Large folders can take time; the plan explains each step while it works. The plan asks whether to create a verified recovery backup. Type `CLEAN` to confirm cleanup with a backup; if you decline, type `DELETE WITHOUT BACKUP` to confirm permanent removal. Any requested backup that is missing, incomplete, or fails verification stops cleanup. Use a normal PowerShell session first; use an Administrator session only if Windows denies access to a selected path. For noninteractive use, `-Select 1,3 -Force` creates a verified backup by default. Use `-NoBackup` only when you intentionally approve permanent cleanup without a recovery copy.
 
-The analyzer rejects UNC/device paths, traversal paths, and drive roots from imported CSVs. It omits candidate paths that cross junctions, symbolic links, or path components with unreadable metadata. Before writing a plan, it repeats that link check and verifies each path matches the selected cleanup priority and exact rule label. When the script runs, it rechecks target type and all existing ancestors for reparse points before asking for confirmation or creating backups. It repeats those checks after backup and immediately before cleanup, so a target that changes during backup is left untouched. For selected directories, every enumerated descendant is reopened immediately before removal and each nested parent is checked again, so a new junction or type change stops cleanup. Files are compared against captured size, last-write time, and SHA-256 content; their content is rehashed immediately before removal so a same-size, timestamp-preserving change is also preserved. Take a new scan if the target changed after analysis.
+Drive Cleanr excludes system and personal data, and it refuses scan entries that pass through links or paths it cannot check. Before saving a plan, it verifies that every listed file or folder still matches the scan. When the plan runs, it checks those paths again. If a path changed, moved, or became part of a detected project, it is left in place. Selected folders keep protected and higher-risk contents. Scan again if a selected path may have changed since review.
 
-## 4. Run, back up, and verify
+## 4. Choose a backup and clean
 
-Before deleting anything, the script invokes `backup.py` for every selected target. A missing or partial backup stops the cleanup. Immediately before removing each target, it verifies the backup payload and confirms the source still matches the content saved at backup time. A changed target is left in place. Backups go to a non-system drive with at least 5 GB free; there also needs to be sufficient room for the selected data. File backups are copied directly; smaller directories are copied; larger directories are compressed.
+After you choose the files and folders, the plan asks whether to make a verified backup. If you choose yes, Drive Cleanr creates a recovery backup on a separate eligible drive before removal and verifies it against the selected items. New backups include and verify Windows alternate data streams as well as each file's usual contents. Large folders with those streams use verified direct copies instead of ZIP; if the backup destination cannot preserve them, cleanup stops. Cleanup plans also check file and folder named streams during review and immediately before removal; if a stream changes, that item is kept. If storage is unavailable or the backup is incomplete or fails verification, cleanup stops. Older backups warn that their stream contents were not verified. If you choose no, type `DELETE WITHOUT BACKUP` to confirm permanent removal. `-Force` keeps the verified backup enabled by default; pair it with `-NoBackup` only when you explicitly intend permanent cleanup. If you save the plan outside the project folder and choose backup, keep the project folder in place so the plan can find `backup.py`.
 
-Keep the backup until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. Directory-copy restores recheck the source and destination for links immediately before Robocopy starts. For unattended use, `--yes` explicitly approves overwriting conflicts:
+If you created a backup, keep it until the affected apps and Windows behave normally for an observation period. Restore offers overwrite or merge. Merge preserves existing files and restores missing files; overwrite replaces conflicts after you approve. Directory-copy restores recheck the source and destination for links immediately before Robocopy starts. For unattended use, `--yes` explicitly approves overwriting conflicts:
 
 ```powershell
 python backup.py list
@@ -68,15 +74,15 @@ To remove one backup permanently, use `python backup.py delete --id <id>` and co
 ## 5. Other useful options
 
 ```powershell
-# Exclude individual files from a smaller export
+# Scan folders only; individual files will not be available to select later
 python scan.py C: --folders-only
 
 # Allow a longer run
 python scan.py C: --timeout 3600
 
-# Machine-readable report and candidate list
+# Machine-readable review and suggested-item list
 python analyze.py .\data\scan.csv --json
-python analyze.py .\data\scan.csv --list-output candidates.txt
+python analyze.py .\data\scan.csv --list-output review-items.txt
 
 # Manage stored backups
 python backup.py drive
@@ -87,7 +93,7 @@ python backup.py verify --id backup_YYYYMMDD_HHMMSS_microseconds
 
 ## Troubleshooting a scan
 
-- Confirm the terminal is elevated for MFT scanning.
+- Confirm the terminal is open as administrator for WizTree's fast full-drive scan.
 - Confirm `python scan.py --latest` and `python scan.py C:` use the project folder you expect.
 - Set `WIZTREE_PATH` to the 64-bit `WizTree64.exe` if auto-detection fails.
 - Try a longer timeout for a large drive. If Drive Cleanr cannot confirm that the scanner stopped, its incomplete export is kept under `data/.incomplete/` and excluded from previous-scan selection and retention cleanup.

@@ -1,35 +1,35 @@
 ---
 name: clean-c-drive
-description: "Safe Windows drive cleanup. Use when the user wants to find reclaimable disk space or review cleanup candidates. Workflow: WizTree or WinDirStat scan -> conservative analysis with the pattern library and knowledge base -> user-approved item selection -> verified backup -> cleanup -> observation period. Safety first; do nothing when uncertain."
+description: "Safe Windows drive cleanup. Use when the user wants to find reclaimable disk space or review files and folders that may be removable. Workflow: WizTree or WinDirStat scan -> conservative review with the pattern library and knowledge base -> user-selected files and folders -> optional verified backup -> cleanup. Safety first; do nothing when uncertain."
 ---
 
 # /clean-c-drive Skill
 
-Use WizTree or WinDirStat scans and conservative analysis to review cleanup candidates on a Windows drive.
+Use WizTree or WinDirStat scans and a conservative review to help the user choose exact files and folders for cleanup on a Windows drive.
 
 **Safety rules that must never be broken:**
 
 1. If the purpose of a file is unclear, leave it alone. If the user says they do not recognize a file or app, mark it as a red line and ask the user.
-2. **In every permission mode, the cleanup plan must be approved by the user before execution.** Administrator mode only removes the need to manually run the script; it does not remove review.
-3. Always back up before cleaning (`backup.py`). If backup fails, stop.
+2. **The user must approve the exact cleanup plan before execution.** The generated script asks for final confirmation by default. Use `-Force` only when the user has explicitly authorized noninteractive execution after reviewing the exact plan and targets. When the guided menu is already elevated, it may offer to run the saved plan in that same session; the script still asks for confirmation unless the user separately authorized `-Force`.
+3. Ask whether the user wants a recovery backup. If they enable it, create and verify the complete backup before cleanup; if it fails, stop. If they decline, explain that Drive Cleanr cannot restore removed items. Interactive cleanup requires the generated plan's `DELETE WITHOUT BACKUP` confirmation. Noninteractive cleanup requires explicit user authorization and the `-NoBackup` switch.
 4. During analysis and planning, always cross-check `references/knowledge.md` for the safety red lines, tiered patterns, and execution rules.
 
 ## Workflow
 
 ### Stage 1: Check permissions and scan data
 
-1. Check administrator privileges only to decide whether WizTree fast MFT mode is available. Standard WizTree scanning and WinDirStat scans can run without elevation.
-2. Use a recent scan only if the user agrees it is suitable. Otherwise start the guided flow so the user can select the scanner and scan settings:
+1. Check administrator privileges only to decide whether WizTree's fast full-drive scan is available. Standard WizTree scanning and WinDirStat scans can run without elevation.
+2. Use a recent scan only if the user agrees it is suitable. Otherwise start the guided flow so the user can choose the scanner, target, and scan settings. Explain that files must be included in scan results to be available as individual selections:
    ```bash
    python "<project directory>/drive_cleaner.py"
    ```
-   Automatic WizTree mode uses fast MFT for a whole-drive scan when elevated and standard scanning otherwise. Standard scans may miss files the current account cannot access. WinDirStat 2.6.0 or newer exports through `/SaveTo`; review WinDirStat's saved filters before a whole-drive scan.
+   Automatic WizTree mode uses fast scanning for a whole drive when elevated and standard scanning otherwise. Standard scans may miss files this account cannot access. WinDirStat 2.6.0 or newer exports through `/SaveTo`; a detected older version is rejected before scanning, while unreadable version information produces a warning and a scan attempt. Review WinDirStat's saved filters before a whole-drive scan.
 3. Direct scan commands are also available:
    ```bash
    python "<project directory>/scan.py" C: --app wiztree --wiztree-mode standard
    python "<project directory>/scan.py" C: --app windirstat
    ```
-   Fast WizTree MFT scans require administrator privileges. Scans wait for the scanner process to exit, show export progress, and allow 30 minutes by default. Increase `--timeout` for a large volume; a pause in CSV growth alone does not mean scanning finished.
+   WizTree's fast full-drive scan requires an administrator terminal. Scans wait for the scanner process to exit, show export progress, and allow 30 minutes by default. Increase `--timeout` for a large volume; a pause in scan-file growth alone does not mean scanning finished.
 
 ### Stage 2: Analyze the scan data
 
@@ -40,7 +40,8 @@ python "<skill directory>/analyze.py" "<csv_file>" --min-size 50
 **Two-layer analysis is required:**
 
 - **Pattern library screening**: `analyze.py` identifies known cache and junk directories, assigns them to high/medium/low tiers, and excludes red-line directories automatically.
-- **Knowledge-base review**: the pattern library only covers about one-third of reclaimable space. The rest, including giant dumps, Chrome on-device AI models, duplicate installs, abandoned app data, and system-reclaimable space such as DISM-related cleanup, must be reviewed case by case against `references/knowledge.md`.
+- **Project protection context**: detected project roots and their marker files are listed when they cause scan candidates to be withheld. Explain that evidence to the user; a missing marker does not prove a folder is disposable. For an unmarked project, use `.drive-cleanr-protect` in its root.
+- **Knowledge-base review**: `analyze.py` suggests only paths that match its defined rules. Unmatched large items are not automatically safe or useless; review them individually against `references/knowledge.md`, especially unusual dumps, application model data, duplicate installs, abandoned app data, and DISM-related cleanup.
 - Be conservative with size estimates. Hard links between WinSxS and System32 can make directory totals look larger than actual usage.
 
 ### Stage 3: Build the cleanup plan
@@ -48,38 +49,41 @@ python "<skill directory>/analyze.py" "<csv_file>" --min-size 50
 Show the user:
 
 1. **Disk summary**: total, used, and free space
-2. **Cleanup candidates by priority**: for each item, list path, size, what it is, what happens if it is removed, and how it will be cleaned. Number each item clearly so the user can approve them one by one.
+2. **Suggested files and folders by review level**: label every entry File or Folder; show its exact path, size, and reason it was listed. Number each entry so the user can choose exact files and folders.
 3. **Red line list**: make it clear what will not be touched
-4. Ask the user to choose a cleanup level or approve individual items. **No approval means no execution. Silence is not consent.**
-   The generated script presents a numbered list and requires selection of specific items, all items, or cancellation; it never defaults to deleting every candidate.
+4. Ask the user to choose a review level or exact files and folders. **No approval means no execution. Silence is not consent.** State that only scan-listed entries can be selected and that nothing is selected automatically.
+   The generated script labels every available entry File or Folder and requires an explicit selection or cancellation; it never defaults to cleaning every entry.
+   Explain that choosing a folder includes its contents, even when they are not separate scan suggestions. Protected paths and detected projects are kept. Higher-risk candidates are kept unless the user explicitly selects a listed nested candidate too; show that choice in the plan preview. The preview shows up to 12 direct items; other contents may also be removed, so it is not a complete removal list.
+5. Ask whether the user wants a verified recovery backup. Make clear that declining it makes cleanup permanent through Drive Cleanr.
 
-### Stage 4: Back up the directories to be cleaned
+### Stage 4: Create an optional recovery backup
 
-**Before any cleanup action, you must back up first.**
+Create and verify a backup only when the user chooses one.
 
-1. Check backup drives. The utility automatically chooses an eligible local drive that is different from every selected source drive, has the most free space, and has at least 5 GB available:
+1. If the user chooses a backup, check backup drives. The utility automatically chooses an eligible local drive that is different from every selected source drive, has the most free space, and has at least 5 GB available:
    ```bash
    python "<skill directory>/backup.py" drive
    ```
-2. If the agent itself will perform cleanup, create the backup. Use a direct copy for targets under 1 GB and compression for targets 1 GB or larger. Generate `manifest.json`:
+2. If the agent itself will perform cleanup and the user chose a backup, create it. Use a direct copy for targets under 1 GB and compression for targets 1 GB or larger. Generate `manifest.json`:
    ```bash
    python "<skill directory>/backup.py" create --paths "path1" "path2" --priority high
    ```
    Note: robocopy backups preserve hidden and system attributes. Use `Get-ChildItem -Force` when checking the backup directory.
 3. If backup fails, stop cleanup and ask the user to fix the issue.
-   If the user will run a generated PowerShell plan, let that script create the backup once at execution time instead of creating a duplicate backup here. Continue only when the manifest status is `completed` and the backed-up item count matches the reviewed plan.
+   If the user will run a generated PowerShell plan, let that script create the backup once at execution time instead of creating a duplicate backup here. Continue only when the manifest status is `completed` and the backed-up item count matches the reviewed plan. If the user declines, do not create a backup in the background.
 
 ### Stage 5: Execute cleanup
 
-- Execute only the exact plan and item selection the user approved. The generated script asks the user to select numbered items, all items, or cancel, and backs up selected items before removing anything.
+- Execute only the exact plan and files/folders the user approved. A plan made in the guided review already contains those selections; a direct command plan asks the user to choose from its numbered list. The script offers a verified backup. If the user declines in an interactive run, it requires typing `DELETE WITHOUT BACKUP` before removing the selected files and folders.
 - Elevate PowerShell only if Windows denies access to a selected target; scanner elevation does not authorize cleanup.
 - Before execution, check for running processes. The generated script warns about browsers, editors, build tools, and package managers that may be using candidate files.
 - The generated script preserves nested protected paths and project roots, rejects reparse points and stale file/folder type changes, and supports single-file targets.
 - Do not use `-Force` unless the exact generated plan and selected targets have already been reviewed.
+- For noninteractive execution, `-Force` keeps backup enabled by default. Use `-NoBackup` only after the user explicitly chose permanent cleanup without a recovery copy; this combination skips the typed confirmation, so confirm the exact plan and the no-backup choice first.
 
 ### Stage 6: Verify and confirm
 
-After cleanup, ask the user whether the system is still behaving normally:
+If a backup was created, ask the user whether the system is still behaving normally:
 
 ```text
 Cleanup is complete. Please check whether the system is working normally.
@@ -87,6 +91,8 @@ Cleanup is complete. Please check whether the system is working normally.
 2. Something is wrong -> restore the backup immediately
 3. Decide later -> keep the backup for now
 ```
+
+Keep the verified backup through the observation period. If the system has problems, offer to restore it. If no backup was created, explain that Drive Cleanr cannot restore removed items.
 
 - Restore: `python "<skill directory>/backup.py" restore --id <backup_id>`
 - Delete after the observation period: `python "<skill directory>/backup.py" delete --id <backup_id>`
@@ -111,6 +117,8 @@ This removes older scan CSVs while keeping the newest scan by default. It remove
 
 ## Cleanup targets and safety red lines
 
+Project guidance files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, and `copilot-instructions.md`) and agent/editor settings folders (`.claude`, `.cursor`, `.gemini`, `.github`, `.opencode`, and `.windsurf`) mark a project root and protect cache-like candidates beneath it. Those settings folders are also protected path components everywhere because they may contain authentication, history, account settings, or instructions. At the user-profile root, these shared guidance files and settings folders do not mark the entire profile as a project. Keep this list aligned with `analyze.py` and `references/knowledge.md`.
+
 The full definitions live in two places and must stay in sync:
 
 - `analyze.py` `CLEANABLE_PATTERNS` for the pattern library and `EXCLUDE_PATTERNS` for safety red lines
@@ -124,7 +132,7 @@ WizTree allocated size is preferred for reclaimable-space estimates; hard-linked
 WizTree64.exe <drive> /export="<path>" /admin=0|1 /exportfolders=1 /exportfiles=1 /sortby=2 /exportdrivecapacity=1 /exportmaxdepth=0
 ```
 
-Use `/admin=1` for elevated fast MFT scanning; `/admin=0` selects standard file-system scanning. WinDirStat cleanup scans use `WinDirStat.exe /SaveTo <path.csv> <drive-or-folder>`.
+Use WizTree's `/admin=1` option for fast full-drive scanning; `/admin=0` selects standard scanning. WinDirStat cleanup scans use `WinDirStat.exe /SaveTo <path.csv> <drive-or-folder>`.
 
 **Why export file rows by default (`/exportfiles=1`):**
 The biggest cleanup wins often come from single large files such as 4.7 GB crash dumps, 4 GB Chrome on-device AI models, or multi-gigabyte partial downloads. If you export folders only, those files disappear from the report. The CSV may become large, but `analyze.py` streams it efficiently. Use `--folders-only` only when you truly need the older smaller export behavior.

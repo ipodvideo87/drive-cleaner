@@ -8,7 +8,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 
 - Never run a cleanup against a real user path as part of development or tests. Use temporary directories and mocked process calls.
 - Never bypass the user's explicit plan review. Generated scripts must ask before doing work unless the user separately starts them with `-Force` after reviewing the script.
-- Every cleanup script must create and verify a complete backup before the first removal. Any missing, incomplete, or failed backup must stop the script.
+- Cleanup scripts must let users explicitly choose whether to create a recovery backup. When enabled, create and verify a complete backup before the first removal; any missing, incomplete, or failed backup must stop the script. When declined, clearly warn that removal cannot be restored by Drive Cleanr and require a distinct typed confirmation; noninteractive no-backup cleanup must use an explicit `-NoBackup` switch.
 - Treat CSV content and backup manifests as untrusted input. Quote it as data, constrain paths and backup IDs, recheck target type and reparse-point status immediately before removal, and preserve safety exclusions.
 - Do not include local scan exports, backup contents, generated scripts, or personal paths in source control.
 - Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
