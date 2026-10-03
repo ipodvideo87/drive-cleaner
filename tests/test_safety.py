@@ -4930,8 +4930,18 @@ class BackupSafetyTests(unittest.TestCase):
 
             backup_root = root / "backups"
             backup_root.mkdir()
+
+            def copy_default_stream_only(source_path, backup_path):
+                # Reproduce the Windows copy behavior used by Python 3.10,
+                # which does not include NTFS named streams in shutil.copy2.
+                with open(source_path, "rb") as source_file, \
+                     open(backup_path, "wb") as backup_file:
+                    shutil.copyfileobj(source_file, backup_file)
+                return backup_path
+
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
-                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10):
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup.shutil, "copy2", side_effect=copy_default_stream_only):
                 manifest = backup.create_backup([str(source)])
 
             self.assertEqual(manifest["status"], "completed")
@@ -4975,8 +4985,15 @@ class BackupSafetyTests(unittest.TestCase):
             backup_root = root / "backups"
             backup_root.mkdir()
 
+            def copy_file_with_named_streams(source_file, backup_file):
+                result = shutil.copy2(source_file, backup_file)
+                backup._copy_named_data_streams(source_file, backup_file)
+                return result
+
             def mock_robocopy(command, **_kwargs):
-                shutil.copytree(command[1], command[2], copy_function=shutil.copy2)
+                # Model Robocopy's /COPY:DAT behavior independently of the
+                # Python version running the test.
+                shutil.copytree(command[1], command[2], copy_function=copy_file_with_named_streams)
                 return subprocess.CompletedProcess(command, 1)
 
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \

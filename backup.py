@@ -228,6 +228,21 @@ def _named_stream_fingerprints(path: str) -> list[tuple[str, int, str]]:
     return fingerprints
 
 
+def _copy_named_data_streams(source: str, destination: str) -> None:
+    """Copy a file's named streams explicitly across Python versions."""
+    streams = _named_data_streams(source)
+    for stream_name, expected_size in streams:
+        source_stream_path = os.fspath(source) + stream_name
+        destination_stream_path = os.fspath(destination) + stream_name
+        with open(source_stream_path, "rb") as source_stream:
+            with open(destination_stream_path, "wb") as destination_stream:
+                shutil.copyfileobj(source_stream, destination_stream)
+        if os.path.getsize(destination_stream_path) != expected_size:
+            raise RuntimeError(f"A named data stream was not fully copied: {source}")
+    if _named_data_streams(source) != streams:
+        raise RuntimeError(f"Named data streams changed while they were being copied: {source}")
+
+
 def _file_integrity_sha256(path: str) -> str:
     """Hash the default file data and all named streams when the file system supports them."""
     default_hash = _sha256_file(path)
@@ -754,6 +769,10 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             backup_path = os.path.join(backup_dir, safe_name)
             try:
                 shutil.copy2(path, backup_path)
+                # Python 3.10's shutil.copy2 uses a buffered copy on Windows
+                # that omits NTFS alternate data streams. Copy them explicitly
+                # so the backup guarantees do not depend on the Python version.
+                _copy_named_data_streams(path, backup_path)
             except Exception as e:
                 print(f"        [Failed] {describe_error(e)}")
                 manifest["errors"].append(f"File backup failed for {path}: {describe_error(e)}")
