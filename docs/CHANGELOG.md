@@ -3,7 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
-- Copy named NTFS streams explicitly for individual-file recovery backups so Python 3.10 does not produce an incomplete backup.
+- Copy named NTFS streams explicitly during individual-file backup and staged restore so Python 3.10 does not produce incomplete recovery data.
 - Recognize common AI-assistant project guidance files and editor settings folders as project markers, protect candidates beneath them during analysis and cleanup, and ignore shared settings at the user-profile root.
 - Exclude agent/editor settings data folders from cleanup suggestions, while matching only the exact folder names so similarly named cache paths remain reviewable.
 - Protect cache-like paths inside projects marked by a VS Code `.vscode` folder or `*.code-workspace` file, without treating profile-level VS Code extensions or workspace files as markers for the whole user profile.

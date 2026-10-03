@@ -4958,7 +4958,8 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertFalse(backup.verify_backup(manifest["id"], [str(source)]))
 
                 source.unlink()
-                with redirect_stdout(io.StringIO()):
+                with redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup.shutil, "copy2", side_effect=copy_default_stream_only):
                     self.assertTrue(backup.restore_backup(manifest["id"]))
             with open(stream_path, "rb") as stream:
                 self.assertEqual(stream.read(), expected_stream)

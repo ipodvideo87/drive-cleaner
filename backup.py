@@ -352,6 +352,8 @@ def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool
     """Stage and verify a backup file before making it visible at its destination."""
     def copy_backup(staged_path):
         shutil.copy2(backup_path, staged_path)
+        if verify_named_streams:
+            _copy_named_data_streams(backup_path, staged_path)
 
     return _write_file_atomically(
         destination, copy_backup, overwrite, expected_sha256, expected_size,
