@@ -3341,6 +3341,45 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertNotIn("Cleanup complete!", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_stops_if_project_marker_appears_inside_selected_folder_after_inventory(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected-cache"
+            nested = selected / "existing-subfolder"
+            nested.mkdir(parents=True)
+            cached_file = nested / "cache.bin"
+            cached_file.write_bytes(b"preserve after the folder becomes a project")
+            marker = nested / "package.json"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)",
+                "size": cached_file.stat().st_size, "size_formatted": "42 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, pathlib, sys\n"
+                f"marker = pathlib.Path({str(marker)!r})\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify':\n"
+                "    marker.write_text('{}', encoding='utf-8')\n"
+                "    sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertTrue(marker.exists(), result.stdout + result.stderr)
+            self.assertEqual(cached_file.read_bytes(), b"preserve after the folder becomes a project")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("project", result.stdout.lower() + result.stderr.lower())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_rechecks_agent_settings_folder_after_backup(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

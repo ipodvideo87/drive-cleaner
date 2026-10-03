@@ -14,6 +14,14 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
 - Prefer leaving uncertain files untouched. Avoid overstating reclaimable size: folder totals can overlap and hard links can inflate apparent savings.
 
+## User-facing wording
+
+- Keep the entire user workflow clear and consistent in plain English: welcome screen, menus, prompts, progress messages, reports, cleanup results, and recovery options.
+- Explain what each choice controls. Make it clear when a selection is an individual file or a folder, and when choosing a folder may preserve protected contents.
+- Keep instructions brief and actionable. Prefer guided menu choices over follow-up command examples when the user can continue inside the running program.
+- Use consistent everyday terms, explain necessary technical terms at the point of use, and check English-language output for accidental untranslated or garbled text.
+- For long operations, say what is being checked and show periodic progress so users can tell the program is still working.
+
 ## Development
 
 - Python standard library only; supported runtime is Python 3.10+ on Windows.

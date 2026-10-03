@@ -2056,6 +2056,22 @@ function Assert-TargetMatchesScan([object]$Target) {{
     }}
 }}
 
+function Get-CleanupProtectedRoot([string]$FullName, [string]$Name, [bool]$IsDirectory) {{
+    $protectedRoot = $null
+    if ($Name -like 'claude*') {{ $protectedRoot = $FullName }}
+    if ($projectMarkers -contains $Name) {{
+        $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
+    }}
+    if (-not $IsDirectory -and $projectMarkerSuffixPattern.IsMatch($Name)) {{
+        $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
+    }}
+    $normalizedPath = $FullName.TrimEnd('\\') + '\\'
+    if ($protectedPathPattern.IsMatch($normalizedPath) -and -not $protectedRoot) {{
+        $protectedRoot = $FullName
+    }}
+    return $protectedRoot
+}}
+
 function Assert-CleanupEntryPathWithinSelection([object]$Target, [object]$Entry) {{
     # Keep only the lexical containment check here. The native removal routine
     # validates type, reparse-point status, identity, size, and last-write time
@@ -2327,18 +2343,7 @@ foreach ($target in $cleanTargets) {{
             $projectContentCheckIndex = 0
             foreach ($entry in $entries) {{
                 $projectContentCheckIndex++
-                $protectedRoot = $null
-                if ($entry.Name -like 'claude*') {{ $protectedRoot = $entry.FullName }}
-                if ($projectMarkers -contains $entry.Name) {{
-                    $protectedRoot = [System.IO.Directory]::GetParent($entry.FullName).FullName
-                }}
-                if (-not $entry.PSIsContainer -and $projectMarkerSuffixPattern.IsMatch($entry.Name)) {{
-                    $protectedRoot = [System.IO.Directory]::GetParent($entry.FullName).FullName
-                }}
-                $normalizedPath = $entry.FullName.TrimEnd('\\') + '\\'
-                if ($protectedPathPattern.IsMatch($normalizedPath) -and -not $protectedRoot) {{
-                    $protectedRoot = $entry.FullName
-                }}
+                $protectedRoot = Get-CleanupProtectedRoot $entry.FullName $entry.Name ([bool]$entry.PSIsContainer)
                 if ($protectedRoot) {{
                     # Keep only the outermost protected root to avoid a large
                     # list when the scanner reports every descendant.
@@ -2460,6 +2465,49 @@ foreach ($target in $cleanTargets) {{
             if (Test-PathInsideProject $target.Path $true $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
+            Write-Host "Rechecking the selected folder for project files and protected data before cleanup; this check does not remove files." -ForegroundColor Gray
+            $freshProjectCheckIndex = 0
+            $freshProjectCheckWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastFreshProjectNoticeSeconds = 0
+            $projectCheckDirectories = [System.Collections.Generic.Stack[string]]::new()
+            $projectCheckDirectories.Push($target.Path)
+            while ($projectCheckDirectories.Count -gt 0) {{
+                $directoryToCheck = $projectCheckDirectories.Pop()
+                foreach ($entryPath in [System.IO.Directory]::EnumerateFileSystemEntries($directoryToCheck)) {{
+                    $freshProjectCheckIndex++
+                    $entryAttributes = [System.IO.File]::GetAttributes($entryPath)
+                    if (($entryAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+                        throw "A reparse point appeared after cleanup review; refusing cleanup: $entryPath"
+                    }}
+                    $entryName = [System.IO.Path]::GetFileName($entryPath)
+                    $entryIsDirectory = ($entryAttributes -band [IO.FileAttributes]::Directory) -ne 0
+                    $freshProtectedRoot = Get-CleanupProtectedRoot $entryPath $entryName $entryIsDirectory
+                    if ($freshProtectedRoot) {{
+                        $ancestor = $freshProtectedRoot
+                        $alreadyProtected = $false
+                        while ($ancestor.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{
+                            if ($protectedRoots.Contains($ancestor.TrimEnd('\\'))) {{ $alreadyProtected = $true; break }}
+                            $parent = [System.IO.Directory]::GetParent($ancestor)
+                            if (-not $parent) {{ break }}
+                            $ancestor = $parent.FullName
+                        }}
+                        if (-not $alreadyProtected) {{
+                            throw "A project marker or protected path appeared after cleanup review; refusing cleanup: $freshProtectedRoot"
+                        }}
+                    }}
+                    if ($entryIsDirectory) {{ $projectCheckDirectories.Push($entryPath) }}
+                    $elapsedFreshProjectSeconds = [int]$freshProjectCheckWatch.Elapsed.TotalSeconds
+                    if ($freshProjectCheckIndex -eq 1 -or ($freshProjectCheckIndex % 100) -eq 0 -or
+                        ($elapsedFreshProjectSeconds - $lastFreshProjectNoticeSeconds) -ge 10) {{
+                        $freshProjectStatus = "$freshProjectCheckIndex items rechecked for project files; this check does not remove files."
+                        Write-Progress -Activity "Rechecking project and protected paths" -Status $freshProjectStatus
+                        Write-Host "  Final project check: $freshProjectStatus" -ForegroundColor Gray
+                        $lastFreshProjectNoticeSeconds = $elapsedFreshProjectSeconds
+                    }}
+                }}
+            }}
+            Write-Progress -Activity "Rechecking project and protected paths" -Completed
+            Write-Host "Final project check complete; $freshProjectCheckIndex items rechecked." -ForegroundColor Gray
             $orderedDeletable = @($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)
             $fileRecheckTotal = @($orderedDeletable | Where-Object {{ -not $_.PSIsContainer }}).Count
             $fileRecheckIndex = 0
@@ -2579,6 +2627,8 @@ foreach ($target in $cleanTargets) {{
                 "The selected folder was replaced after review; refusing cleanup:",
                 "Refusing to clean a directory tree containing a reparse point:",
                 "The selected folder or its named data streams changed after review; refusing cleanup:",
+                "A reparse point appeared after cleanup review; refusing cleanup:",
+                "A project marker or protected path appeared after cleanup review; refusing cleanup:",
                 "Could not verify a selected file's identity and contents:",
                 "A cleanup file changed while its contents were checked; refusing cleanup:",
                 "The target changed after backup or its backup could not be verified; refusing cleanup.",
