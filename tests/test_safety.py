@@ -4208,7 +4208,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "keep.bin").write_bytes(b"keep")
             (outside / "keep.bin").write_bytes(b"outside")
             try:
-                (selected / "linked-outside").symlink_to(outside, target_is_directory=True)
+                (selected / "linked-\u202e-outside").symlink_to(outside, target_is_directory=True)
             except OSError as exc:
                 self.skipTest(f"Could not create a temporary directory symlink: {exc}")
             results = {"categories": {"high": {"name": "High", "items": [{
@@ -4228,8 +4228,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             self.assertEqual((selected / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((outside / "keep.bin").read_bytes(), b"outside")
-            self.assertTrue((selected / "linked-outside").exists())
+            self.assertTrue((selected / "linked-\u202e-outside").exists())
             self.assertIn("containing a reparse point", result.stdout)
+            self.assertIn("linked-?-outside", result.stdout)
+            self.assertNotIn("\u202e", result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_rechecks_nested_paths_after_backup_verification(self):

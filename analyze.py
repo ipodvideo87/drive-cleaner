@@ -2497,7 +2497,7 @@ function Assert-CleanupEntryPathWithinSelection([object]$Target, [object]$Entry)
     )) + [System.IO.Path]::DirectorySeparatorChar
     $entryPath = [System.IO.Path]::GetFullPath($Entry.FullName)
     if (-not $entryPath.StartsWith($targetRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {{
-        throw "A cleanup entry moved outside its selected folder; refusing cleanup: $entryPath"
+        throw "A cleanup entry moved outside its selected folder; refusing cleanup: $(Get-CleanupProgressPath $entryPath)"
     }}
 }}
 
@@ -2798,7 +2798,7 @@ foreach ($target in $cleanTargets) {{
             Write-Progress -Activity "Reviewing selected folder contents" -Completed
             Write-Host "Folder review complete; $($entries.Count) files and folders found." -ForegroundColor Gray
             $reparseEntry = $entries | Where-Object {{ ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }} | Select-Object -First 1
-            if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $($reparseEntry.FullName)" }}
+            if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $(Get-CleanupProgressPath $reparseEntry.FullName)" }}
             # Preserve excluded paths and nested projects even when the user
             # selected a parent folder that contains them.
             $targetRoot = [System.IO.Path]::GetFullPath($target.Path).TrimEnd('\\') + '\\'
@@ -2931,7 +2931,7 @@ foreach ($target in $cleanTargets) {{
                     $entrySnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($entry.FullName, $folderHashProgressAction)
                     $entrySnapshotParts = $entrySnapshot -split '\\|', 2
                     if ($entrySnapshotParts.Count -ne 2) {{
-                        throw "Could not verify a selected folder's identity and named data streams: $($entry.FullName)"
+                        throw "Could not verify a selected folder's identity and named data streams: $(Get-CleanupProgressPath $entry.FullName)"
                     }}
                     Add-Member -InputObject $entry -NotePropertyName CleanupIdentity -NotePropertyValue $entrySnapshotParts[0] -Force
                     Add-Member -InputObject $entry -NotePropertyName CleanupStreamsSha256 -NotePropertyValue $entrySnapshotParts[1] -Force
@@ -2953,14 +2953,14 @@ foreach ($target in $cleanTargets) {{
                     $entrySnapshot = [{native_class_name}]::GetFileIdentityAndHash($entry.FullName, $hashProgressAction)
                     $snapshotParts = $entrySnapshot -split '\\|', 2
                     if ($snapshotParts.Count -ne 2) {{
-                        throw "Could not verify a selected file's identity and contents: $($entry.FullName)"
+                        throw "Could not verify a selected file's identity and contents: $(Get-CleanupProgressPath $entry.FullName)"
                     }}
                     Add-Member -InputObject $entry -NotePropertyName CleanupIdentity -NotePropertyValue $snapshotParts[0] -Force
                     $entry.Refresh()
                     $currentEntryLastWriteTimeUtcFileTime = [long]$entry.LastWriteTimeUtc.ToFileTimeUtc()
                     if ([long]$entry.Length -ne [long]$entry.CleanupLength -or
                         $currentEntryLastWriteTimeUtcFileTime -ne [long]$entry.CleanupLastWriteTimeUtcFileTime) {{
-                        throw "A cleanup file changed while its contents were checked; refusing cleanup: $($entry.FullName)"
+                        throw "A cleanup file changed while its contents were checked; refusing cleanup: $(Get-CleanupProgressPath $entry.FullName)"
                     }}
                     Add-Member -InputObject $entry -NotePropertyName CleanupSha256 -NotePropertyValue $snapshotParts[1] -Force
                     Write-Progress -Activity "Checking selected file contents" -Status "File $fileHashIndex of $fileHashTotal checked; this pass does not remove files" -PercentComplete ([int](100 * $fileHashIndex / $fileHashTotal))
@@ -3046,7 +3046,7 @@ foreach ($target in $cleanTargets) {{
                     $freshProjectCheckIndex++
                     $entryAttributes = [System.IO.File]::GetAttributes($entryPath)
                     if (($entryAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
-                        throw "A reparse point appeared after cleanup review; refusing cleanup: $entryPath"
+                        throw "A reparse point appeared after cleanup review; refusing cleanup: $(Get-CleanupProgressPath $entryPath)"
                     }}
                     $entryName = [System.IO.Path]::GetFileName($entryPath)
                     $entryIsDirectory = ($entryAttributes -band [IO.FileAttributes]::Directory) -ne 0
@@ -3061,7 +3061,7 @@ foreach ($target in $cleanTargets) {{
                             $ancestor = $parent.FullName
                         }}
                         if (-not $alreadyProtected) {{
-                            throw "A project marker or protected path appeared after cleanup review; refusing cleanup: $freshProtectedRoot"
+                            throw "A project marker or protected path appeared after cleanup review; refusing cleanup: $(Get-CleanupProgressPath $freshProtectedRoot)"
                         }}
                     }}
                     if ($entryIsDirectory) {{ $projectCheckDirectories.Push($entryPath) }}
@@ -3085,17 +3085,18 @@ foreach ($target in $cleanTargets) {{
                 foreach ($entry in $orderedDeletable) {{
                     Assert-CleanupEntryPathWithinSelection $target $entry
                     $previewPath = [System.IO.Path]::GetFullPath($entry.FullName)
+                    $previewDisplayPath = Get-CleanupProgressPath $previewPath
                     if (-not $previewPathsSeen.Add($previewPath)) {{ continue }}
                     if ($entry.PSIsContainer) {{
                         $previewFolderCount++
                         $previewFolderKey = $previewPath.TrimEnd($previewDirectorySeparators)
                         $folderDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewFolderKey]
-                        Write-Host "  Would remove | Folder | $previewPath | $folderDataSize of eligible file data below (includes nested folders)"
+                        Write-Host "  Would remove | Folder | $previewDisplayPath | $folderDataSize of eligible file data below (includes nested folders)"
                     }} else {{
                         $previewLength = [long]$entry.CleanupLength
                         $previewFileCount++
                         $previewByteCount += [decimal]$previewLength
-                        Write-Host "  Would remove | File | $previewPath | $previewLength bytes"
+                        Write-Host "  Would remove | File | $previewDisplayPath | $previewLength bytes"
                     }}
                 }}
                 if ($preservePaths.Count -eq 0) {{
@@ -3103,7 +3104,7 @@ foreach ($target in $cleanTargets) {{
                     if ($previewPathsSeen.Add($previewRoot)) {{
                         $previewFolderCount++
                         $rootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
-                        Write-Host "  Would remove | Folder | $previewRoot | $rootDataSize of eligible file data below (includes nested folders)"
+                        Write-Host "  Would remove | Folder | $(Get-CleanupProgressPath $previewRoot) | $rootDataSize of eligible file data below (includes nested folders)"
                     }}
                 }} else {{
                     $keptRootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
@@ -3202,7 +3203,7 @@ foreach ($target in $cleanTargets) {{
                 if ($previewPathsSeen.Add($previewPath)) {{
                     $previewFileCount++
                     $previewByteCount += [decimal]$cleanupLength
-                    Write-Host "  Would remove | File | $previewPath | $cleanupLength bytes"
+                    Write-Host "  Would remove | File | $(Get-CleanupProgressPath $previewPath) | $cleanupLength bytes"
                 }}
                 continue
             }}
@@ -3292,6 +3293,7 @@ foreach ($target in $cleanTargets) {{
             $totalBytesRemoved += $targetBytesRemoved
             $targetRemovalCountsAdded = $true
         }}
+        $failureReason = Get-CleanupProgressPath $failureReason
         if ($PreviewOnly) {{
             Write-Host " [Preview incomplete: $failureReason. Nothing was removed.]" -ForegroundColor Red
         }} elseif ($targetFilesRemoved -gt 0 -or $targetFoldersRemoved -gt 0) {{
