@@ -1940,6 +1940,7 @@ param(
     [switch]$Force,
     [Alias("Backup")][switch]$CreateBackup,
     [Alias("NoBackup")][switch]$SkipBackup,
+    [switch]$PreviewOnly,
     [int[]]$Select = @({default_selection})
 )
 
@@ -2243,14 +2244,16 @@ if ($directoryTargets.Count -gt 0) {{
     }}
 }}
 
+Write-Host "Use -PreviewOnly to list every eligible path after the safety checks without creating a backup or removing anything." -ForegroundColor Gray
+
 Write-Host "`nSelected targets (folder contents are included, except protected and project data and higher-risk candidates you did not explicitly select):" -ForegroundColor Cyan
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.ItemType) | $($target.Path) - $($target.Size)" }}
 $backupEnabled = $false
-if ($CreateBackup) {{
+if (-not $PreviewOnly -and $CreateBackup) {{
     $backupEnabled = $true
-}} elseif ($SkipBackup) {{
+}} elseif (-not $PreviewOnly -and $SkipBackup) {{
     $backupEnabled = $false
-}} elseif (-not $Force) {{
+}} elseif (-not $PreviewOnly -and -not $Force) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
         $backupEnabled = $true
@@ -2261,12 +2264,14 @@ if ($CreateBackup) {{
         exit 0
     }}
 }}
-if ($backupEnabled) {{
+if ($PreviewOnly) {{
+    Write-Host "`nPreview-only mode: no recovery backup will be created and no files or folders will be removed." -ForegroundColor Cyan
+}} elseif ($backupEnabled) {{
     Write-Host "A verified recovery backup will be created before cleanup." -ForegroundColor Gray
 }} else {{
     Write-Host "No backup will be created. If cleanup removes data, Drive Cleanr cannot restore it." -ForegroundColor Yellow
 }}
-if (-not $Force) {{
+if (-not $PreviewOnly -and -not $Force) {{
     if ($backupEnabled) {{
         $confirm = Read-Host "Type CLEAN to back up and remove selected items, including folder contents except protected or project data and higher-risk candidates you did not explicitly select"
         if ($confirm -cne "CLEAN") {{ Write-Host "Cancelled; nothing was changed." -ForegroundColor Yellow; exit 0 }}
@@ -2310,16 +2315,26 @@ if ($backupEnabled) {{
     $recoveryNote = "No backup was created; removed items cannot be restored by Drive Cleanr."
 }}
 
-Write-Host "`nStarting cleanup..." -ForegroundColor Cyan
+if ($PreviewOnly) {{
+    Write-Host "`nStarting read-only preview..." -ForegroundColor Cyan
+}} else {{
+    Write-Host "`nStarting cleanup..." -ForegroundColor Cyan
+}}
 
 $totalFilesRemoved = 0
 $totalFoldersRemoved = 0
 $totalBytesRemoved = [decimal]0
 $cleanupFailed = $false
+$previewFileCount = 0
+$previewFolderCount = 0
+$previewByteCount = [decimal]0
+$previewPathsSeen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $cleanupItemIndex = 0
 foreach ($target in $cleanTargets) {{
     $cleanupItemIndex++
-    $previousItemStatus = if ($cleanupItemIndex -eq 1) {{
+    $previousItemStatus = if ($PreviewOnly) {{
+        "Preview only; nothing will be removed."
+    }} elseif ($cleanupItemIndex -eq 1) {{
         "Nothing has been removed yet."
     }} else {{
         "Files from earlier selected items may already have been removed."
@@ -2560,6 +2575,33 @@ foreach ($target in $cleanTargets) {{
             Write-Host "Final project check complete; $freshProjectCheckIndex items rechecked." -ForegroundColor Gray
             $orderedDeletable = @($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)
             $fileRecheckTotal = @($orderedDeletable | Where-Object {{ -not $_.PSIsContainer }}).Count
+            if ($PreviewOnly) {{
+                Write-Host "Eligible contents that would be removed if cleanup is started:" -ForegroundColor Cyan
+                foreach ($entry in $orderedDeletable) {{
+                    Assert-CleanupEntryPathWithinSelection $target $entry
+                    $previewPath = [System.IO.Path]::GetFullPath($entry.FullName)
+                    if (-not $previewPathsSeen.Add($previewPath)) {{ continue }}
+                    if ($entry.PSIsContainer) {{
+                        $previewFolderCount++
+                        Write-Host "  Would remove | Folder | $previewPath"
+                    }} else {{
+                        $previewLength = [long]$entry.CleanupLength
+                        $previewFileCount++
+                        $previewByteCount += [decimal]$previewLength
+                        Write-Host "  Would remove | File | $previewPath | $previewLength bytes"
+                    }}
+                }}
+                if ($preservePaths.Count -eq 0) {{
+                    $previewRoot = [System.IO.Path]::GetFullPath($target.Path)
+                    if ($previewPathsSeen.Add($previewRoot)) {{
+                        $previewFolderCount++
+                        Write-Host "  Would remove | Folder | $previewRoot (after its eligible contents)"
+                    }}
+                }} else {{
+                    Write-Host "  Keep selected folder | Protected data will remain inside it."
+                }}
+                continue
+            }}
             $fileRecheckIndex = 0
             $fileRemovalWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastFileRemovalNoticeSeconds = 0
@@ -2623,6 +2665,15 @@ foreach ($target in $cleanTargets) {{
             Assert-TargetMatchesScan $target
             if (Test-PathInsideProject $target.Path $false $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
+            }}
+            if ($PreviewOnly) {{
+                $previewPath = [System.IO.Path]::GetFullPath($target.Path)
+                if ($previewPathsSeen.Add($previewPath)) {{
+                    $previewFileCount++
+                    $previewByteCount += [decimal]$cleanupLength
+                    Write-Host "  Would remove | File | $previewPath | $cleanupLength bytes"
+                }}
+                continue
             }}
             Write-Progress -Activity "Checking selected file contents" -Status "Confirming and removing the reviewed file" -PercentComplete 50
             [{native_class_name}]::DeleteFileIfUnchanged(
@@ -2708,7 +2759,9 @@ foreach ($target in $cleanTargets) {{
             $totalBytesRemoved += $targetBytesRemoved
             $targetRemovalCountsAdded = $true
         }}
-        if ($targetFilesRemoved -gt 0 -or $targetFoldersRemoved -gt 0) {{
+        if ($PreviewOnly) {{
+            Write-Host " [Preview incomplete: $failureReason. Nothing was removed.]" -ForegroundColor Red
+        }} elseif ($targetFilesRemoved -gt 0 -or $targetFoldersRemoved -gt 0) {{
             $partialBytes = $targetBytesRemoved.ToString('0')
             Write-Host " [Failed: $failureReason. Removed $targetFilesRemoved of $targetFilesPlanned selected files and $targetFoldersRemoved folders from this item before the error ($partialBytes bytes of file data). $recoveryNote]" -ForegroundColor Red
         }} else {{
@@ -2718,6 +2771,21 @@ foreach ($target in $cleanTargets) {{
 }}
 
 Write-Host "`n========================================" -ForegroundColor Cyan
+if ($PreviewOnly) {{
+    if ($cleanupFailed) {{
+        Write-Host "Preview incomplete. Some selected items could not be checked; nothing was removed." -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        exit 1
+    }}
+    $previewBytesDisplay = $previewByteCount.ToString('0')
+    $previewFilesLabel = if ($previewFileCount -eq 1) {{ "file" }} else {{ "files" }}
+    $previewFoldersLabel = if ($previewFolderCount -eq 1) {{ "folder" }} else {{ "folders" }}
+    Write-Host "Preview complete: $previewFileCount $previewFilesLabel and $previewFolderCount $previewFoldersLabel would be removed ($previewBytesDisplay bytes of file data)." -ForegroundColor Green
+    Write-Host "This is the total size of eligible files, not a guarantee of space reclaimed; hard links and filesystem behavior can change the amount." -ForegroundColor Gray
+    Write-Host "No recovery backup was created and nothing was removed. The cleanup plan will repeat its safety checks if you run it later." -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Cyan
+    exit 0
+}}
 $totalBytesDisplay = $totalBytesRemoved.ToString('0')
 $totalFilesLabel = if ($totalFilesRemoved -eq 1) {{ "file" }} else {{ "files" }}
 $totalFoldersLabel = if ($totalFoldersRemoved -eq 1) {{ "folder" }} else {{ "folders" }}

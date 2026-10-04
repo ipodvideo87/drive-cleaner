@@ -1581,7 +1581,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
         self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
         self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
-        self.assertIn("} elseif (-not $Force) {", script)
+        self.assertIn("if (-not $PreviewOnly -and -not $Force) {", script)
         self.assertNotIn("Noninteractive cleanup keeps the verified backup", script)
         self.assertIn("Create a verified backup of these selected items first? [y/N]", script)
         self.assertIn("A verified recovery backup will be created before cleanup.", script)
@@ -2008,6 +2008,118 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertNotIn("Checking the contents of", result.stdout)
             self.assertTrue(target.is_dir(), result.stdout + result.stderr)
             self.assertEqual(entry_count, sum(1 for _ in target.iterdir()))
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_lists_exact_file_and_never_creates_backup_or_deletes(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "npm-cache" / "payload.bin"
+            target.parent.mkdir()
+            target.write_bytes(b"preview only")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "npm cache",
+                "size": target.stat().st_size,
+                "size_formatted": "12 B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "preview.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target)]
+                )
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(target.is_file())
+            self.assertIn(f"Would remove | File | {target} | 12 bytes", result.stdout)
+            self.assertIn("Preview complete: 1 file and 0 folders would be removed", result.stdout)
+            self.assertIn("not a guarantee of space reclaimed", result.stdout)
+            self.assertIn("No recovery backup was created and nothing was removed", result.stdout)
+            self.assertNotIn("Type CLEAN", result.stdout)
+            self.assertNotIn("Type DELETE WITHOUT BACKUP", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_lists_eligible_folder_contents_and_keeps_protected_data(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "npm-cache"
+            target.mkdir()
+            eligible_file = target / "payload.bin"
+            eligible_file.write_bytes(b"eligible cache")
+            protected_file = target / "Downloads" / "keep.bin"
+            protected_file.parent.mkdir()
+            protected_file.write_bytes(b"preserve this data")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "npm cache",
+                "size": eligible_file.stat().st_size + protected_file.stat().st_size,
+                "size_formatted": "32 B",
+                "kind": "Folder",
+            }]}}}
+            script_path = Path(plan_temp) / "preview-folder.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target) + "\\"]
+                )
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(eligible_file.exists())
+            self.assertEqual(protected_file.read_bytes(), b"preserve this data")
+            self.assertIn(f"Would remove | File | {eligible_file}", result.stdout)
+            self.assertNotIn(str(protected_file), result.stdout)
+            self.assertIn("Keep selected folder | Protected data will remain inside it.", result.stdout)
+            self.assertIn("Preview complete: 1 file and 0 folders would be removed", result.stdout)
+            self.assertIn("nothing was removed", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_reports_byte_progress_while_hashing_a_large_file(self):

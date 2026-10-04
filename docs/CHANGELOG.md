@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Add `-PreviewOnly` to generated cleanup plans. It runs current safety checks and lists each eligible path and file size without creating a backup or removing data.
 - Show progress during recovery restores: file copies and verification show byte and percentage progress, ZIP restores report archive-check and extraction progress, merge restores show existing-file checks, and directory restores show a periodic Robocopy status. Restore totals count completed items and keep conflicts and failures separate.
 - Handle Ctrl+C and end-of-input throughout the guided scan review so the main menu returns cleanly instead of showing a traceback.
 - Reject folders in the saved-scan picker and recover with a clear prompt when a scan file is missing or unreadable, in both the guided review and direct analyzer command.
