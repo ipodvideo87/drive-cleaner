@@ -6868,13 +6868,14 @@ class BackupSafetyTests(unittest.TestCase):
         make_directory.assert_not_called()
 
     def test_backup_drive_skips_the_windows_volume_sources_and_nonlocal_volumes(self):
-        drive_types = {"C": 3, "D": 3, "E": 3, "F": 4, "G": 2}
+        drive_types = {"C": 3, "D": 3, "E": 3, "F": 4, "G": 2, "H": 5}
         free_space = {
             "C": 8 * 1024**3,
             "D": 100 * 1024**3,
             "E": 20 * 1024**3,
             "F": 30 * 1024**3,
             "G": 6 * 1024**3,
+            "H": 200 * 1024**3,
         }
         present_drives = set(drive_types)
         with mock.patch.object(backup, "_windows_system_drive_letter", return_value="D"), \
@@ -6896,6 +6897,52 @@ class BackupSafetyTests(unittest.TestCase):
         checked_for_space = {call.args[0][0] for call in free_space_check.call_args_list}
         self.assertEqual(checked_for_space, {"C", "G"})
         self.assertIn(mock.call("F:\\"), drive_type_check.call_args_list)
+        self.assertIn(mock.call("H:\\"), drive_type_check.call_args_list)
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_uses_windows_directory_not_stale_environment(self):
+        import ctypes
+
+        windows_directory = r"D:\Windows"
+
+        def populate_windows_directory(buffer, _buffer_length):
+            buffer.value = windows_directory
+            return len(windows_directory)
+
+        with mock.patch.object(
+            ctypes.windll.kernel32,
+            "GetWindowsDirectoryW",
+            side_effect=populate_windows_directory,
+        ) as get_windows_directory, mock.patch.dict(
+            os.environ, {"SystemRoot": r"C:\Windows"}
+        ):
+            self.assertEqual(backup._windows_system_drive_letter(), "D")
+
+        get_windows_directory.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_uses_systemroot_if_api_fails(self):
+        import ctypes
+
+        with mock.patch.object(
+            ctypes.windll.kernel32, "GetWindowsDirectoryW", return_value=0
+        ), mock.patch.dict(
+            os.environ,
+            {"SystemRoot": r"F:\Windows", "WINDIR": "", "SystemDrive": "C:"},
+        ):
+            self.assertEqual(backup._windows_system_drive_letter(), "F")
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_detection_fails_closed_without_api_or_environment_path(self):
+        import ctypes
+
+        with mock.patch.object(
+            ctypes.windll.kernel32, "GetWindowsDirectoryW", return_value=0
+        ), mock.patch.dict(
+            os.environ,
+            {"SystemRoot": "", "WINDIR": "", "SystemDrive": ""},
+        ):
+            self.assertIsNone(backup._windows_system_drive_letter())
 
     def test_backup_drive_fails_closed_when_windows_volume_cannot_be_detected(self):
         with mock.patch.object(backup, "_windows_system_drive_letter", return_value=None), \
