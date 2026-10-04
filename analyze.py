@@ -2990,7 +2990,7 @@ def offer_to_run_cleanup_script(script_path):
 
 def prompt_existing_csv(initial_csv=None):
     """Choose a scan to review, or enter its file path."""
-    if initial_csv and os.path.exists(initial_csv):
+    if initial_csv and os.path.isfile(initial_csv):
         return initial_csv
 
     latest = get_latest_scan()
@@ -3016,9 +3016,9 @@ def prompt_existing_csv(initial_csv=None):
             input("Press Enter to continue...")
         elif choice == "2":
             manual = input("Enter the path to a saved scan file: ").strip().strip('"')
-            if os.path.exists(manual):
+            if os.path.isfile(manual):
                 return manual
-            print("Scan file not found. Please try again.")
+            print("Scan file not found or the path is not a file. Please choose a CSV file.")
             input("Press Enter to continue...")
         elif choice in {"0", "q", "Q"}:
             return None
@@ -3036,8 +3036,8 @@ def run_tui(initial_csv=None, min_size_mb=50):
     current_min_size = min_size_mb
 
     while True:
-        if not os.path.exists(csv_file):
-            print(f"Error: file not found - {csv_file}")
+        if not os.path.isfile(csv_file):
+            print(f"Error: scan file not found or the path is not a file - {csv_file}")
             input("Press Enter to choose a different scan...")
             csv_file = prompt_existing_csv()
             if not csv_file:
@@ -3051,7 +3051,7 @@ def run_tui(initial_csv=None, min_size_mb=50):
 
         try:
             results = analyze_csv(csv_file, current_min_size, progress_callback=show_analysis_progress)
-        except (ValueError, csv.Error) as exc:
+        except (ValueError, csv.Error, OSError) as exc:
             print(f"\nCould not review this scan: {describe_error(exc)}")
             input("Press Enter to choose another scan...")
             csv_file = prompt_existing_csv()
@@ -3162,13 +3162,13 @@ def main():
     if not args.csv_file:
         parser.error('a scan file is required unless --tui is used')
 
-    if not os.path.exists(args.csv_file):
-        print(f"Error: file not found - {args.csv_file}")
+    if not os.path.isfile(args.csv_file):
+        print(f"Error: scan file not found or the path is not a file - {args.csv_file}")
         sys.exit(1)
 
     try:
         results = analyze_csv(args.csv_file, args.min_size)
-    except (ValueError, csv.Error) as exc:
+    except (ValueError, csv.Error, OSError) as exc:
         parser.error(f"could not review scan file: {describe_error(exc)}")
 
     if args.json:

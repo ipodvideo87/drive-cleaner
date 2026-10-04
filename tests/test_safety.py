@@ -10,7 +10,7 @@ import tempfile
 import time
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -762,6 +762,48 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  mock.patch("builtins.print"):
                 analyze.run_tui()
             self.assertEqual(picker.call_count, 2)
+
+    def test_review_menu_recovers_if_scan_becomes_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(analyze, "prompt_existing_csv", side_effect=[str(csv_path), None]) as picker, \
+                 mock.patch.object(analyze, "analyze_csv", side_effect=PermissionError(13, "denied")), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", return_value=""), \
+                 redirect_stdout(io.StringIO()) as output:
+                analyze.run_tui()
+
+        self.assertEqual(picker.call_count, 2)
+        self.assertIn("Could not review this scan", output.getvalue())
+        self.assertIn("Access was denied", output.getvalue())
+
+    def test_scan_picker_rejects_missing_paths_and_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for invalid_path in (str(Path(temp_dir) / "missing.csv"), temp_dir):
+                with self.subTest(path_kind="directory" if Path(invalid_path).is_dir() else "missing"):
+                    output = io.StringIO()
+                    with mock.patch.object(analyze, "get_latest_scan", return_value=None), \
+                         mock.patch.object(analyze, "clear_screen"), \
+                         mock.patch("builtins.input", side_effect=["2", invalid_path, "", "0"]), \
+                         redirect_stdout(output):
+                        selected = analyze.prompt_existing_csv()
+
+                    self.assertIsNone(selected)
+                    self.assertIn("not a file", output.getvalue())
+
+    def test_analyzer_cli_reports_unreadable_scan_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(analyze.sys, "argv", ["analyze.py", str(csv_path)]), \
+                 mock.patch.object(analyze, "analyze_csv", side_effect=PermissionError(13, "denied")), \
+                 redirect_stderr(io.StringIO()) as error_output:
+                with self.assertRaises(SystemExit) as exc:
+                    analyze.main()
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("could not review scan file: Access was denied", error_output.getvalue())
 
     def test_analyzer_cli_handles_picker_interrupt_without_traceback(self):
         for interruption in (KeyboardInterrupt, EOFError):

@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Reject folders in the saved-scan picker and recover with a clear prompt when a scan file is missing or unreadable, in both the guided review and direct analyzer command.
 - Show byte counts and per-file percentages while hashing large selected files, so long content checks remain visibly active.
 - Rescan the selected folder for newly appeared project markers, protected paths, and reparse points after backup verification but before the first removal; stop cleanup if the review scope changed.
 - Copy named NTFS streams explicitly during individual-file backup and staged restore so Python 3.10 does not produce incomplete recovery data.
