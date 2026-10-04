@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Show sanitized current paths alongside cleanup byte and percentage progress, and preserve folder descendants that contain hidden formatting characters.
 - Recheck ZIP restore destinations before and after creating directory entries, and recheck directory-copy source and destination paths immediately before Robocopy after conflict inventory.
 - Reject scanner exports that pass through a reparse point or junction before validation or promotion into the saved-scan list.
 - Let guided scan users use the detected executable by default or choose another installed/portable scanner executable for one scan.

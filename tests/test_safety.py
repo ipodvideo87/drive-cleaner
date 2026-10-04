@@ -2366,6 +2366,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("No backup will be created", script)
         self.assertIn("only the permissions needed for the selected paths", script)
         self.assertIn("$cleanupItemIndex = 0", script)
+        self.assertIn("function Get-CleanupProgressPath", script)
+        self.assertIn("$hiddenFormattingPattern = [regex]::new('[\\p{Cc}\\p{Cf}]'", script)
+        self.assertIn("$safePath = $hiddenFormattingPattern.Replace($Path, '?')", script)
+        self.assertIn("$hiddenFormattingPattern.IsMatch($pathPart)", script)
+        self.assertIn("Skipped one item with hidden formatting in its path", script)
+        self.assertIn("Current item: $progressPath", script)
         self.assertIn('Write-Host "`nChecking selected item $cleanupItemIndex of $($cleanTargets.Count): $($target.ItemType) | $($target.Name) | $($target.Path). $previousItemStatus"', script)
         self.assertIn('"Files from earlier selected items may already have been removed."', script)
         self.assertIn("Checking this item and its parent folders for project files. This can take a while.", script)
@@ -2496,7 +2502,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
             self.assertGreaterEqual(
-                result.stdout.count("Folder 1 of 1: 2.0 MB of 2.0 MB checked (100%)."), 2,
+                result.stdout.count(f"Folder 1 of 1: 2.0 MB of 2.0 MB checked (100%). Current item: {target}"), 2,
                 "Large folder data streams should report progress during checks.",
             )
 
@@ -3024,13 +3030,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
 
-        self.assertIn("File 1 of 1: 64.0 MB of 128.0 MB checked (50%).", result.stdout)
-        self.assertIn("File 1 of 1: 128.0 MB of 128.0 MB checked (100%).", result.stdout)
+        expected_progress_path = f"Current item: {target}"
+        self.assertIn(f"File 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}", result.stdout)
+        self.assertIn(f"File 1 of 1: 128.0 MB of 128.0 MB checked (100%). {expected_progress_path}", result.stdout)
         self.assertGreaterEqual(
-            result.stdout.count("File 1 of 1: 64.0 MB of 128.0 MB checked (50%)."), 2,
+            result.stdout.count(f"File 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}"), 2,
             "The locked check immediately before deletion must also report byte progress.",
         )
-        self.assertIn("File 1 of 1: 2.0 MB of 2.0 MB checked (100%).", result.stdout)
+        self.assertIn(f"File 1 of 1: 2.0 MB of 2.0 MB checked (100%). {expected_progress_path}", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_cleanup_modes_still_reject_stale_and_project_targets(self):
@@ -3321,12 +3328,80 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertIn("Checking selected file 1 of 101; this check does not remove files.", result.stdout)
+            self.assertRegex(
+                result.stdout,
+                r"Checking selected file 1 of 101; current file: .+item-\d{4}\.bin\. This check does not remove files\.",
+            )
             self.assertIn("Checked 100 of 101 selected files; this check does not remove files.", result.stdout)
             self.assertIn("Checked 101 of 101 selected files; this check does not remove files.", result.stdout)
             self.assertIn("Initial checks passed. Now checking and removing selected files one at a time; earlier files may already be removed if a later check fails.", result.stdout)
             self.assertIn("Removed 100 of 101 selected files from this item.", result.stdout)
             self.assertIn("Removed 101 of 101 selected files from this item.", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_folder_cleanup_preserves_hidden_formatting_paths_and_sanitizes_preview(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            hidden_format_file = target / "cache-\u202e-payload.bin"
+            hidden_format_file.write_bytes(b"temporary test data")
+            hidden_format_folder = target / "profile-\u2066cache"
+            hidden_format_folder.mkdir()
+            hidden_format_nested_file = hidden_format_folder / "keep.bin"
+            hidden_format_nested_file.write_bytes(b"nested data stays")
+            visible_file = target / "ordinary-cache.bin"
+            visible_file.write_bytes(b"ordinary test data")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": hidden_format_file.stat().st_size + hidden_format_nested_file.stat().st_size + visible_file.stat().st_size,
+                "size_formatted": f"{hidden_format_file.stat().st_size + hidden_format_nested_file.stat().st_size + visible_file.stat().st_size} B",
+                "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "[file] cache-?-payload.bin",
+                result.stdout,
+            )
+            self.assertIn("[folder] profile-?cache", result.stdout)
+            self.assertIn("Skipped 3 items with hidden formatting in their paths; those items will be kept.", result.stdout)
+            self.assertIn(f"Checking selected file 1 of 1; current file: {visible_file}", result.stdout)
+            self.assertNotIn("\u202e", result.stdout)
+            self.assertNotIn("\u2066", result.stdout)
+            self.assertTrue(target.is_dir(), result.stdout + result.stderr)
+            self.assertTrue(hidden_format_file.exists(), result.stdout + result.stderr)
+            self.assertTrue(hidden_format_nested_file.exists(), result.stdout + result.stderr)
+            self.assertFalse(visible_file.exists(), result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_partial_folder_failure_reports_only_files_successfully_removed(self):
