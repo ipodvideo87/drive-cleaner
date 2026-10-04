@@ -1183,7 +1183,7 @@ def _directory_has_project_marker(directory, marker_out=None):
 
 def _is_local_drive_path(path, drive=None, drive_tail=None):
     """Accept only normalized, non-root local Windows paths from scan exports."""
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not path or not path.isprintable():
         return False
     normalized = path.replace("/", "\\")
     if drive is None or drive_tail is None:
@@ -1366,6 +1366,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         "project_roots": [],
         "temp_root_candidate_count": 0,
         "unclassified_candidate_count": 0,
+        "unsafe_display_path_count": 0,
         "type_mismatch_count": 0,
         "reparse_candidate_count": 0,
         "categories": {
@@ -1537,6 +1538,11 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 # to finish for byte progress, but avoids filesystem checks for
                 # rows outside the folder the user chose to inspect.
                 if expand_paths and not any(_is_under(path, parent) for parent in expand_paths):
+                    continue
+                if not path.isprintable():
+                    # Bidirectional format characters and terminal controls can
+                    # make an exact cleanup target appear to name something else.
+                    results["unsafe_display_path_count"] += 1
                     continue
                 logical_size = int(cell(row, size_column) or 0)
                 normalized_path = path.replace("/", "\\")
@@ -1796,6 +1802,10 @@ def print_report(results, show_all_items=False, item_limit=10):
     print("Lower-risk items are usually recreatable, but review every path before cleanup.")
     if results.get("stale_candidate_count", 0):
         print(f"Skipped {results['stale_candidate_count']} listed files or folders that no longer exist.")
+    if results.get("unsafe_display_path_count", 0):
+        print(
+            f"Skipped {results['unsafe_display_path_count']} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
+        )
     for line in _project_protection_lines(results):
         print(line)
     if results.get("temp_root_candidate_count", 0):
@@ -2304,6 +2314,8 @@ if (-not $PreviewOnly -and $CreateBackup) {{
     $backupEnabled = $true
 }} elseif (-not $PreviewOnly -and $SkipBackup) {{
     $backupEnabled = $false
+}} elseif (-not $PreviewOnly -and $Force) {{
+    $backupEnabled = $true
 }} elseif (-not $PreviewOnly -and -not $Force) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
@@ -2917,6 +2929,11 @@ def write_item_list_report(results, output_path):
     if results.get("reparse_candidate_count", 0):
         lines.append(f"Skipped {results['reparse_candidate_count']} paths that pass through a link or could not be checked.")
         lines.append("")
+    if results.get("unsafe_display_path_count", 0):
+        lines.append(
+            f"Skipped {results['unsafe_display_path_count']} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
+        )
+        lines.append("")
     if results.get("temp_root_candidate_count", 0):
         lines.append(f"Known temporary folders skipped: {results['temp_root_candidate_count']}; files and folders inside are shown separately when they match the cleanup rules.")
         lines.append("")
@@ -3022,6 +3039,11 @@ def _folder_browse_skip_lines(results):
     reparse_count = results.get("reparse_candidate_count", 0)
     if reparse_count:
         lines.append(f"Skipped {reparse_count} paths that cross a link or could not be checked.")
+    unsafe_display_path_count = results.get("unsafe_display_path_count", 0)
+    if unsafe_display_path_count:
+        lines.append(
+            f"Skipped {unsafe_display_path_count} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
+        )
     temp_root_count = results.get("temp_root_candidate_count", 0)
     if temp_root_count:
         lines.append(

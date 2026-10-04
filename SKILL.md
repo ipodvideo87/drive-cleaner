@@ -11,7 +11,7 @@ Use WizTree or WinDirStat scans and a conservative review to help the user choos
 
 1. If the purpose of a file is unclear, leave it alone. If the user says they do not recognize a file or app, mark it as a red line and ask the user.
 2. **The user must approve the exact cleanup plan before execution.** The generated script asks for final confirmation by default. Use `-Force` only when the user has explicitly authorized noninteractive execution after reviewing the exact plan and targets. When the guided menu is already elevated, it may offer to run the saved plan in that same session; the script still asks for confirmation unless the user separately authorized `-Force`.
-3. Ask whether the user wants a recovery backup. If they enable it, create and verify the complete backup before cleanup; if it fails, stop. If they decline, explain that Drive Cleanr cannot restore removed items. Interactive cleanup requires the generated plan's `DELETE WITHOUT BACKUP` confirmation. Noninteractive cleanup requires explicit user authorization after plan review; `-Force` creates no backup unless `-Backup` is supplied.
+3. Ask whether the user wants a recovery backup. If they enable it, create and verify the complete backup before cleanup; if it fails, stop. If they decline, explain that Drive Cleanr cannot restore removed items. Interactive cleanup requires the generated plan's `DELETE WITHOUT BACKUP` confirmation. Noninteractive cleanup requires explicit user authorization after plan review; `-Force` creates and verifies a backup by default, while `-NoBackup` explicitly skips it.
 4. During analysis and planning, always cross-check `references/knowledge.md` for the safety red lines, tiered patterns, and execution rules.
 
 ## Workflow
@@ -81,7 +81,7 @@ Create and verify a backup only when the user chooses one.
 - Before execution, check for running processes. The generated script warns about browsers, editors, build tools, and package managers that may be using candidate files.
 - The generated script preserves nested protected paths and project roots, rejects reparse points and stale file/folder type changes, and supports single-file targets.
 - Do not use `-Force` unless the exact generated plan and selected targets have already been reviewed.
-- For noninteractive execution, use `-Force` only after the user has reviewed and explicitly authorized the exact plan. No backup is created by default; add `-Backup` to opt in to a verified backup. `-Force` skips the interactive typed confirmation, so confirm the exact plan and the no-backup choice before running it.
+- For noninteractive execution, use `-Force` only after the user has reviewed and explicitly authorized the exact plan. A verified backup is created by default; add `-NoBackup` to skip it. `-Force` skips the interactive typed confirmation, so confirm the exact plan and the no-backup choice before running it.
 
 ### Stage 6: Verify and confirm
 

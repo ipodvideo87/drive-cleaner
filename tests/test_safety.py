@@ -1458,10 +1458,40 @@ class AnalyzeSafetyTests(unittest.TestCase):
             r"C:\Temp\cache:alternate-stream", r"C:\Temp\CON.txt",
             "C:\\Temp\\COM¹.txt", "C:\\Temp\\LPT³.log",
             r"C:\Temp\bad*name", r"C:\Temp\trailing.\cache",
-            "C:\\Temp\\bad\x00name",
+            "C:\\Temp\\bad\x00name", "C:\\Temp\\hidden\u202e.txt",
+            "C:\\Temp\\control\x1b.txt",
         ):
             with self.subTest(path=path):
                 self.assertFalse(analyze._is_local_drive_path(path))
+
+    def test_scan_paths_with_hidden_or_terminal_controls_are_skipped_and_reported(self):
+        hidden_path = "C:\\Users\\A\\AppData\\Local\\Temp\\name\u202e.txt"
+        control_path = "C:\\Users\\A\\AppData\\Local\\Temp\\name\x1b.txt"
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "104857600"}
+            for path in (hidden_path, control_path)
+        ])
+
+        self.assertEqual(results["unsafe_display_path_count"], 2)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        with io.StringIO() as report_output:
+            with redirect_stdout(report_output):
+                analyze.print_report(results)
+            console_report = report_output.getvalue()
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", console_report)
+        self.assertNotIn("\u202e", console_report)
+        self.assertNotIn("\x1b", console_report)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_report = Path(temp_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_report))
+            exported_report = candidate_report.read_text(encoding="utf-8")
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", exported_report)
+        self.assertNotIn("\u202e", exported_report)
+        self.assertNotIn("\x1b", exported_report)
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", "\n".join(
+            analyze._folder_browse_skip_lines(results)
+        ))
 
     def test_recovery_data_update_staging_logs_and_service_workers_are_protected(self):
         rows = [
@@ -1900,8 +1930,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
         self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
         self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
+        self.assertIn("elseif (-not $PreviewOnly -and $Force) {", script)
         self.assertIn("if (-not $PreviewOnly -and -not $Force) {", script)
-        self.assertNotIn("Noninteractive cleanup keeps the verified backup", script)
         self.assertIn("Create a verified backup of these selected items first? [y/N]", script)
         self.assertIn("A verified recovery backup will be created before cleanup.", script)
         self.assertIn("Type CLEAN to back up and remove", script)
@@ -2303,7 +2333,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             try:
                 result = subprocess.run(
                     [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                     "-Select", "1", "-Force"],
+                     "-Select", "1", "-NoBackup", "-Force"],
                     capture_output=True, text=True, timeout=120,
                 )
             except subprocess.TimeoutExpired as exc:
@@ -2525,7 +2555,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-Force"],
+                 "-Select", "1", "-NoBackup", "-Force"],
                 capture_output=True, text=True, timeout=180,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -2572,7 +2602,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
                     result = subprocess.run(
                         [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                         "-Select", "1", "-Force"],
+                         "-Select", "1", "-NoBackup", "-Force"],
                         capture_output=True, text=True, timeout=90,
                     )
 
@@ -2694,7 +2724,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("Cancelled; nothing was changed.", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_noninteractive_cleanup_does_not_create_backup_without_opt_in(self):
+    def test_noninteractive_cleanup_creates_verified_backup_by_default(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -2710,6 +2740,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size_formatted": f"{target.stat().st_size} B", "kind": "File",
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
             with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
                 analyze.generate_clean_script(results, str(script_path))
             result = subprocess.run(
@@ -2720,9 +2751,42 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_noninteractive_cleanup_no_backup_switch_skips_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with (
+            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
+            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"temporary fixture selected without backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
             self.assertIn("No backup will be created", result.stdout)
             self.assertIn("No recovery backup was created", result.stdout)
             self.assertNotIn("Creating backup before cleanup", result.stdout)
+            self.assertFalse(backup_calls.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_file_checks_report_visible_progress_during_large_folder_cleanup(self):

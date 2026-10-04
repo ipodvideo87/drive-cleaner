@@ -3,6 +3,8 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Create and verify a recovery backup by default when a reviewed generated plan runs with `-Force`; allow users to skip it explicitly with `-NoBackup`. Interactive backup prompts still default to no backup.
+- Skip and count scan paths with hidden formatting or terminal-control characters so cleanup targets cannot be visually spoofed in the terminal.
 - Let guided users enter the full path to an installed or portable scanner executable when automatic discovery fails, and validate it before passing it to the scan process.
 - Use the project directory consistently in `SKILL.md` script examples and guard its quoted YAML description against regressions.
 - Reject malformed backup manifest field types and unsafe verification source paths cleanly before source filesystem checks.
@@ -44,7 +46,6 @@
 - Ignore the full local `data/` tree and default `*.clean.ps1` plans so scan exports and generated cleanup plans stay out of commits by default.
 - After guided plan creation, detect an elevated administrator session and offer to run the saved plan there; declining leaves it saved, and the script's own cleanup confirmation remains required.
 - Show detected project roots and the marker evidence that caused cleanup candidates beneath them to be withheld from console and exported review reports.
-- Keep recovery backups optional in every cleanup mode: interactive users can decline with Enter, while reviewed noninteractive `-Force` cleanup creates a backup only with explicit `-Backup`.
 - Show progress while sizing, copying, compressing, hashing, and verifying large backups, including periodic heartbeats during Robocopy; keep `--json` output parseable by sending progress to stderr.
 - Show CSV byte-read percentage while analyzing a scan export, with 100% reported after parsing finishes.
 - Use monotonic time for scan-export stabilization deadlines so system-clock corrections do not shorten or extend the wait unexpectedly.
