@@ -7396,6 +7396,61 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(protected.read_bytes(), b"existing user data")
             self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
 
+    def test_directory_restore_rechecks_destination_after_conflict_inventory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "backup"
+            saved = backup_root / "saved-directory"
+            saved.mkdir(parents=True)
+            (saved / "payload.bin").write_bytes(b"saved data")
+            destination = root / "restored-directory"
+            destination.mkdir()
+            protected = destination / "keep.bin"
+            protected.write_bytes(b"existing user data")
+            manifest = {
+                "id": "backup_20260927_123456_123456",
+                "status": "completed",
+                "timestamp": "2026-09-27T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(saved),
+                    "format": "copy",
+                    "size": backup.get_dir_size(str(saved)),
+                }],
+            }
+            destination_key = os.path.normcase(os.path.abspath(destination))
+            inventory_finished = False
+
+            def destination_changes_during_inventory(path):
+                nonlocal inventory_finished
+                if os.path.normcase(os.path.abspath(path)) == destination_key:
+                    return inventory_finished
+                return False
+
+            finish_progress = backup._BackupProgress.finish
+
+            def finish_inventory_then_mark(progress):
+                nonlocal inventory_finished
+                finish_progress(progress)
+                if progress.phase == "Checking files to preserve":
+                    inventory_finished = True
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=destination_changes_during_inventory),
+                mock.patch.object(backup._BackupProgress, "finish", new=finish_inventory_then_mark),
+                mock.patch.object(backup, "_run_robocopy_with_progress") as robocopy,
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            self.assertTrue(inventory_finished)
+            robocopy.assert_not_called()
+            self.assertEqual(protected.read_bytes(), b"existing user data")
+            self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
+
     def test_restore_rejects_same_size_corrupted_file_backup_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
@@ -7528,6 +7583,76 @@ class BackupSafetyTests(unittest.TestCase):
                     backup._extract_zip_backup(str(archive_path), str(destination))
             self.assertFalse((destination / "first.txt").exists())
             self.assertFalse((linked_dir / "escape.txt").exists())
+
+    def test_zip_restore_rechecks_directory_after_archive_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "restore"
+            target = destination / "nested"
+            archive_path = root / "directory-race.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("nested/", b"")
+                archive.writestr("nested/payload.txt", "must not be restored")
+
+            target_key = os.path.normcase(os.path.abspath(target))
+            state = {"verified": False}
+            verify_contents = backup._verify_zip_contents
+
+            def verify_then_mark(archive, progress=None):
+                total = verify_contents(archive, progress=progress)
+                state["verified"] = True
+                return total
+
+            def target_becomes_linked(path):
+                return (
+                    state["verified"] and
+                    os.path.normcase(os.path.abspath(path)) == target_key
+                )
+
+            with (
+                mock.patch.object(backup, "_verify_zip_contents", side_effect=verify_then_mark),
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=target_becomes_linked),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "destination changed to a reparse point"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+
+            self.assertFalse(target.exists())
+            self.assertFalse((target / "payload.txt").exists())
+
+    def test_zip_restore_rechecks_directory_immediately_after_creation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "restore"
+            target = destination / "nested"
+            archive_path = root / "directory-create-race.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("nested/", b"")
+                archive.writestr("nested/payload.txt", "must not be restored")
+
+            target_key = os.path.normcase(os.path.abspath(target))
+            state = {"created": False}
+            make_directories = os.makedirs
+
+            def create_then_mark(path, *args, **kwargs):
+                make_directories(path, *args, **kwargs)
+                if os.path.normcase(os.path.abspath(path)) == target_key:
+                    state["created"] = True
+
+            def target_becomes_linked(path):
+                return (
+                    state["created"] and
+                    os.path.normcase(os.path.abspath(path)) == target_key
+                )
+
+            with (
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=target_becomes_linked),
+                mock.patch.object(backup.os, "makedirs", side_effect=create_then_mark),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "destination changed to a reparse point"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+
+            self.assertTrue(target.is_dir())
+            self.assertFalse((target / "payload.txt").exists())
 
     def test_zip_restore_preserves_existing_files_unless_overwrite_is_explicit(self):
         with tempfile.TemporaryDirectory() as temp_dir:

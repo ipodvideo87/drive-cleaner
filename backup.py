@@ -808,9 +808,15 @@ def _extract_zip_backup(
             raise RuntimeError(f"Refusing a damaged backup archive member: {exc}") from exc
 
         for info, target, timestamp in planned_entries:
+            if (_path_has_reparse_component(destination) or
+                    _path_has_reparse_component(target)):
+                raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
             if info.is_dir():
                 existed = os.path.lexists(target)
                 os.makedirs(target, exist_ok=True)
+                if (_path_has_reparse_component(destination) or
+                        _path_has_reparse_component(target)):
+                    raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
                 if existed and not overwrite:
                     continue
             else:
@@ -839,8 +845,11 @@ def _extract_zip_backup(
     if os.name == "nt":
         import ctypes
         for target, attributes in archived_attributes:
-            if attributes and not ctypes.windll.kernel32.SetFileAttributesW(target, attributes):
-                raise OSError(f"Could not restore Windows file attributes: {target}")
+            if attributes:
+                if _path_has_reparse_component(target):
+                    raise RuntimeError("Restore destination changed to a reparse point or symbolic link")
+                if not ctypes.windll.kernel32.SetFileAttributesW(target, attributes):
+                    raise OSError(f"Could not restore Windows file attributes: {target}")
     return conflicts
 
 
@@ -1685,6 +1694,9 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                                 file_size = 0
                             inventory_progress.item(saved_file, file_size)
                     inventory_progress.finish()
+                if (_path_has_reparse_component(original_path) or
+                        _path_has_reparse_component(backup_path)):
+                    raise RuntimeError("Restore source or destination changed to a reparse point")
                 return_code = _run_robocopy_with_progress(
                     command, timeout=300, progress=restore_progress
                 )
