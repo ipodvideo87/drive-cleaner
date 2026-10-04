@@ -4902,6 +4902,29 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=True)
 
+    def test_backup_menu_rejects_restore_path_inside_backup_storage_before_approval(self):
+        backup_id = "backup_20261004_123456_000004"
+        backup_root = r"D:\CleanBackups"
+        manifests = [{
+            "id": backup_id,
+            "status": "completed",
+            "items": [{"original_path": backup_root + r"\restore-target.bin"}],
+        }]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["3", backup_id, "0"]) as user_input, \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "_existing_backup_roots", return_value=[backup_root]), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup") as restore, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        restore.assert_not_called()
+        prompts = " ".join(call.args[0] for call in user_input.call_args_list if call.args)
+        self.assertNotIn("Type OVERWRITE", prompts)
+        self.assertIn("invalid restore locations", output.getvalue())
+
     def test_backup_menu_keeps_unknown_status_backup_deletable(self):
         backup_id = "backup_20261004_123456_000003"
         manifest = {
@@ -6978,6 +7001,42 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertFalse(destination.exists())
                     message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
                     self.assertIn("duplicate or overlapping restore destinations", message)
+
+    def test_restore_manifest_rejects_destinations_inside_or_over_backup_storage(self):
+        backup_id = "backup_20260927_123456_123456"
+        for relation in ("inside", "over"):
+            with self.subTest(relation=relation), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                backup_root = root / "CleanBackups"
+                backup_dir = backup_root / backup_id
+                saved_directory = backup_dir / "saved-directory"
+                saved_directory.mkdir(parents=True)
+                payload = saved_directory / "payload.bin"
+                payload.write_bytes(b"preserve the saved recovery data")
+                destination = (
+                    backup_root / "restored.bin" if relation == "inside" else root
+                )
+                manifest = {
+                    "status": "completed",
+                    "timestamp": "2026-09-27T12:34:56",
+                    "items": [{
+                        "original_path": str(destination),
+                        "backup_path": str(saved_directory),
+                        "format": "copy",
+                        "size": payload.stat().st_size,
+                    }],
+                }
+                with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                     mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]), \
+                     mock.patch.object(backup, "_run_robocopy_with_progress") as restore_tree, \
+                     redirect_stdout(io.StringIO()) as output:
+                    self.assertFalse(backup.restore_backup(backup_id, overwrite=True))
+
+                restore_tree.assert_not_called()
+                self.assertEqual(payload.read_bytes(), b"preserve the saved recovery data")
+                self.assertFalse((backup_root / "restored.bin").exists())
+                self.assertIn("Refusing to restore into or over Drive Cleanr backup storage", output.getvalue())
 
     def test_restore_manifest_refuses_directory_destinations_with_links(self):
         with tempfile.TemporaryDirectory() as temp_dir:

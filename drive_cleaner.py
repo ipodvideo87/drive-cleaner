@@ -204,6 +204,7 @@ def _backup_menu():
                     manifest.get("status") == "completed" and
                     isinstance(items, list) and bool(items)
                 )
+                backup_roots = backup._existing_backup_roots() if valid_manifest else []
                 if valid_manifest:
                     for item in items:
                         if not isinstance(item, dict):
@@ -211,6 +212,7 @@ def _backup_menu():
                             break
                         restore_path = item.get("original_path")
                         if (not backup._valid_restore_target(restore_path) or
+                                backup._restore_path_overlaps_backup_storage(restore_path, backup_roots) or
                                 any(backup._paths_overlap(restore_path, previous)
                                     for previous in restore_paths)):
                             valid_manifest = False

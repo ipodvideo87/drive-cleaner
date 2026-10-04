@@ -237,6 +237,18 @@ def _paths_overlap(left: str, right: str) -> bool:
     )
 
 
+def _restore_path_overlaps_backup_storage(path: str, roots=None) -> bool:
+    """Return whether a restore target would alter Drive Cleanr backup storage."""
+    if roots is None:
+        roots = _existing_backup_roots()
+    return any(
+        isinstance(root, (str, os.PathLike)) and
+        ntpath.basename(ntpath.normpath(os.fspath(root))).casefold() == BACKUP_DIR_NAME.casefold() and
+        _paths_overlap(path, root)
+        for root in roots
+    )
+
+
 def _named_data_streams(path: str) -> list[tuple[str, int]]:
     """List named NTFS data streams without treating the default stream as an extra."""
     if os.name != "nt":
@@ -1498,6 +1510,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     # Validate the complete untrusted manifest before restoring any item. This
     # avoids arbitrary/network/device destinations and partial restores caused
     # by a malformed later entry.
+    backup_storage_roots = _existing_backup_roots()
     validated_items = []
     restore_destinations = []
     for item in manifest["items"]:
@@ -1511,6 +1524,9 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 not isinstance(backup_format, str) or
                 backup_format not in {"file", "copy", "zip"}):
             print("Refusing to restore an invalid backup manifest entry")
+            return False
+        if _restore_path_overlaps_backup_storage(original_path, backup_storage_roots):
+            print("Refusing to restore into or over Drive Cleanr backup storage")
             return False
         if any(_paths_overlap(original_path, previous) for previous in restore_destinations):
             print("Refusing duplicate or overlapping restore destinations in backup manifest")
