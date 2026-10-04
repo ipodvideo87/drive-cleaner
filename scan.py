@@ -10,6 +10,7 @@ import subprocess
 import ctypes
 import re
 import csv
+import stat
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,13 @@ DATA_DIR = str(SKILL_DIR / "data")
 _DRIVECLEANR_SCAN_NAME = re.compile(
     r"^scan_(?:wiztree_(?:fast|standard)|windirstat)_\d{20}(?:_\d+)?$",
     re.IGNORECASE,
+)
+_LEGACY_SCAN_NAME = re.compile(r"^_\d{20}(?:_\d+)?$", re.IGNORECASE)
+_LEGACY_SCAN_FOLDERS = (
+    ("scan",),
+    ("scan", "_wiztree", "_fast"),
+    ("scan", "_wiztree", "_standard"),
+    ("scan", "_windirstat"),
 )
 
 
@@ -622,21 +630,45 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
 
 
 def get_latest_scan():
-    """Get the newest validated Drive Cleanr scan export."""
+    """Get the newest validated saved Drive Cleanr scan export."""
+    scans = get_saved_scans()
+    return scans[0] if scans else None
+
+
+def get_saved_scans():
+    """Return validated current and known legacy exports, newest first."""
     data_path = Path(DATA_DIR)
     if not data_path.exists() or _path_has_reparse_component(data_path):
-        return None
+        return []
 
-    csv_files = [
-        path for path in data_path.glob("*.csv")
-        if _is_drive_cleanr_scan_export(path)
-    ]
-    if not csv_files:
-        return None
+    search_dirs = [data_path]
+    for relative_parts in _LEGACY_SCAN_FOLDERS:
+        legacy_dir = data_path.joinpath(*relative_parts)
+        if (not _path_has_reparse_component(legacy_dir) and legacy_dir.is_dir()):
+            search_dirs.append(legacy_dir)
 
-    # Sort by modification time and return the newest
-    latest = max(csv_files, key=lambda f: f.stat().st_mtime)
-    return str(latest)
+    found = []
+    seen = set()
+    for folder in search_dirs:
+        try:
+            csv_files = folder.glob("*.csv")
+            for candidate in csv_files:
+                key = os.path.normcase(os.path.abspath(candidate))
+                if key in seen or not _is_saved_scan_export(candidate, data_path):
+                    continue
+                seen.add(key)
+                try:
+                    file_info = candidate.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(file_info.st_mode):
+                    continue
+                found.append((file_info.st_mtime_ns, key, str(candidate)))
+        except OSError:
+            continue
+
+    found.sort(key=lambda item: (-item[0], item[1]))
+    return [item[2] for item in found]
 
 
 def _is_drive_cleanr_scan_export(path):
@@ -645,6 +677,27 @@ def _is_drive_cleanr_scan_export(path):
     if not _DRIVECLEANR_SCAN_NAME.fullmatch(candidate.stem):
         return False
     if _path_has_reparse_component(candidate):
+        return False
+    valid, _error = validate_scan_export(str(candidate))
+    return valid
+
+
+def _is_saved_scan_export(path, data_path=None):
+    """Recognize current exports and the known pre-migration scan folders."""
+    candidate = Path(path)
+    if _is_drive_cleanr_scan_export(candidate):
+        return True
+
+    if data_path is None:
+        data_path = Path(DATA_DIR)
+    try:
+        relative = candidate.relative_to(data_path)
+    except (OSError, ValueError):
+        return False
+    parent_parts = tuple(part.casefold() for part in relative.parts[:-1])
+    if (parent_parts not in _LEGACY_SCAN_FOLDERS or
+            not _LEGACY_SCAN_NAME.fullmatch(candidate.stem) or
+            _path_has_reparse_component(candidate)):
         return False
     valid, _error = validate_scan_export(str(candidate))
     return valid
@@ -672,41 +725,37 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
         return 0
     deleted = 0
 
-    # Identify the exports that are outside the retention window. Only delete
-    # the default review plan paired with one of these exports; a broad glob
-    # such as clean_*.ps1 can match unrelated user-authored PowerShell files.
+    # Identify validated current and recognized legacy exports outside the
+    # retention window. Only delete the exact default review plan paired with
+    # an export that was actually removed.
     old_exports = []
     pruned_exports = []
-    if data_path.exists():
-        # The data folder may also contain user-supplied CSVs. Only prune
-        # exports whose generated names and contents identify them as scans.
-        csv_files = [
-            path for path in data_path.glob("*.csv")
-            if _is_drive_cleanr_scan_export(path)
-        ]
-        if len(csv_files) > keep_latest:
-            # Sort by modification time (newest first)
-            csv_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
-            old_exports = csv_files[keep_latest:]
+    csv_files = [Path(path) for path in get_saved_scans()]
+    if len(csv_files) > keep_latest:
+        old_exports = csv_files[keep_latest:]
 
-            # Delete old files
-            for old_file in old_exports:
-                if _path_has_reparse_component(old_file):
-                    print(f"Refusing to prune linked scan file: {old_file.name}")
-                    continue
-                try:
-                    old_file.unlink()
-                    print(f"Deleted old data file: {old_file.name}")
-                    deleted += 1
-                    pruned_exports.append(old_file)
-                except Exception as e:
-                    print(f"Failed to delete {old_file.name}: {describe_error(e)}")
+        # Delete old files only if they are still recognized scan exports.
+        for old_file in old_exports:
+            if (_path_has_reparse_component(old_file) or
+                    not _is_saved_scan_export(old_file, data_path)):
+                print(f"Refusing to prune changed or linked scan file: {old_file.name}")
+                continue
+            try:
+                old_file.unlink()
+                print(f"Deleted old scan file: {old_file.name}")
+                deleted += 1
+                pruned_exports.append(old_file)
+            except OSError as e:
+                print(f"Failed to delete {old_file.name}: {describe_error(e)}")
 
     # Script deletion is a separate explicit action; only remove the default
     # plan named after an export that is itself being pruned. Custom output
     # paths and unrelated PowerShell files are intentionally left untouched.
     if include_scripts:
+        remaining_stems = {Path(path).stem.casefold() for path in get_saved_scans()}
         for old_file in pruned_exports:
+            if old_file.stem.casefold() in remaining_stems:
+                continue
             script = skill_path / f"{old_file.stem}.clean.ps1"
             if not script.exists():
                 continue

@@ -16,7 +16,6 @@ from datetime import datetime
 from pathlib import Path
 
 import scan
-from scan import get_latest_scan
 from error_messages import describe_error
 
 _CLEANUP_NATIVE_GUARD_SOURCE = r"""
@@ -3368,43 +3367,101 @@ def offer_to_run_cleanup_script(script_path):
     return True
 
 
+SCAN_PICKER_PAGE_SIZE = 10
+
+
+def _saved_scan_label(path):
+    """Return a short English scanner/mode label for a saved export."""
+    name = Path(path).name.casefold()
+    parts = tuple(part.casefold() for part in Path(path).parts)
+    if name.startswith("scan_wiztree_fast_") or ("_wiztree" in parts and "_fast" in parts):
+        return "WizTree fast scan"
+    if name.startswith("scan_wiztree_standard_") or ("_wiztree" in parts and "_standard" in parts):
+        return "WizTree standard scan"
+    if name.startswith("scan_windirstat_") or "_windirstat" in parts:
+        return "WinDirStat scan"
+    if (Path(path).stem.startswith("_") and len(parts) >= 2 and parts[-2] == "scan"):
+        return "WinDirStat scan"
+    return "Saved scan"
+
+
 def prompt_existing_csv(initial_csv=None):
-    """Choose a scan to review, or enter its file path."""
+    """Choose a saved scan from history, or enter another scan file path."""
     if initial_csv and os.path.isfile(initial_csv):
         return initial_csv
 
-    latest = get_latest_scan()
+    page = 0
 
     while True:
+        saved_scans = scan.get_saved_scans()
+        page_count = max(1, (len(saved_scans) + SCAN_PICKER_PAGE_SIZE - 1) // SCAN_PICKER_PAGE_SIZE)
+        page = min(page, page_count - 1)
+        first_index = page * SCAN_PICKER_PAGE_SIZE
+        page_scans = saved_scans[first_index:first_index + SCAN_PICKER_PAGE_SIZE]
+
         clear_screen()
         print("Drive Cleanr - Choose scan results to review")
         print("=" * 60)
-        if latest:
-            print(f"Most recent saved scan: {latest}")
+        if saved_scans:
+            print("Saved scans (newest first):")
+            for offset, scan_path in enumerate(page_scans):
+                number = first_index + offset + 1
+                try:
+                    info = Path(scan_path).stat()
+                    changed = datetime.fromtimestamp(info.st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
+                    size = format_size(info.st_size)
+                except (OSError, OverflowError, ValueError):
+                    changed, size = "Details unavailable", "Unknown size"
+                print(f"{number}) {_saved_scan_label(scan_path)} | {changed} | {size}")
+                print(f"   {Path(scan_path).name}")
         else:
-            print("No previous scan was found.")
+            print("No saved Drive Cleanr scans were found.")
         print()
-        print("1) Review the most recent scan")
-        print("2) Choose another scan file by path")
+        if page > 0:
+            print("P) Show newer scans")
+        if page + 1 < page_count:
+            print("N) Show older scans")
+        print("M) Choose a scan file by path")
         print("0) Back to the main menu")
-        choice = input("\nSelect an option [0-2]: ").strip()
+        choice = input("\nEnter a scan number, M for a file path, or 0 to go back: ").strip().lower()
 
-        if choice == "1":
-            if latest:
-                return latest
-            print("No recent scan is available.")
-            input("Press Enter to continue...")
-        elif choice == "2":
-            manual = input("Enter the path to a saved scan file: ").strip().strip('"')
-            if os.path.isfile(manual):
-                return manual
-            print("Scan file not found or the path is not a file. Please choose a CSV file.")
-            input("Press Enter to continue...")
-        elif choice in {"0", "q", "Q"}:
+        if choice in {"0", "q", "back"}:
             return None
-        else:
-            print("Invalid choice.")
+        if choice in {"n", "next"} and page + 1 < page_count:
+            page += 1
+            continue
+        if choice in {"p", "previous"} and page > 0:
+            page -= 1
+            continue
+        if choice in {"m", "path"}:
+            manual = input("Enter the path to a supported scan CSV (or Q to go back): ").strip().strip('"')
+            if manual.casefold() in {"q", "quit", "back", "cancel"}:
+                continue
+            if os.path.isfile(manual) and Path(manual).suffix.casefold() == ".csv":
+                valid, _error = scan.validate_scan_export(manual)
+                if valid:
+                    return manual
+                print("That file is not a supported scan CSV.")
+                input("Press Enter to continue...")
+            else:
+                print("Scan file not found or not a CSV file. Choose an existing scan CSV.")
+                input("Press Enter to continue...")
+            continue
+
+        try:
+            number = int(choice)
+        except ValueError:
+            number = 0
+        if first_index < number <= first_index + len(page_scans):
+            selected = page_scans[number - first_index - 1]
+            if os.path.isfile(selected) and scan._is_saved_scan_export(selected):
+                return selected
+            print("That saved scan changed or is no longer available. The list has been refreshed.")
             input("Press Enter to continue...")
+            continue
+
+        print("Choose a displayed scan number, N or P to change pages, M for a file path, or 0 to go back.")
+        input("Press Enter to continue...")
 
 
 def run_tui(initial_csv=None, min_size_mb=50):

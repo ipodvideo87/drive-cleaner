@@ -26,7 +26,7 @@ Scans retain earlier exports and review plans. Run `python scan.py --cleanup --k
 python analyze.py --tui
 ```
 
-Choose the most recent scan or enter a scan file path. The picker accepts files, not folders. If the scan is missing or cannot be read, Drive Cleanr explains the problem and lets you choose another scan. Press Ctrl+C or close terminal input to cancel the review; no cleanup starts. Review the disk summary and the suggested files and folders, including each exact path, size, and reason it was listed. You can view all suggestions, save the list to a text file, change the minimum item size, or create a cleanup plan. To review a specific scan from the command line, run `python analyze.py .\data\scan.csv --min-size 50 --list-items`.
+Choose a saved scan from the numbered list, shown newest first. Enter `N` or `P` to browse older or newer pages; enter `M` to provide the path to another supported scan CSV. Recognized scans from older Drive Cleanr folder layouts are included. The picker accepts files, not folders. If a scan is missing or cannot be read, Drive Cleanr explains the problem and lets you choose another scan. Press Ctrl+C or close terminal input to cancel the review; no cleanup starts. Review the disk summary and the suggested files and folders, including each exact path, size, and reason it was listed. You can view all suggestions, save the list to a text file, change the minimum item size, or create a cleanup plan. To review a specific scan from the command line, run `python analyze.py .\data\scan.csv --min-size 50 --list-items`.
 
 The report shows when the scan file last changed. Files and folders can change after a scan; scan again before creating a cleanup plan if anything may have changed.
 

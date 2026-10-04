@@ -42,7 +42,7 @@ The guided menu walks you through these steps:
 
 Scanning and review never remove anything. The main menu also lets you review a saved scan or manage recovery backups. Scans started directly with `scan.py` are available under **Review a previous scan** in that menu.
 
-The scan picker accepts files, not folders. If a scan is missing or cannot be read, Drive Cleanr explains the problem and lets you choose another scan. Press Ctrl+C or close terminal input to cancel the review; no cleanup starts.
+The scan picker lists saved scans newest first, including recognized scans saved in older Drive Cleanr folder layouts. Choose a scan by number; enter `N` or `P` to browse older or newer pages. To open another supported scan CSV, enter `M` and provide its file path. The picker accepts files, not folders. If a scan is missing or cannot be read, Drive Cleanr explains the problem and lets you choose another scan. Press Ctrl+C or close terminal input to cancel the review; no cleanup starts.
 
 WizTree includes individual files in the results by default. If you choose folders only, individual files cannot be selected later. Its fast full-drive scan requires an Administrator terminal; standard scans may miss files this account cannot access. WinDirStat uses its saved filters, so check them before a full-drive scan. The scan menu asks for the drive or folder, scan options, and time limit. Press Ctrl+C to stop a scan. An incomplete scan is kept separate from saved results unless Drive Cleanr confirms that the scanner has stopped. Earlier scans are kept. The review shows when the scan file last changed; scan again if the drive or folder may have changed. Direct commands remain available for automation.
 

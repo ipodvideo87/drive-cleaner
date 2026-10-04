@@ -1102,14 +1102,66 @@ class AnalyzeSafetyTests(unittest.TestCase):
             for invalid_path in (str(Path(temp_dir) / "missing.csv"), temp_dir):
                 with self.subTest(path_kind="directory" if Path(invalid_path).is_dir() else "missing"):
                     output = io.StringIO()
-                    with mock.patch.object(analyze, "get_latest_scan", return_value=None), \
+                    with mock.patch.object(scan, "get_saved_scans", return_value=[]), \
                          mock.patch.object(analyze, "clear_screen"), \
-                         mock.patch("builtins.input", side_effect=["2", invalid_path, "", "0"]), \
+                         mock.patch("builtins.input", side_effect=["M", invalid_path, "", "0"]), \
                          redirect_stdout(output):
                         selected = analyze.prompt_existing_csv()
 
                     self.assertIsNone(selected)
-                    self.assertIn("not a file", output.getvalue())
+                    self.assertIn("not a CSV file", output.getvalue())
+
+    def test_saved_scan_history_includes_current_and_known_legacy_exports_newest_first(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            current_scan = data / "scan_wiztree_standard_20261001120000000000.csv"
+            legacy_windirstat = data / "scan" / "_20260930120000000000.csv"
+            legacy_wiztree = data / "scan" / "_wiztree" / "_fast" / "_20260929120000000000.csv"
+            unrelated_csv = data / "scan" / "user-review.csv"
+            incomplete_scan = data / ".incomplete" / "scan_wiztree_fast_20261002120000000000.csv"
+            for path in (current_scan, legacy_windirstat, legacy_wiztree, unrelated_csv, incomplete_scan):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(current_scan, (3, 3))
+            os.utime(legacy_windirstat, (2, 2))
+            os.utime(legacy_wiztree, (1, 1))
+            with mock.patch.object(scan, "DATA_DIR", str(data)):
+                self.assertEqual(
+                    scan.get_saved_scans(),
+                    [str(current_scan), str(legacy_windirstat), str(legacy_wiztree)],
+                )
+                self.assertEqual(scan.get_latest_scan(), str(current_scan))
+
+    def test_scan_picker_pages_history_and_selects_an_older_saved_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            scans = []
+            for index in range(11):
+                scan_path = data / f"scan_wiztree_standard_202610{index + 1:02d}120000000000.csv"
+                scan_path.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(scan_path, (index + 1, index + 1))
+                scans.append(scan_path)
+
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data)), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=["N", "11"]), \
+                 redirect_stdout(output):
+                selected = analyze.prompt_existing_csv()
+
+            self.assertEqual(selected, str(scans[0]))
+            self.assertIn("Saved scans (newest first)", output.getvalue())
+            self.assertIn("N) Show older scans", output.getvalue())
+
+    def test_scan_picker_still_accepts_a_manual_supported_csv_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_path = Path(temp_dir) / "outside-saved-scan.csv"
+            scan_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(scan, "get_saved_scans", return_value=[]), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=["M", str(scan_path)]):
+                self.assertEqual(analyze.prompt_existing_csv(), str(scan_path))
 
     def test_analyzer_cli_reports_unreadable_scan_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -5005,28 +5057,38 @@ class ScanSafetyTests(unittest.TestCase):
             data.mkdir()
             old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
             new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            legacy_export = data / "scan" / "_20260927123000000000.csv"
             old_export.write_text("File Name,Size\n", encoding="utf-8")
             new_export.write_text("File Name,Size\n", encoding="utf-8")
+            legacy_export.parent.mkdir()
+            legacy_export.write_text("File Name,Size\n", encoding="utf-8")
             os.utime(old_export, (1, 1))
             os.utime(new_export, (2, 2))
+            os.utime(legacy_export, (1.5, 1.5))
             old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
             new_plan = Path(temp_dir) / f"{new_export.stem}.clean.ps1"
+            legacy_plan = Path(temp_dir) / f"{legacy_export.stem}.clean.ps1"
             unrelated_plan = Path(temp_dir) / "clean_reviewed.ps1"
             custom_plan = Path(temp_dir) / "manual-review.ps1"
-            for script in (old_plan, new_plan, unrelated_plan, custom_plan):
+            for script in (old_plan, new_plan, legacy_plan, unrelated_plan, custom_plan):
                 script.write_text("reviewed")
             try:
                 scan.cleanup_old_scans(keep_latest=1)
                 self.assertTrue(old_plan.exists())
+                self.assertTrue(legacy_plan.exists())
                 self.assertTrue(unrelated_plan.exists())
                 # The default helper call does not delete plans. Restore its
                 # old CSV fixture to model the explicit CLI cleanup action,
                 # which prunes the export and its paired plan together.
                 old_export.write_text("File Name,Size\n", encoding="utf-8")
                 os.utime(old_export, (1, 1))
+                legacy_export.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(legacy_export, (1.5, 1.5))
                 scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
                 self.assertFalse(old_export.exists())
+                self.assertFalse(legacy_export.exists())
                 self.assertFalse(old_plan.exists())
+                self.assertFalse(legacy_plan.exists())
                 self.assertTrue(new_export.exists())
                 self.assertTrue(new_plan.exists())
                 self.assertTrue(unrelated_plan.exists())
