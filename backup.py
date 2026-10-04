@@ -854,38 +854,38 @@ def _extract_zip_backup(
 
 
 def find_backup_drive(exclude_drives=None, required_space_bytes=0) -> Optional[str]:
-    """
-    Automatically select the non-C drive with the most free space
+    """Choose the eligible local drive with the most free space.
 
-    Returns:
-        str: backup root path (for example D:\\CleanBackups), or None if space is insufficient
+    The Windows volume and all selected source volumes are excluded so a
+    recovery copy cannot consume space on the system or cleanup drive.
     """
-    import ctypes
+    system_drive = _windows_system_drive_letter()
+    if not system_drive:
+        return None
 
     best_drive = None
     max_free = 0
     min_required = max(5 * 1024 * 1024 * 1024, required_space_bytes + 100 * 1024 * 1024)
     excluded = {str(letter).upper().rstrip(":\\/") for letter in (exclude_drives or set())}
+    excluded.add(system_drive)
 
-    # Check all eligible drive letters.
-    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+    # Skip A: and B: legacy floppy letters; inspect all other possible volumes.
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
         if letter in excluded:
             continue
         drive = f"{letter}:\\"
-        if os.path.exists(drive):
-            try:
-                # Read available disk space.
-                free_bytes = ctypes.c_ulonglong(0)
-                ctypes.windll.kernel32.GetDiskFreeSpaceExW(
-                    ctypes.c_wchar_p(drive), None, None, ctypes.pointer(free_bytes)
-                )
-                free = free_bytes.value
+        if not os.path.exists(drive):
+            continue
+        if _get_backup_drive_type(drive) not in {2, 3}:  # Removable or fixed local volume.
+            continue
+        try:
+            free = _get_drive_free_space(drive)
+        except (OSError, AttributeError, TypeError, ValueError):
+            continue
 
-                if free > max_free and free >= min_required:
-                    max_free = free
-                    best_drive = letter
-            except:
-                continue
+        if free > max_free and free >= min_required:
+            max_free = free
+            best_drive = letter
 
     if best_drive:
         backup_root = f"{best_drive}:\\{BACKUP_DIR_NAME}"
@@ -894,11 +894,47 @@ def find_backup_drive(exclude_drives=None, required_space_bytes=0) -> Optional[s
     return None
 
 
+def _windows_system_drive_letter() -> Optional[str]:
+    """Return the drive containing the active Windows directory, if known."""
+    windows_directory = None
+    if os.name == "nt":
+        try:
+            import ctypes
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = ctypes.windll.kernel32.GetWindowsDirectoryW(buffer, len(buffer))
+            if 0 < length < len(buffer):
+                windows_directory = buffer.value
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    if not windows_directory:
+        windows_directory = (
+            os.environ.get("SystemRoot") or os.environ.get("WINDIR") or
+            os.environ.get("SystemDrive")
+        )
+    drive, _tail = ntpath.splitdrive(windows_directory or "")
+    letter = drive.rstrip(":\\/").upper()
+    return letter if len(letter) == 1 and letter.isalpha() else None
+
+
+def _get_backup_drive_type(drive_root: str) -> Optional[int]:
+    """Return GetDriveTypeW for a volume; unknown drives are not backup targets."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        return int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive_root)))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
 def get_backup_root(exclude_drives=None, required_space_bytes=0) -> str:
     """Get the backup root directory and create it if needed"""
     backup_root = find_backup_drive(exclude_drives, required_space_bytes)
     if not backup_root:
-        raise RuntimeError("No suitable backup drive found (requires a different drive with at least 5 GB free)")
+        raise RuntimeError(
+            "No suitable backup drive found (requires at least 5 GB free on a non-system "
+            "local drive outside the selected item drives)"
+        )
     if _path_has_reparse_component(backup_root):
         raise RuntimeError("Refusing to store backups through a reparse point or junction")
     if os.path.lexists(backup_root) and not os.path.isdir(backup_root):
@@ -913,7 +949,7 @@ def get_backup_root(exclude_drives=None, required_space_bytes=0) -> str:
 def _existing_backup_roots():
     """Find backup roots on attached data drives, independent of free-space order."""
     roots = []
-    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+    for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
         root = f"{letter}:\\{BACKUP_DIR_NAME}"
         if os.path.isdir(root):
             roots.append(root)
@@ -1974,7 +2010,7 @@ def main():
             print(f"Backup drive: {backup_root}")
             print(f"Free space: {format_size(free_space)}")
         else:
-            print("No suitable backup drive found (requires a non-C drive with at least 5GB free)")
+            print("No suitable non-system local backup drive found (requires at least 5 GB free)")
             sys.exit(1)
 
     else:

@@ -2525,7 +2525,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
         self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
         self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
-        self.assertIn("elseif (-not $PreviewOnly -and $Force) {", script)
+        self.assertIn("elseif (-not $PreviewOnly -and ($CreateBackup -or $Force)) {", script)
         self.assertIn("if (-not $PreviewOnly -and -not $Force) {", script)
         self.assertIn("Create a verified backup of these selected items first? [y/N]", script)
         self.assertIn("A verified recovery backup will be created before cleanup.", script)
@@ -3399,7 +3399,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_noninteractive_cleanup_does_not_create_backup_by_default(self):
+    def test_noninteractive_cleanup_creates_verified_backup_by_default(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -3409,7 +3409,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
         ):
             target = Path(target_temp) / "candidate.tmp"
-            target.write_bytes(b"temporary fixture selected without backup")
+            target.write_bytes(b"temporary fixture selected with default backup")
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B", "kind": "File",
@@ -3426,10 +3426,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertIn("No backup will be created", result.stdout)
-            self.assertIn("No recovery backup was created", result.stdout)
-            self.assertNotIn("Creating backup before cleanup", result.stdout)
-            self.assertFalse(backup_calls.exists())
+            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_noninteractive_cleanup_no_backup_switch_skips_backup(self):
@@ -4953,7 +4952,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
                         capture_output=True, text=True, timeout=90,
                     )
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -6867,6 +6866,50 @@ class BackupSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "reparse point or junction"):
                 backup.get_backup_root()
         make_directory.assert_not_called()
+
+    def test_backup_drive_skips_the_windows_volume_sources_and_nonlocal_volumes(self):
+        drive_types = {"C": 3, "D": 3, "E": 3, "F": 4, "G": 2}
+        free_space = {
+            "C": 8 * 1024**3,
+            "D": 100 * 1024**3,
+            "E": 20 * 1024**3,
+            "F": 30 * 1024**3,
+            "G": 6 * 1024**3,
+        }
+        present_drives = set(drive_types)
+        with mock.patch.object(backup, "_windows_system_drive_letter", return_value="D"), \
+             mock.patch.object(
+                 backup.os.path, "exists",
+                 side_effect=lambda path: path[0].upper() in present_drives,
+             ), \
+             mock.patch.object(
+                 backup, "_get_backup_drive_type",
+                 side_effect=lambda path: drive_types[path[0].upper()],
+             ) as drive_type_check, \
+             mock.patch.object(
+                 backup, "_get_drive_free_space",
+                 side_effect=lambda path: free_space[path[0].upper()],
+             ) as free_space_check:
+            result = backup.find_backup_drive(exclude_drives={"E:\\"})
+
+        self.assertEqual(result, "C:\\CleanBackups")
+        checked_for_space = {call.args[0][0] for call in free_space_check.call_args_list}
+        self.assertEqual(checked_for_space, {"C", "G"})
+        self.assertIn(mock.call("F:\\"), drive_type_check.call_args_list)
+
+    def test_backup_drive_fails_closed_when_windows_volume_cannot_be_detected(self):
+        with mock.patch.object(backup, "_windows_system_drive_letter", return_value=None), \
+             mock.patch.object(backup.os.path, "exists") as path_exists:
+            self.assertIsNone(backup.find_backup_drive())
+        path_exists.assert_not_called()
+
+    def test_existing_backup_roots_include_c_when_windows_is_installed_elsewhere(self):
+        existing = {"C:\\CleanBackups", "E:\\CleanBackups"}
+        with mock.patch.object(backup.os.path, "isdir", side_effect=lambda path: path in existing):
+            self.assertEqual(
+                backup._existing_backup_roots(),
+                ["C:\\CleanBackups", "E:\\CleanBackups"],
+            )
 
     def test_backup_id_collision_never_reuses_an_existing_backup_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:

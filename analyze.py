@@ -2648,13 +2648,11 @@ if ($ManualReviewOnly) {{
 }}
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.ItemType) | $($target.Path) - $($target.Size)" }}
 $backupEnabled = $false
-if (-not $PreviewOnly -and $CreateBackup) {{
+if (-not $PreviewOnly -and $SkipBackup) {{
+    $backupEnabled = $false
+}} elseif (-not $PreviewOnly -and ($CreateBackup -or $Force)) {{
     $backupEnabled = $true
-}} elseif (-not $PreviewOnly -and $SkipBackup) {{
-    $backupEnabled = $false
-}} elseif (-not $PreviewOnly -and $Force) {{
-    $backupEnabled = $false
-}} elseif (-not $PreviewOnly -and -not $Force) {{
+}} elseif (-not $PreviewOnly) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
         $backupEnabled = $true
