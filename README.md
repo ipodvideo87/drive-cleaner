@@ -2,6 +2,8 @@
 
 Drive Cleanr helps Windows users find files and folders they may want to remove. Scan with WizTree or WinDirStat, review the suggestions, choose the exact items for a cleanup plan, decide whether to make a recovery backup, and confirm before anything is removed.
 
+Drive Cleanr's menus, explanations, and review labels are in English. File and folder names and paths come from the scan and stay unchanged; they may use another language. Paths are not translated because they must identify the exact items on disk.
+
 **Nothing is deleted during scanning or analysis.** A generated PowerShell plan shows the saved entries and lets you choose which to clean. Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions. Protected paths and detected projects are kept. Higher-risk candidates inside a selected folder are kept unless you explicitly select one of those listed candidates too; the plan shows explicitly selected nested items in its preview. The preview shows up to 12 direct items; other contents may also be removed. You can create and verify a recovery backup first or continue without one after a distinct typed confirmation. If you choose a backup and it is missing, incomplete, or fails verification, cleanup stops. Backups are kept until you delete them.
 
 ## Get the project

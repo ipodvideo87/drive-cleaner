@@ -733,6 +733,29 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
                         return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
 
+    def test_reports_explain_and_preserve_non_english_scan_paths(self):
+        non_english_path = r"C:\Users\A\AppData\Local\Temp\临时文件.tmp"
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows([{
+                "File Name": non_english_path, "Size": "104857600",
+            }])
+
+        console_output = io.StringIO()
+        with redirect_stdout(console_output):
+            analyze.print_report(results)
+        self.assertIn(analyze.PATH_LANGUAGE_NOTE, console_output.getvalue())
+        self.assertIn(non_english_path, console_output.getvalue())
+        self.assertIn("Temporary files", console_output.getvalue())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "candidate-list.txt"
+            analyze.write_item_list_report(results, str(report_path))
+            saved_report = report_path.read_text(encoding="utf-8")
+        self.assertIn(analyze.PATH_LANGUAGE_NOTE, saved_report)
+        self.assertIn(non_english_path, saved_report)
+        self.assertIn("Temporary files", saved_report)
+
     def test_analysis_lists_large_unmatched_files_separately_from_cleanup_suggestions(self):
         unmatched = r"C:\Users\A\LargeFiles\disk-image.iso"
         automatic = r"C:\Users\A\AppData\Local\Temp\cache.bin"

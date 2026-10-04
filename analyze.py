@@ -20,6 +20,11 @@ import scan
 from cleanup_runner import offer_to_preview_cleanup_script, offer_to_run_cleanup_script
 from error_messages import describe_error
 
+PATH_LANGUAGE_NOTE = (
+    "Review labels and instructions are in English. File and folder names and paths "
+    "are shown exactly as scanned, so they may use another language."
+)
+
 _CLEANUP_NATIVE_GUARD_SOURCE = r"""
 using System;
 using System.Collections.Generic;
@@ -1990,6 +1995,7 @@ def print_report(results, show_all_items=False, item_limit=10):
     scan_file_time = _safe_scan_timestamp(results)
     print(f"Scan file last changed: {scan_file_time}")
     print("Files and folders may have changed since this scan. Scan again before cleanup if anything may have changed.")
+    print(PATH_LANGUAGE_NOTE)
 
     if results.get("scan_mode") == "wiztree_standard":
         print("Scan mode: WizTree standard file-system scan; files inaccessible to this account may be missing.")
@@ -3411,6 +3417,7 @@ def write_item_list_report(results, output_path):
     lines.append("Files and Folders for Cleanup Review")
     lines.append(f"Generated at: {datetime.now().isoformat()}")
     lines.append(f"Source scan last modified: {_safe_scan_timestamp(results)}")
+    lines.append(PATH_LANGUAGE_NOTE)
     lines.append("")
     if results.get("reparse_candidate_count", 0):
         lines.append(f"Skipped {results['reparse_candidate_count']} paths that pass through a link or could not be checked.")
