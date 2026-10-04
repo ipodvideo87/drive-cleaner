@@ -5206,7 +5206,7 @@ class BackupSafetyTests(unittest.TestCase):
 
                 source.unlink()
                 with redirect_stdout(io.StringIO()), \
-                     mock.patch.object(backup.shutil, "copy2", side_effect=copy_default_stream_only):
+                     mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_default_stream_only):
                     self.assertTrue(backup.restore_backup(manifest["id"]))
             with open(stream_path, "rb") as stream:
                 self.assertEqual(stream.read(), expected_stream)
@@ -5425,6 +5425,64 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertTrue(backup.restore_backup(manifest["id"]))
             self.assertEqual(source.read_bytes(), b"recoverable data")
 
+    def test_file_restore_reports_progress_while_copying_and_verifying(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"0123456789abcdef" * (128 * 1024))
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.unlink()
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024),
+                mock.patch.object(backup, "BACKUP_COPY_CHUNK_BYTES", 1024 * 1024),
+                redirect_stdout(output),
+            ):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual(source.stat().st_size, 2 * 1024 * 1024)
+        self.assertIn(
+            "Restoring backup: cache-file.bin: 1.00 MB of 2.00 MB copied (50%).",
+            output.getvalue(),
+        )
+        self.assertIn("Restoring backup complete: 1 item processed.", output.getvalue())
+
+    def test_zip_restore_reports_progress_while_checking_and_extracting_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-folder"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"0123456789abcdef" * (128 * 1024))
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+                mock.patch.object(backup, "SIZE_THRESHOLD", 1),
+            ):
+                manifest = backup.create_backup([str(source)])
+            shutil.rmtree(source)
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024),
+                redirect_stdout(output),
+            ):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual((source / "payload.bin").stat().st_size, 2 * 1024 * 1024)
+        self.assertIn(
+            "Restoring backup: payload.bin: 1.00 MB of 2.00 MB verified (50%).",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "Restoring backup: payload.bin: 1.00 MB of 2.00 MB copied (50%).",
+            output.getvalue(),
+        )
+
     def test_file_restore_preserves_existing_destination_without_explicit_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
@@ -5452,7 +5510,7 @@ class BackupSafetyTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=OSError("simulated disk full")),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=OSError("simulated disk full")),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"], overwrite=True))
@@ -5472,14 +5530,14 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def write_partial_then_fail(_backup_path, staged_path):
+            def write_partial_then_fail(_backup_path, staged_path, **_kwargs):
                 Path(staged_path).write_bytes(b"partial")
                 raise OSError("simulated interrupted copy")
 
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=write_partial_then_fail),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=write_partial_then_fail),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -5499,12 +5557,12 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def copy_corrupt_data(_backup_path, staged_path):
+            def copy_corrupt_data(_backup_path, staged_path, **_kwargs):
                 Path(staged_path).write_bytes(b"corrupted")
 
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=copy_corrupt_data),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_corrupt_data),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
 
@@ -5522,14 +5580,14 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def create_destination(_backup_path, staged_path):
+            def create_destination(_backup_path, staged_path, **_kwargs):
                 source.write_bytes(b"new user file")
                 Path(staged_path).write_bytes(b"saved data")
 
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=create_destination),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=create_destination),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -5561,7 +5619,7 @@ class BackupSafetyTests(unittest.TestCase):
                 }],
             }
 
-            def copy_missing_files(command, **_kwargs):
+            def copy_missing_files(command, **kwargs):
                 self.assertIn("/XC", command)
                 self.assertIn("/XN", command)
                 self.assertIn("/XO", command)
@@ -5572,14 +5630,19 @@ class BackupSafetyTests(unittest.TestCase):
                         if not target.exists():
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(source_file, target)
-                return subprocess.CompletedProcess(command, 1)
+                kwargs["progress"].heartbeat(10)
+                return 1
 
+            output = io.StringIO()
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
                  mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=copy_missing_files):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=copy_missing_files), \
+                 redirect_stdout(output):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
             self.assertEqual((destination / "changed.bin").read_bytes(), b"newer user data")
             self.assertEqual((destination / "removed.bin").read_bytes(), b"restore me")
+            self.assertIn("Checking files to preserve: 1 item checked", output.getvalue())
+            self.assertIn("Still working after 10 seconds", output.getvalue())
 
     @unittest.skipUnless(os.name == "nt", "Robocopy and Windows file attributes are required")
     def test_windows_directory_backup_restore_preserves_hidden_and_system_files(self):
@@ -5670,7 +5733,7 @@ class BackupSafetyTests(unittest.TestCase):
                 mock.patch.object(backup, "get_backup", return_value=manifest),
                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
                 mock.patch.object(backup, "_path_has_reparse_component", side_effect=destination_becomes_linked),
-                mock.patch.object(backup.subprocess, "run") as robocopy,
+                mock.patch.object(backup, "_run_robocopy_with_progress") as robocopy,
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -5842,11 +5905,11 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("existing.txt", "restored data")
 
-            def partial_write_then_fail(_source, output, length):
+            def partial_write_then_fail(_source, output, *_args, **_kwargs):
                 output.write(b"partial")
                 raise OSError("simulated write failure")
 
-            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+            with mock.patch.object(backup, "_copy_stream_with_progress", side_effect=partial_write_then_fail):
                 with self.assertRaisesRegex(OSError, "simulated write failure"):
                     backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True)
 
@@ -5863,11 +5926,11 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("missing.txt", "restored data")
 
-            def partial_write_then_fail(_source, output, length):
+            def partial_write_then_fail(_source, output, *_args, **_kwargs):
                 output.write(b"partial")
                 raise OSError("simulated write failure")
 
-            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+            with mock.patch.object(backup, "_copy_stream_with_progress", side_effect=partial_write_then_fail):
                 with self.assertRaisesRegex(OSError, "simulated write failure"):
                     backup._extract_zip_backup(str(archive_path), str(destination))
 
@@ -6105,7 +6168,7 @@ class BackupSafetyTests(unittest.TestCase):
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
                  mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
                  mock.patch.object(backup, "_is_reparse_point", side_effect=is_link), \
-                 mock.patch.object(backup.subprocess, "run") as run_process:
+                 mock.patch.object(backup, "_run_robocopy_with_progress") as run_process:
                 self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             run_process.assert_not_called()
 
