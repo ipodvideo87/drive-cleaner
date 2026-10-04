@@ -4661,17 +4661,21 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertEqual(output.getvalue().count("FIND SPACE. KEEP CONTROL."), 1)
 
     def test_backup_menu_can_merge_without_overwriting(self):
-        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin"}]}]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]), \
+        manifests = [{"id": "backup_test", "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin"}]}]
+        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]) as user_input, \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
-             mock.patch.object(drive_cleaner, "_pause"):
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(io.StringIO()) as output:
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=False)
+        self.assertIn("Original locations in this backup", output.getvalue())
+        self.assertIn(r"C:\Users\ExampleUser\cache.bin", output.getvalue())
+        self.assertIn("restore missing files and keep existing ones", user_input.call_args_list[2].args[0])
 
     def test_backup_menu_requires_explicit_overwrite_choice(self):
-        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin"}]}]
+        manifests = [{"id": "backup_test", "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin"}]}]
         with mock.patch("builtins.input", side_effect=["3", "backup_test", "OVERWRITE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
@@ -4679,6 +4683,55 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(drive_cleaner, "_pause"):
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=True)
+
+    def test_backup_menu_rejects_malformed_or_terminal_control_restore_paths(self):
+        backup_id = "backup_20261004_123456_000001"
+        invalid_cases = (
+            ("completed", ["not a manifest entry"]),
+            ("completed", [{"original_path": "C:\\Users\\A\\cache.bin\x1b[2J"}]),
+            ("partial", [{"original_path": r"C:\Users\A\cache.bin"}]),
+            ("completed", [
+                {"original_path": r"C:\Users\A\cache"},
+                {"original_path": r"C:\Users\A\cache\nested"},
+            ]),
+        )
+        for status, items in invalid_cases:
+            with self.subTest(status=status, items=items):
+                manifests = [{
+                    "id": backup_id, "timestamp": "2026-10-04T12:34:56",
+                    "status": status, "items": items,
+                }]
+                output = io.StringIO()
+                with mock.patch("builtins.input", side_effect=["3", backup_id, "0"]), \
+                     mock.patch.object(backup, "list_backups", return_value=manifests), \
+                     mock.patch.object(backup, "print_backups_table"), \
+                     mock.patch.object(backup, "restore_backup") as restore, \
+                     mock.patch.object(drive_cleaner, "_pause"), \
+                     redirect_stdout(output):
+                    drive_cleaner._backup_menu()
+
+                restore.assert_not_called()
+                self.assertIn("cannot be restored safely", output.getvalue())
+                self.assertNotIn("\x1b", output.getvalue())
+
+    def test_backup_menu_escapes_terminal_controls_in_valid_restore_paths(self):
+        backup_id = "backup_20261004_123456_000002"
+        manifest = {
+            "id": backup_id, "status": "completed",
+            "items": [{"original_path": "C:\\Users\\A\\cache\\\u009b.bin"}],
+        }
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["3", backup_id, "MERGE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=[manifest]), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        restore.assert_called_once_with(backup_id, overwrite=False)
+        self.assertNotIn("\u009b", output.getvalue())
+        self.assertIn(r"\x9b.bin", output.getvalue())
 
     def test_scan_cleanup_deletes_only_plans_paired_with_pruned_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:

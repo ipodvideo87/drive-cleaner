@@ -166,11 +166,34 @@ def _backup_menu():
                 _pause()
                 continue
             if choice == "3":
-                print("Some destination files already exist. Choose what to do:")
-                for item in manifest.get("items", []):
-                    print(f"  {item.get('original_path', '(unknown path)')}")
+                items = manifest.get("items")
+                restore_paths = []
+                valid_manifest = (
+                    manifest.get("status") == "completed" and
+                    isinstance(items, list) and bool(items)
+                )
+                if valid_manifest:
+                    for item in items:
+                        if not isinstance(item, dict):
+                            valid_manifest = False
+                            break
+                        restore_path = item.get("original_path")
+                        if (not backup._valid_restore_target(restore_path) or
+                                any(backup._paths_overlap(restore_path, previous)
+                                    for previous in restore_paths)):
+                            valid_manifest = False
+                            break
+                        restore_paths.append(restore_path)
+                if not valid_manifest:
+                    print("This backup is incomplete or has invalid restore locations. It cannot be restored safely.")
+                    _pause()
+                    continue
+                print("Original locations in this backup:")
+                for restore_path in restore_paths:
+                    print(f"  {backup._safe_terminal_text(restore_path)}")
+                print("Choose how to handle files already present at these locations:")
                 try:
-                    confirm = input("Type OVERWRITE to replace them, MERGE to keep them and restore missing files, or press Enter to cancel: ").strip().upper()
+                    confirm = input("Type OVERWRITE to replace existing files, MERGE to restore missing files and keep existing ones, or press Enter to cancel: ").strip().upper()
                 except (EOFError, KeyboardInterrupt):
                     return
                 if confirm in {"OVERWRITE", "MERGE"}:
