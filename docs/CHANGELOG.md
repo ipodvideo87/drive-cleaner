@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Show byte and percentage progress during the final locked content check immediately before deletion, and while checking large named data streams.
 - Escape nonprinting manifest and archive-derived error text; reject hidden-format restore paths and malformed byte counts before verification or writing.
 - Index cleanup-rule matching by path components and cache configured temporary roots so large scan exports avoid checking every rule against every row.
 - Keep recovery backups opt-in in every cleanup mode: interactive cleanup defaults to no backup, and reviewed `-Force` runs create one only when `-Backup` is supplied. Continue to verify any requested backup before the first removal.

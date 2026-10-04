@@ -283,6 +283,13 @@ public static class __CLASS_NAME__
     private static string HashNamedStreams(
         string path, List<FileStream> heldLocks, out List<NamedStreamSnapshot> streamSnapshot)
     {
+        return HashNamedStreams(path, heldLocks, out streamSnapshot, null);
+    }
+
+    private static string HashNamedStreams(
+        string path, List<FileStream> heldLocks, out List<NamedStreamSnapshot> streamSnapshot,
+        Action<long, long> progressCallback)
+    {
         List<NamedStreamSnapshot> streams = EnumerateNamedStreams(path);
         StringBuilder fingerprint = new StringBuilder();
         foreach (NamedStreamSnapshot namedStream in streams)
@@ -300,8 +307,7 @@ public static class __CLASS_NAME__
 
                 stream.Position = 0;
                 string contentHash;
-                using (SHA256 sha256 = SHA256.Create())
-                    contentHash = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", "");
+                contentHash = HashFileStream(stream, progressCallback);
                 if (stream.Length != namedStream.Length)
                     throw new IOException("A named data stream changed while it was being checked; refusing cleanup");
 
@@ -342,7 +348,8 @@ public static class __CLASS_NAME__
         FileInformation information = Information(defaultStream.SafeFileHandle);
         string defaultHash = HashFileStream(defaultStream, progressCallback);
 
-        string streamsHash = HashNamedStreams(path, heldStreamLocks, out streamSnapshot);
+        string streamsHash = HashNamedStreams(
+            path, heldStreamLocks, out streamSnapshot, progressCallback);
         if (streamSnapshot.Count == 0) return defaultHash;
 
         string material = FileSize(information).ToString(System.Globalization.CultureInfo.InvariantCulture) +
@@ -539,10 +546,16 @@ public static class __CLASS_NAME__
 
     public static string GetDirectoryIdentityAndStreamsHash(string path)
     {
+        return GetDirectoryIdentityAndStreamsHash(path, null);
+    }
+
+    public static string GetDirectoryIdentityAndStreamsHash(
+        string path, Action<long, long> progressCallback)
+    {
         using (LockedPath locked = OpenLockedPath(path, true, ReadAttributes))
         {
             List<NamedStreamSnapshot> streams;
-            string streamsHash = HashNamedStreams(path, null, out streams);
+            string streamsHash = HashNamedStreams(path, null, out streams, progressCallback);
             return Identity(Information(locked.Target)) + "|" + streamsHash;
         }
     }
@@ -571,6 +584,16 @@ public static class __CLASS_NAME__
     public static void DeleteFileIfUnchanged(
         string path, string expectedIdentity, string expectedHash,
         long expectedLength, long expectedLastWriteFileTime)
+    {
+        DeleteFileIfUnchanged(
+            path, expectedIdentity, expectedHash, expectedLength,
+            expectedLastWriteFileTime, null);
+    }
+
+    public static void DeleteFileIfUnchanged(
+        string path, string expectedIdentity, string expectedHash,
+        long expectedLength, long expectedLastWriteFileTime,
+        Action<long, long> progressCallback)
     {
         SafeFileHandle handle = Open(path, DeleteAccess | GenericRead | ReadAttributes | WriteAttributes);
         FileInformation openedInformation;
@@ -609,7 +632,8 @@ public static class __CLASS_NAME__
                 RequireIdentity(lockedInformation, expectedIdentity);
                 RequireFileSnapshot(lockedInformation, expectedLength, expectedLastWriteFileTime);
                 List<NamedStreamSnapshot> namedStreamSnapshot;
-                string currentHash = FileContentHash(path, stream, namedStreamLocks, out namedStreamSnapshot);
+                string currentHash = FileContentHash(
+                    path, stream, namedStreamLocks, out namedStreamSnapshot, progressCallback);
                 if (!String.Equals(currentHash, expectedHash, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("The selected file's contents changed after backup verification; refusing cleanup");
 
@@ -652,6 +676,13 @@ public static class __CLASS_NAME__
     public static void DeleteEmptyDirectoryIfUnchanged(
         string path, string expectedIdentity, string expectedStreamsHash)
     {
+        DeleteEmptyDirectoryIfUnchanged(path, expectedIdentity, expectedStreamsHash, null);
+    }
+
+    public static void DeleteEmptyDirectoryIfUnchanged(
+        string path, string expectedIdentity, string expectedStreamsHash,
+        Action<long, long> progressCallback)
+    {
         using (LockedPath locked = OpenLockedPath(
                 path, true, DeleteAccess | ReadAttributes))
         {
@@ -660,7 +691,8 @@ public static class __CLASS_NAME__
             try
             {
                 List<NamedStreamSnapshot> namedStreamSnapshot;
-                string currentStreamsHash = HashNamedStreams(path, namedStreamLocks, out namedStreamSnapshot);
+                string currentStreamsHash = HashNamedStreams(
+                    path, namedStreamLocks, out namedStreamSnapshot, progressCallback);
                 if (!String.Equals(currentStreamsHash, expectedStreamsHash, StringComparison.OrdinalIgnoreCase))
                     throw new IOException("The selected item's named data streams changed after review; refusing cleanup");
                 RequireNamedStreamsUnchanged(path, namedStreamSnapshot);
@@ -2426,17 +2458,21 @@ function Get-CleanupProtectedRoot([string]$FullName, [string]$Name, [bool]$IsDir
     return $protectedRoot
 }}
 
-function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal) {{
+function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal, [string]$ItemLabel = "file") {{
+    $progressWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $progressScript = {{
         param([long]$BytesProcessed, [long]$FileBytesTotal)
         if ($FileBytesTotal -le 0 -or $FileTotal -le 0) {{ return }}
+        if ($FileBytesTotal -lt 1MB -and $BytesProcessed -eq $FileBytesTotal -and
+            $progressWatch.Elapsed.TotalSeconds -lt 10) {{ return }}
         $filePercent = [int][Math]::Min(100, (100.0 * $BytesProcessed / $FileBytesTotal))
         $overallPercent = [int](100.0 * (($FileIndex - 1) + ($BytesProcessed / $FileBytesTotal)) / $FileTotal)
         $processedMB = [math]::Round($BytesProcessed / 1MB, 1)
         $totalMB = [math]::Round($FileBytesTotal / 1MB, 1)
-        $progressStatus = "Checking file $FileIndex of $FileTotal; $filePercent% checked ($processedMB of $totalMB MB). This check does not remove files."
-        Write-Progress -Activity "Checking selected file contents" -Status $progressStatus -PercentComplete $overallPercent
-        Write-Host ("  File {{0}} of {{1}}: {{2:N1}} MB of {{3:N1}} MB checked ({{4}}%)." -f $FileIndex, $FileTotal, $processedMB, $totalMB, $filePercent) -ForegroundColor Gray
+        $itemTitle = $ItemLabel.Substring(0, 1).ToUpperInvariant() + $ItemLabel.Substring(1)
+        $progressStatus = "Checking $ItemLabel $FileIndex of $FileTotal; $filePercent% checked ($processedMB of $totalMB MB). This check does not remove files."
+        Write-Progress -Activity "Checking selected $ItemLabel contents" -Status $progressStatus -PercentComplete $overallPercent
+        Write-Host ("  {{0}} {{1}} of {{2}}: {{3:N1}} MB of {{4:N1}} MB checked ({{5}}%)." -f $itemTitle, $FileIndex, $FileTotal, $processedMB, $totalMB, $filePercent) -ForegroundColor Gray
     }}.GetNewClosure()
     return [System.Action[long, long]]$progressScript
 }}
@@ -2529,13 +2565,17 @@ if ($Select.Count -gt 0) {{
     }}
 }}
 
+$targetSnapshotIndex = 0
 foreach ($target in $cleanTargets) {{
+    $targetSnapshotIndex++
     Assert-TargetMatchesScan $target
     if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory) $true) {{
         throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
     }}
     if ([bool]$target.IsDirectory) {{
-        $directorySnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path)
+        Write-Host "Checking selected folder $targetSnapshotIndex of $($cleanTargets.Count) for folder identity and extra Windows file data; this check does not remove files." -ForegroundColor Gray
+        $directoryProgressAction = New-CleanupHashProgressAction $targetSnapshotIndex $cleanTargets.Count "folder"
+        $directorySnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $directoryProgressAction)
         $directorySnapshotParts = $directorySnapshot -split '\\|', 2
         if ($directorySnapshotParts.Count -ne 2) {{ throw "Could not verify the selected folder's identity and named data streams." }}
         $cleanupIdentity = $directorySnapshotParts[0]
@@ -2717,7 +2757,9 @@ foreach ($target in $cleanTargets) {{
             throw "The item type changed since the scan; rescan before cleanup"
         }}
         if ($item.PSIsContainer) {{
-            $currentTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path)
+            Write-Host "Checking this folder's identity and extra Windows file data before cleanup; this check does not remove files." -ForegroundColor Gray
+            $targetStreamProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder"
+            $currentTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $targetStreamProgressAction)
             $currentTargetSnapshotParts = $currentTargetSnapshot -split '\\|', 2
             if ($currentTargetSnapshotParts.Count -ne 2 -or
                 $currentTargetSnapshotParts[0] -ne $target.CleanupIdentity -or
@@ -2822,6 +2864,10 @@ foreach ($target in $cleanTargets) {{
             $fileHashTotal = @($deletable | Where-Object {{ -not $_.PSIsContainer }}).Count
             $targetFilesPlanned = $fileHashTotal
             $fileHashIndex = 0
+            $folderHashTotal = @($deletable | Where-Object {{ $_.PSIsContainer }}).Count
+            $folderHashIndex = 0
+            $folderHashWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastFolderHashNoticeSeconds = 0
             $fileHashWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastFileHashNoticeSeconds = 0
             if ($fileHashTotal -gt 0) {{
@@ -2829,7 +2875,18 @@ foreach ($target in $cleanTargets) {{
             }}
             foreach ($entry in $deletable) {{
                 if ($entry.PSIsContainer) {{
-                    $entrySnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($entry.FullName)
+                    $folderHashIndex++
+                    $elapsedFolderHashSeconds = [int]$folderHashWatch.Elapsed.TotalSeconds
+                    if ($folderHashIndex -eq 1 -or ($folderHashIndex % 100) -eq 0 -or
+                        $folderHashIndex -eq $folderHashTotal -or
+                        ($elapsedFolderHashSeconds - $lastFolderHashNoticeSeconds) -ge 10) {{
+                        $folderHashStatus = "Checking folder $folderHashIndex of $folderHashTotal; this check does not remove files."
+                        Write-Progress -Activity "Checking selected folder contents" -Status $folderHashStatus -PercentComplete ([int](100 * $folderHashIndex / $folderHashTotal))
+                        Write-Host "  $folderHashStatus" -ForegroundColor Gray
+                        $lastFolderHashNoticeSeconds = $elapsedFolderHashSeconds
+                    }}
+                    $folderHashProgressAction = New-CleanupHashProgressAction $folderHashIndex $folderHashTotal "folder"
+                    $entrySnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($entry.FullName, $folderHashProgressAction)
                     $entrySnapshotParts = $entrySnapshot -split '\\|', 2
                     if ($entrySnapshotParts.Count -ne 2) {{
                         throw "Could not verify a selected folder's identity and named data streams: $($entry.FullName)"
@@ -2870,6 +2927,7 @@ foreach ($target in $cleanTargets) {{
                 }}
             }}
             if ($fileHashTotal -gt 0) {{ Write-Progress -Activity "Checking selected file contents" -Completed }}
+            if ($folderHashTotal -gt 0) {{ Write-Progress -Activity "Checking selected folder contents" -Completed }}
             $previewFolderDataBytes = $null
             if ($PreviewOnly) {{
                 $previewDirectorySeparators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
@@ -2918,7 +2976,9 @@ foreach ($target in $cleanTargets) {{
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             }}
             Assert-TargetMatchesScan $target
-            $verifiedTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path)
+            Write-Host "Rechecking this folder's identity and extra Windows file data before cleanup; this check does not remove files." -ForegroundColor Gray
+            $verifiedTargetProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder"
+            $verifiedTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $verifiedTargetProgressAction)
             $verifiedTargetSnapshotParts = $verifiedTargetSnapshot -split '\\|', 2
             if ($verifiedTargetSnapshotParts.Count -ne 2 -or
                 $verifiedTargetSnapshotParts[0] -ne $target.CleanupIdentity -or
@@ -2973,6 +3033,7 @@ foreach ($target in $cleanTargets) {{
             Write-Host "Final project check complete; $freshProjectCheckIndex items rechecked." -ForegroundColor Gray
             $orderedDeletable = @($deletable | Sort-Object {{ $_.FullName.Length }} -Descending)
             $fileRecheckTotal = @($orderedDeletable | Where-Object {{ -not $_.PSIsContainer }}).Count
+            $folderRecheckTotal = @($orderedDeletable | Where-Object {{ $_.PSIsContainer }}).Count
             if ($PreviewOnly) {{
                 Write-Host "Eligible contents that would be removed if cleanup is started:" -ForegroundColor Cyan
                 foreach ($entry in $orderedDeletable) {{
@@ -3005,6 +3066,9 @@ foreach ($target in $cleanTargets) {{
                 continue
             }}
             $fileRecheckIndex = 0
+            $folderRecheckIndex = 0
+            $folderRemovalWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastFolderRemovalNoticeSeconds = 0
             $fileRemovalWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastFileRemovalNoticeSeconds = 0
             if ($fileRecheckTotal -gt 0) {{
@@ -3014,16 +3078,31 @@ foreach ($target in $cleanTargets) {{
                 if (-not $entry.PSIsContainer) {{
                     $fileRecheckIndex++
                     Write-Progress -Activity "Removing selected files" -Status "Processing file $fileRecheckIndex of $fileRecheckTotal; earlier files may already be removed" -PercentComplete ([int](100 * ($fileRecheckIndex - 1) / $fileRecheckTotal))
+                }} else {{
+                    $folderRecheckIndex++
+                    $elapsedFolderRemovalSeconds = [int]$folderRemovalWatch.Elapsed.TotalSeconds
+                    if ($folderRecheckIndex -eq 1 -or ($folderRecheckIndex % 100) -eq 0 -or
+                        $folderRecheckIndex -eq $folderRecheckTotal -or
+                        ($elapsedFolderRemovalSeconds - $lastFolderRemovalNoticeSeconds) -ge 10) {{
+                        $folderRemovalStatus = "Checking folder $folderRecheckIndex of $folderRecheckTotal before removal; earlier files may already have been removed."
+                        Write-Progress -Activity "Removing selected folders" -Status $folderRemovalStatus -PercentComplete ([int](100 * $folderRecheckIndex / $folderRecheckTotal))
+                        Write-Host "  $folderRemovalStatus" -ForegroundColor Gray
+                        $lastFolderRemovalNoticeSeconds = $elapsedFolderRemovalSeconds
+                    }}
                 }}
                 Assert-CleanupEntryPathWithinSelection $target $entry
                 if ($entry.PSIsContainer) {{
+                    $folderRemovalProgressAction = New-CleanupHashProgressAction $folderRecheckIndex $folderRecheckTotal "folder"
                     [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
-                        $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupStreamsSha256)
+                        $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupStreamsSha256,
+                        $folderRemovalProgressAction)
                     $targetFoldersRemoved++
                 }} else {{
+                    $fileRemovalProgressAction = New-CleanupHashProgressAction $fileRecheckIndex $fileRecheckTotal "file"
                     [{native_class_name}]::DeleteFileIfUnchanged(
                         $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupSha256,
-                        [long]$entry.CleanupLength, [long]$entry.CleanupLastWriteTimeUtcFileTime)
+                        [long]$entry.CleanupLength, [long]$entry.CleanupLastWriteTimeUtcFileTime,
+                        $fileRemovalProgressAction)
                     $targetFilesRemoved++
                     $targetBytesRemoved += [decimal]$entry.CleanupLength
                     $elapsedRemovalSeconds = [int]$fileRemovalWatch.Elapsed.TotalSeconds
@@ -3036,14 +3115,18 @@ foreach ($target in $cleanTargets) {{
                 }}
             }}
             if ($fileRecheckTotal -gt 0) {{ Write-Progress -Activity "Removing selected files" -Completed }}
+            if ($folderRecheckTotal -gt 0) {{ Write-Progress -Activity "Removing selected folders" -Completed }}
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
             }} else {{
                 # Delete only an empty root. A new child may have appeared after
                 # the earlier enumeration; recursive removal here could erase
                 # data that was never included in the reviewed cleanup snapshot.
+                Write-Host "Checking the selected folder's extra Windows file data before final removal; this check does not remove files." -ForegroundColor Gray
+                $rootRemovalProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder"
                 [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
-                    $target.Path, [string]$target.CleanupIdentity, [string]$target.CleanupStreamsSha256)
+                    $target.Path, [string]$target.CleanupIdentity, [string]$target.CleanupStreamsSha256,
+                    $rootRemovalProgressAction)
                 $targetFoldersRemoved++
             }}
         }} else {{
@@ -3078,9 +3161,11 @@ foreach ($target in $cleanTargets) {{
                 continue
             }}
             Write-Progress -Activity "Checking selected file contents" -Status "Confirming and removing the reviewed file" -PercentComplete 50
+            $fileRemovalProgressAction = New-CleanupHashProgressAction 1 1 "file"
             [{native_class_name}]::DeleteFileIfUnchanged(
                 $target.Path, [string]$target.CleanupIdentity, [string]$cleanupHash,
-                [long]$cleanupLength, [long]$cleanupLastWriteTimeUtcFileTime)
+                [long]$cleanupLength, [long]$cleanupLastWriteTimeUtcFileTime,
+                $fileRemovalProgressAction)
             $targetFilesRemoved++
             $targetBytesRemoved += [decimal]$item.Length
             Write-Progress -Activity "Checking selected file contents" -Completed

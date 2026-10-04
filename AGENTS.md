@@ -34,7 +34,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Use consistent everyday terms, explain necessary technical terms at the point of use, and check English-language output for accidental untranslated or garbled text.
 - For long operations, say what is being checked and show periodic progress so users can tell the program is still working.
 - For cleanup startup and safety rechecks, announce each phase before beginning potentially slow file or folder checks. Keep progress visible during those checks, including the current item and overall count; do not leave a message such as `Cleaning: npm cache...` as the only output while preflight work continues.
-- During long file-content checks, show progress within the current large file (bytes checked and percentage) as well as the overall file or folder count.
+- During long file-content checks, including the final locked content recheck before removal and named data streams, show progress within the current item (bytes checked and percentage) as well as the overall file or folder count.
 - For long recovery restores, show bytes and percentage while copying or verifying individual files and archive contents, and a periodic heartbeat while Robocopy restores a directory. Count each top-level restore item only after its restore step finishes; label conflicts and failures accurately.
 
 ## Development

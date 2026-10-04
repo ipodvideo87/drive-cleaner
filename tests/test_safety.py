@@ -2462,7 +2462,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             payload = nested / "payload.bin"
             payload.write_bytes(b"ordinary cached file")
             streams = (
-                (str(target) + ":DriveCleanrRootTest:$DATA", b"root stream"),
+                (str(target) + ":DriveCleanrRootTest:$DATA", b"R" * (2 * 1024 * 1024)),
                 (str(nested) + ":DriveCleanrNestedTest:$DATA", b"nested directory stream"),
                 (str(payload) + ":DriveCleanrFileTest:$DATA", b"file stream payload"),
             )
@@ -2493,6 +2493,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertGreaterEqual(
+                result.stdout.count("Folder 1 of 1: 2.0 MB of 2.0 MB checked (100%)."), 2,
+                "Large folder data streams should report progress during checks.",
+            )
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_cleanup_preserves_file_when_named_stream_changes_after_review(self):
@@ -2981,6 +2985,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target = Path(target_temp) / "large-cache.bin"
             with target.open("wb") as stream:
                 stream.truncate(128 * 1024 * 1024)
+            named_stream_path = str(target) + ":DriveCleanrProgressTest:$DATA"
+            try:
+                with open(named_stream_path, "wb") as named_stream:
+                    named_stream.truncate(2 * 1024 * 1024)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams: {exc}")
+            if not backup._named_data_streams(str(target)):
+                self.skipTest("Temporary volume does not expose named data streams")
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
@@ -3012,6 +3024,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
         self.assertIn("File 1 of 1: 64.0 MB of 128.0 MB checked (50%).", result.stdout)
         self.assertIn("File 1 of 1: 128.0 MB of 128.0 MB checked (100%).", result.stdout)
+        self.assertGreaterEqual(
+            result.stdout.count("File 1 of 1: 64.0 MB of 128.0 MB checked (50%)."), 2,
+            "The locked check immediately before deletion must also report byte progress.",
+        )
+        self.assertIn("File 1 of 1: 2.0 MB of 2.0 MB checked (100%).", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_cleanup_modes_still_reject_stale_and_project_targets(self):
