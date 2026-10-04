@@ -3,13 +3,14 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Index cleanup-rule matching by path components and cache configured temporary roots so large scan exports avoid checking every rule against every row.
+- Keep recovery backups opt-in in every cleanup mode: interactive cleanup defaults to no backup, and reviewed `-Force` runs create one only when `-Backup` is supplied. Continue to verify any requested backup before the first removal.
 - Filter detected projects, redirected paths, and missing files before building the bounded largest-file shortlist, so ineligible large entries cannot crowd eligible files out of manual review.
 - Show up to 100 of the largest unclassified files in a separate manual-review list, with exact-file-only selection, protected/project filtering, no bulk selection, and a typed acknowledgement before a manual cleanup plan can be created.
 - Include each folder's eligible descendant file-data size in cleanup-plan previews, and distinguish overlapping folder-row totals from the deduplicated overall total.
 - List retained scans newest first in the guided review picker, including recognized legacy scan folders, with numeric selection and pagination.
 - Limit scan retention cleanup to validated Drive Cleanr-generated scan exports and their exact paired plans; preserve unrelated CSV files and user-authored scripts.
 - Reject restore destinations inside or above Drive Cleanr backup-storage roots before asking for approval or writing restored data.
-- Create and verify a recovery backup by default when a reviewed generated plan runs with `-Force`; allow users to skip it explicitly with `-NoBackup`. Interactive backup prompts still default to no backup.
 - Skip and count scan paths with hidden formatting or terminal-control characters so cleanup targets cannot be visually spoofed in the terminal.
 - Let guided users enter the full path to an installed or portable scanner executable when automatic discovery fails, and validate it before passing it to the scan process.
 - Use the project directory consistently in `SKILL.md` script examples and guard its quoted YAML description against regressions.

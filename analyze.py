@@ -14,6 +14,7 @@ import json
 import re
 import tempfile
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 import scan
@@ -964,6 +965,37 @@ def _path_components(path, drive_tail=None):
     return [part for part in drive_tail.split("\\") if part]
 
 
+@lru_cache(maxsize=32)
+def _configured_temp_root_components(temp, tmp, local_app_data, windows_dir, system_root, default_temp):
+    roots = [temp, tmp, default_temp]
+    if local_app_data:
+        roots.append(ntpath.join(local_app_data, "Temp"))
+    windows_dir = windows_dir or system_root
+    if windows_dir:
+        roots.extend((ntpath.join(windows_dir, "Temp"), ntpath.join(windows_dir, "SystemTemp")))
+    else:
+        roots.extend((r"C:\Windows\Temp", r"C:\Windows\SystemTemp"))
+
+    result = []
+    for root in roots:
+        if not root:
+            continue
+        normalized_root = str(root).replace("/", "\\")
+        drive, tail = ntpath.splitdrive(normalized_root)
+        if not drive or not tail.startswith("\\"):
+            continue
+        result.append((drive.casefold(), tuple(_path_components(normalized_root, tail))))
+    return tuple(result)
+
+
+def _current_temp_root_components():
+    return _configured_temp_root_components(
+        os.environ.get("TEMP"), os.environ.get("TMP"),
+        os.environ.get("LOCALAPPDATA"), os.environ.get("WINDIR"),
+        os.environ.get("SystemRoot"), tempfile.gettempdir(),
+    )
+
+
 _EXCLUDE_COMPONENTS = tuple(tuple(_path_components(pattern)) for pattern in EXCLUDE_PATTERNS)
 _CLEANABLE_COMPONENTS = {
     priority: tuple((pattern_info, tuple(_path_components(pattern_info["pattern"])))
@@ -979,6 +1011,33 @@ _CLEANABLE_RULES = tuple(sorted(
     # broad Temp match must not hide a caution label such as Cache or Logs.
     key=lambda rule: (-len(rule[2]), _CLEANUP_TIE_BREAK_RANK[rule[0]]),
 ))
+_CLEANUP_RULES_BY_COMPONENT = {}
+_CLEANUP_RULES_BY_SEQUENCE = {}
+_CLEANUP_PREFIX_RULES = []
+for _rule_index, (_priority, _pattern_info, _pattern_components) in enumerate(_CLEANABLE_RULES):
+    if _pattern_info.get("component_prefix"):
+        _CLEANUP_PREFIX_RULES.append((
+            _rule_index,
+            _pattern_components[-1],
+            bool(_pattern_info.get("component_prefix_requires_suffix")),
+        ))
+    elif len(_pattern_components) == 1:
+        _CLEANUP_RULES_BY_COMPONENT.setdefault(_pattern_components[0], []).append(_rule_index)
+    else:
+        _CLEANUP_RULES_BY_SEQUENCE.setdefault(_pattern_components, []).append(_rule_index)
+_CLEANUP_RULES_BY_COMPONENT = {
+    component: tuple(indices)
+    for component, indices in _CLEANUP_RULES_BY_COMPONENT.items()
+}
+_CLEANUP_RULES_BY_SEQUENCE = {
+    sequence: tuple(indices)
+    for sequence, indices in _CLEANUP_RULES_BY_SEQUENCE.items()
+}
+_CLEANUP_PREFIX_RULES = tuple(_CLEANUP_PREFIX_RULES)
+_CLEANUP_KNOWN_TEMP_CATCHALL_RULES = tuple(
+    index for index, (_priority, info, _components) in enumerate(_CLEANABLE_RULES)
+    if info.get("known_temp_location") and not info.get("component_match_required")
+)
 _EXCLUDE_SINGLE_COMPONENTS = frozenset(
     pattern[0] for pattern in _EXCLUDE_COMPONENTS if len(pattern) == 1
 )
@@ -1006,6 +1065,28 @@ def _path_match_index(components):
     return component_set, sequences
 
 
+def _candidate_cleanup_rules(path, components, component_set, sequences,
+                             known_temp_location=None):
+    """Return only rules whose exact path components could match this path."""
+    if known_temp_location is None:
+        known_temp_location = _is_known_temp_location(path, components)
+    candidate_indices = set()
+    for component in component_set:
+        candidate_indices.update(_CLEANUP_RULES_BY_COMPONENT.get(component, ()))
+    for path_sequences in sequences.values():
+        for path_sequence in path_sequences:
+            candidate_indices.update(_CLEANUP_RULES_BY_SEQUENCE.get(path_sequence, ()))
+    for index, prefix, requires_suffix in _CLEANUP_PREFIX_RULES:
+        if any(
+                component.startswith(prefix) and
+                (not requires_suffix or len(component) > len(prefix))
+                for component in components):
+            candidate_indices.add(index)
+    if known_temp_location:
+        candidate_indices.update(_CLEANUP_KNOWN_TEMP_CATCHALL_RULES)
+    return (_CLEANABLE_RULES[index] for index in sorted(candidate_indices))
+
+
 def _is_excluded_path(path, components=None, component_set=None, sequences=None):
     """Return whether a path matches a protected-path fragment."""
     components = components if components is not None else _path_components(path)
@@ -1020,7 +1101,8 @@ def _is_excluded_path(path, components=None, component_set=None, sequences=None)
                for component in components for prefix in EXCLUDE_COMPONENT_PREFIXES)
 
 
-def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=None):
+def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set,
+                          sequences, path=None, known_temp_location=None):
     """Match a rule's component pattern and any required path-root prefix."""
     root = pattern_info.get("root")
     if root:
@@ -1053,13 +1135,16 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
             component_match = prefix_match
         else:
             component_match = component_match or prefix_match
+    if pattern_info.get("known_temp_location") or pattern_info.get("unknown_temp_location"):
+        if known_temp_location is None:
+            known_temp_location = _is_known_temp_location(path, components)
     if pattern_info.get("known_temp_location"):
-        if not _is_known_temp_location(path, components):
+        if not known_temp_location:
             return False
         if pattern_info.get("component_match_required") and not component_match:
             return False
     elif pattern_info.get("unknown_temp_location"):
-        if not component_match or _is_known_temp_location(path, components):
+        if not component_match or known_temp_location:
             return False
     elif not component_match:
         return False
@@ -1088,22 +1173,12 @@ def _is_known_temp_location(path, components):
         if components[2:5] == ["appdata", "local", "temp"]:
             return True
 
-    roots = [os.environ.get("TEMP"), os.environ.get("TMP"), tempfile.gettempdir()]
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        roots.append(ntpath.join(local_app_data, "Temp"))
-    windows_dir = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
-    if windows_dir:
-        roots.extend((ntpath.join(windows_dir, "Temp"), ntpath.join(windows_dir, "SystemTemp")))
-    else:
-        roots.extend((r"C:\Windows\Temp", r"C:\Windows\SystemTemp"))
-
-    for root in roots:
-        if not root:
-            continue
-        if path and (_path_key(path) == _path_key(root) or _is_under(path, root)):
-            return True
-    return False
+    drive = ntpath.splitdrive(str(path).replace("/", "\\"))[0].casefold()
+    return any(
+        drive == root_drive and len(components) >= len(root_components) and
+        tuple(components[:len(root_components)]) == root_components
+        for root_drive, root_components in _current_temp_root_components()
+    )
 
 
 def _is_known_temp_root(path, components=None):
@@ -1119,11 +1194,20 @@ def _matches_cleanup_rule(path, priorities, name):
     """Require the analyzer's most-specific cleanup rule, priority, and label."""
     components = _path_components(path)
     component_set, sequences = _path_match_index(components)
-    for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+    known_temp_location = _is_known_temp_location(path, components)
+    known_temp_root = None
+    for priority, pattern_info, pattern_components in _candidate_cleanup_rules(
+            path, components, component_set, sequences, known_temp_location):
         if (pattern_info.get("known_temp_location") and
-                _is_known_temp_root(path, components)):
+                (known_temp_root if known_temp_root is not None else
+                 _is_known_temp_root(path, components))):
+            known_temp_root = True
             continue
-        if _cleanup_rule_matches(pattern_info, pattern_components, components, component_set, sequences, path=path):
+        if pattern_info.get("known_temp_location") and known_temp_root is None:
+            known_temp_root = False
+        if _cleanup_rule_matches(
+                pattern_info, pattern_components, components, component_set,
+                sequences, path=path, known_temp_location=known_temp_location):
             return priority in priorities and pattern_info["name"] == name
     return False
 
@@ -1132,13 +1216,20 @@ def _matches_any_cleanup_rule(path):
     """Return whether a path is covered by any automatic cleanup rule."""
     components = _path_components(path)
     component_set, sequences = _path_match_index(components)
-    for _priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+    known_temp_location = _is_known_temp_location(path, components)
+    known_temp_root = None
+    for _priority, pattern_info, pattern_components in _candidate_cleanup_rules(
+            path, components, component_set, sequences, known_temp_location):
         if (pattern_info.get("known_temp_location") and
-                _is_known_temp_root(path, components)):
+                (known_temp_root if known_temp_root is not None else
+                 _is_known_temp_root(path, components))):
+            known_temp_root = True
             continue
+        if pattern_info.get("known_temp_location") and known_temp_root is None:
+            known_temp_root = False
         if _cleanup_rule_matches(
                 pattern_info, pattern_components, components, component_set,
-                sequences, path=path):
+                sequences, path=path, known_temp_location=known_temp_location):
             return True
     return False
 
@@ -1631,9 +1722,13 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 # these rules can be shown separately for deliberate manual
                 # review, but never become automatic cleanup suggestions.
                 matched_cleanup_rule = False
-                for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+                known_temp_location = _is_known_temp_location(path, path_components)
+                for priority, pattern_info, pattern_components in _candidate_cleanup_rules(
+                        path, path_components, path_component_set, path_sequences,
+                        known_temp_location):
                     if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
-                                             path_component_set, path_sequences, path=path):
+                                             path_component_set, path_sequences, path=path,
+                                             known_temp_location=known_temp_location):
                         matched_cleanup_rule = True
                         # Folder browsing honors the review level the user
                         # selected. Do not let a more cautious match fall
@@ -2502,7 +2597,7 @@ if (-not $PreviewOnly -and $CreateBackup) {{
 }} elseif (-not $PreviewOnly -and $SkipBackup) {{
     $backupEnabled = $false
 }} elseif (-not $PreviewOnly -and $Force) {{
-    $backupEnabled = $true
+    $backupEnabled = $false
 }} elseif (-not $PreviewOnly -and -not $Force) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{

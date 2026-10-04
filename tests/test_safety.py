@@ -1555,6 +1555,46 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_indexed_cleanup_dispatch_includes_every_exhaustive_rule_match(self):
+        for rule_index, (_priority, pattern_info, pattern_components) in enumerate(
+                analyze._CLEANABLE_RULES):
+            if pattern_info.get("root"):
+                base = ntpath.join("C:\\", *analyze._path_components(pattern_info["root"]))
+            elif pattern_info.get("browser_profile"):
+                base = r"C:\Users\Test\AppData\Local\Google\Chrome\User Data\Default"
+            elif pattern_info.get("known_temp_location"):
+                base = r"C:\Users\Test\AppData\Local\Temp"
+            else:
+                base = r"C:\Synthetic"
+            components = analyze._path_components(base)
+            witness_components = list(pattern_components)
+            if pattern_info.get("component_prefix_requires_suffix"):
+                witness_components[-1] += "-review"
+            path = ntpath.join("C:\\", *(components + witness_components))
+            path_components = analyze._path_components(path)
+            component_set, sequences = analyze._path_match_index(path_components)
+            known_temp_location = analyze._is_known_temp_location(path, path_components)
+            indexed_rule_ids = {
+                id(rule) for rule in analyze._candidate_cleanup_rules(
+                    path, path_components, component_set, sequences, known_temp_location
+                )
+            }
+            indexed_indices = {
+                index for index, rule in enumerate(analyze._CLEANABLE_RULES)
+                if id(rule) in indexed_rule_ids
+            }
+            exhaustive_indices = {
+                index for index, (_candidate_priority, candidate_info, candidate_components)
+                in enumerate(analyze._CLEANABLE_RULES)
+                if analyze._cleanup_rule_matches(
+                    candidate_info, candidate_components, path_components,
+                    component_set, sequences, path=path,
+                    known_temp_location=known_temp_location,
+                )
+            }
+            self.assertIn(rule_index, indexed_indices, path)
+            self.assertLessEqual(exhaustive_indices, indexed_indices, path)
+
     def test_generic_cache_and_log_labels_explain_the_uncertainty(self):
         rows = [
             r"C:\Users\A\AppData\Local\App\Cache\settings.db",
@@ -3125,7 +3165,39 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("Cancelled; nothing was changed.", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_noninteractive_cleanup_creates_verified_backup_by_default(self):
+    def test_noninteractive_cleanup_creates_verified_backup_when_requested(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home() / "AppData" / "Local" / "Temp"
+        with (
+            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
+            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"temporary fixture selected without backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_noninteractive_cleanup_does_not_create_backup_by_default(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -3152,9 +3224,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
-            self.assertIn("Backup created: mock-backup", result.stdout)
-            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+            self.assertIn("No backup will be created", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
+            self.assertNotIn("Creating backup before cleanup", result.stdout)
+            self.assertFalse(backup_calls.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_noninteractive_cleanup_no_backup_switch_skips_backup(self):
