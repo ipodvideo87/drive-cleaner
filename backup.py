@@ -154,7 +154,7 @@ def _is_reparse_point(path: str) -> bool:
         metadata = os.lstat(path)
     except (FileNotFoundError, NotADirectoryError):
         return False
-    except OSError:
+    except (OSError, ValueError):
         # Unknown path state must not be treated as safe for backup, restore,
         # or deletion checks.
         return True
@@ -1351,8 +1351,9 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     items_by_path = {}
     seen_source_paths = []
     for item in manifest["items"]:
-        if not isinstance(item, dict) or not isinstance(item.get("original_path"), str):
-            print("Refusing to verify a malformed backup manifest")
+        if (not isinstance(item, dict) or
+                not _valid_restore_target(item.get("original_path"))):
+            print("Refusing to verify a malformed or unsafe backup manifest")
             return False
         key = _windows_path_key(item["original_path"])
         if any(_paths_overlap(item["original_path"], previous) for previous in seen_source_paths):
@@ -1378,7 +1379,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         backup_format = item.get("format")
         source_digest = item.get("source_integrity_sha256")
         payload_digest = item.get("integrity_sha256")
-        if (backup_format not in {"file", "copy", "zip"} or
+        if (not isinstance(backup_format, str) or backup_format not in {"file", "copy", "zip"} or
                 not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_digest) or
                 not isinstance(payload_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", payload_digest) or
                 not isinstance(backup_path, str)):
@@ -1507,6 +1508,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
         backup_path = item.get("backup_path")
         backup_format = item.get("format")
         if (not _valid_restore_target(original_path) or not isinstance(backup_path, str) or
+                not isinstance(backup_format, str) or
                 backup_format not in {"file", "copy", "zip"}):
             print("Refusing to restore an invalid backup manifest entry")
             return False

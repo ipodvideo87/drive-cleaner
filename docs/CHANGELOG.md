@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Reject malformed backup manifest field types and unsafe verification source paths cleanly before source filesystem checks.
 - Render unrecognized backup manifest statuses as `Unknown` so malformed backups remain manageable for deletion without being treated as restorable.
 - Reject Windows-invalid filename characters in restore destinations and ZIP entries before presenting or writing restored data.
 - Validate guided restore destinations before prompting; reject incomplete, malformed, or overlapping paths and escape terminal controls in displayed paths.

@@ -5414,6 +5414,72 @@ class BackupSafetyTests(unittest.TestCase):
             message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
             self.assertIn("duplicate or overlapping source paths", message)
 
+    def test_backup_verification_rejects_invalid_source_path_without_filesystem_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            invalid_source = "C:\\Users\\ExampleUser\\cache.bin\x00"
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": invalid_source,
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir), \
+                 redirect_stdout(output):
+                self.assertFalse(backup.verify_backup("backup_20261004_123456_000004"))
+
+            self.assertIn("malformed or unsafe backup manifest", output.getvalue())
+
+    def test_backup_manifest_rejects_unhashable_format_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": str(Path(temp_dir) / "source.bin"),
+                    "backup_path": str(payload),
+                    "format": ["file"],
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            for operation in (backup.verify_backup, backup.restore_backup):
+                with self.subTest(operation=operation.__name__), redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir):
+                    self.assertFalse(operation("backup_20261004_123456_000005"))
+
+    def test_backup_and_verification_reject_nul_payload_path_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": str(Path(temp_dir) / "source.bin"),
+                    "backup_path": str(payload) + "\x00",
+                    "format": "file",
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            for operation in (backup.verify_backup, backup.restore_backup):
+                with self.subTest(operation=operation.__name__), redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir):
+                    self.assertFalse(operation("backup_20261004_123456_000006"))
+
     def test_backup_source_beneath_a_reparse_parent_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "linked-parent" / "cache.bin"
