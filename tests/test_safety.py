@@ -4684,6 +4684,29 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=True)
 
+    def test_backup_menu_keeps_unknown_status_backup_deletable(self):
+        backup_id = "backup_20261004_123456_000003"
+        manifest = {
+            "id": backup_id, "status": [], "items": ["malformed entry"],
+            "timestamp": "2026-10-04T12:34:56",
+        }
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / backup_id
+            backup_dir.mkdir()
+            (backup_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with mock.patch("builtins.input", side_effect=["4", backup_id, "DELETE", "0"]), \
+                 mock.patch.object(backup, "_existing_backup_roots", return_value=[str(root)]), \
+                 mock.patch.object(backup, "delete_backup", return_value=True) as delete, \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 redirect_stdout(output):
+                drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(backup_id)
+        self.assertIn("Unknown", output.getvalue())
+        self.assertIn("Backup deleted.", output.getvalue())
+
     def test_backup_menu_rejects_malformed_or_terminal_control_restore_paths(self):
         backup_id = "backup_20261004_123456_000001"
         invalid_cases = (

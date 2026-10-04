@@ -1790,11 +1790,13 @@ def print_backups_table(backups: List[Dict]):
         timestamp = _safe_terminal_text(backup.get("timestamp", "Unknown")[:19].replace("T", " "))
         size = _safe_terminal_text(backup.get("total_size_formatted", "Unknown"))
         items = len(backup.get("items", []))
-        status = {
+        status_labels = {
             "completed": "Completed",
             "partial": "Partial",
             "in_progress": "In progress",
-        }.get(backup.get("status"), "Unknown")
+        }
+        raw_status = backup.get("status")
+        status = status_labels.get(raw_status, "Unknown") if isinstance(raw_status, str) else "Unknown"
         print(f"{backup_id:<30} {timestamp:<20} {size:<12} {items:<8} {status:<14}")
         backup_root = backup.get("backup_root")
         if isinstance(backup_root, str) and backup_root:

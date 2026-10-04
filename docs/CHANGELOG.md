@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Render unrecognized backup manifest statuses as `Unknown` so malformed backups remain manageable for deletion without being treated as restorable.
 - Reject Windows-invalid filename characters in restore destinations and ZIP entries before presenting or writing restored data.
 - Validate guided restore destinations before prompting; reject incomplete, malformed, or overlapping paths and escape terminal controls in displayed paths.
 - Make `D` and `B` distinct in the nested file/folder picker: `D` keeps picks from the current browse, while `B` returns without adding them and preserves earlier main-list selections.
