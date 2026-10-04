@@ -1585,6 +1585,11 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
                     if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
                                              path_component_set, path_sequences, path=path):
+                        # Folder browsing honors the review level the user
+                        # selected. Do not let a more cautious match fall
+                        # through to a broader, lower-risk label.
+                        if expand_paths and expand_priority is not None and priority != expand_priority:
+                            break
                         # Type metadata is only needed for candidates; most
                         # scanner rows are ordinary files we can skip here.
                         if scan._path_has_reparse_component(path.rstrip("\\/")):
@@ -3001,6 +3006,30 @@ def parse_cleanup_selection(answer, item_count):
     return selected
 
 
+def _folder_browse_skip_lines(results):
+    """Summarize why matching scan candidates were kept off the folder list."""
+    lines = []
+    stale_count = results.get("stale_candidate_count", 0)
+    if stale_count:
+        lines.append(f"Skipped {stale_count} candidate entries that no longer exist. Rescan to refresh them.")
+    lines.extend(_project_protection_lines(results))
+    unclassified_count = results.get("unclassified_candidate_count", 0)
+    if unclassified_count:
+        lines.append(f"Skipped {unclassified_count} entries whose file or folder type could not be confirmed.")
+    type_mismatch_count = results.get("type_mismatch_count", 0)
+    if type_mismatch_count:
+        lines.append(f"Skipped {type_mismatch_count} entries whose type changed since the scan. Rescan to refresh them.")
+    reparse_count = results.get("reparse_candidate_count", 0)
+    if reparse_count:
+        lines.append(f"Skipped {reparse_count} paths that cross a link or could not be checked.")
+    temp_root_count = results.get("temp_root_candidate_count", 0)
+    if temp_root_count:
+        lines.append(
+            f"Skipped {temp_root_count} recognized temporary folders; matching entries inside are considered separately."
+        )
+    return lines
+
+
 def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
     """Find and let the user choose exact scan entries inside one listed folder."""
     if not folder_entries:
@@ -3049,6 +3078,9 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
         return []
     print("\rFolder search complete.                              ", flush=True)
 
+    for line in _folder_browse_skip_lines(expanded_results):
+        print(line)
+
     expanded = expanded_results.get("expanded_candidates", [])
     entries = [
         (candidate.get("priority"), candidate.get("item"))
@@ -3062,11 +3094,18 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
     ]
     entries.sort(key=lambda pair: (-pair[1].get("size", 0), _path_key(pair[1].get("path", ""))))
     if not entries:
-        print("No matching files or folders were found inside this folder in the saved scan.")
-        print("If the scan did not include individual files, scan again with files included to choose them separately.")
+        if priority == "all":
+            print("No matching eligible scan entries were found inside this folder.")
+        else:
+            tier_name = CLEANABLE_PATTERNS[folder_priority]["name"]
+            print(f"No matching entries were found for {tier_name} inside this folder.")
+            print("Choose All review levels to look for entries assigned to other levels.")
+        print("Only entries recorded in the scan can be selected. If you expected individual files, scan again with files included.")
         return []
 
     print(f"Found {len(entries)} matching scan entries inside the folder.")
+    if priority != "all":
+        print(f"Showing {CLEANABLE_PATTERNS[folder_priority]['name']} entries only; choose All review levels to include other levels.")
     print("Selecting a listed folder includes its eligible contents; protected data and detected projects remain protected.")
     page_size = 25
     selected = {}

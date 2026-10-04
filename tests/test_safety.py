@@ -251,14 +251,23 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "size_formatted": "1000 B", "kind": "Directory", "name": "npm cache",
         }
         output = io.StringIO()
-        with mock.patch.object(analyze, "analyze_csv", return_value={"expanded_candidates": []}), \
+        with mock.patch.object(analyze, "analyze_csv", return_value={
+                "expanded_candidates": [], "stale_candidate_count": 1,
+                "project_candidate_count": 1,
+                "project_roots": [{"path": r"C:\Users\A\project", "marker": ".git"}],
+                "reparse_candidate_count": 2,
+            }), \
              mock.patch("builtins.input", return_value="1"), \
              redirect_stdout(output):
             selected = analyze._browse_folder_candidates(
                 "saved-scan.csv", 50, [("high", folder_item)], "high"
             )
         self.assertEqual(selected, [])
-        self.assertIn("If the scan did not include individual files", output.getvalue())
+        self.assertIn("Only entries recorded in the scan can be selected", output.getvalue())
+        self.assertIn("no longer exist. Rescan to refresh them", output.getvalue())
+        self.assertIn("Detected project folders kept off the cleanup list", output.getvalue())
+        self.assertIn("paths that cross a link or could not be checked", output.getvalue())
+        self.assertIn("Choose All review levels", output.getvalue())
 
     def test_generated_plan_contains_only_explicitly_selected_candidates(self):
         first_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
@@ -456,14 +465,16 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.run_tui(initial_csv=str(csv_path))
             generate.assert_not_called()
 
-    def analyze_rows(self, rows, **analyze_options):
+    def analyze_rows(self, rows, exists=None, **analyze_options):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=["File Name", "Size", "Allocated", "DRIVECAPACITY", "FREESPACE", "USEDSPACE"])
                 writer.writeheader()
                 writer.writerows(rows)
-            with mock.patch("analyze.os.path.exists", return_value=True):
+            with mock.patch(
+                    "analyze.os.path.exists",
+                    side_effect=exists or (lambda _path: True)):
                 with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
                         return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
@@ -619,11 +630,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
         allowed_file = folder + "content-v2\\allowed.bin"
         protected_file = folder + "content-v2\\protected-token.bin"
         project_file = folder + "content-v2\\project-cache\\build.bin"
+        linked_file = folder + "content-v2\\junction-cache\\linked.bin"
         rows = [
             {"File Name": folder, "Size": "1000000"},
             {"File Name": allowed_file, "Size": "800000"},
             {"File Name": protected_file, "Size": "700000"},
             {"File Name": project_file, "Size": "600000"},
+            {"File Name": linked_file, "Size": "500000"},
         ]
 
         def excluded(path, *_args, **_kwargs):
@@ -632,7 +645,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         def in_project(path, *_args, **_kwargs):
             return "project-cache" in str(path).casefold()
 
-        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+        with mock.patch.object(
+                scan, "_path_has_reparse_component",
+                side_effect=lambda path: "junction-cache" in str(path).casefold()), \
              mock.patch.object(analyze, "_is_excluded_path", side_effect=excluded), \
              mock.patch.object(analyze, "_inside_project_tree", side_effect=in_project):
             expanded = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
@@ -642,6 +657,50 @@ class AnalyzeSafetyTests(unittest.TestCase):
             [allowed_file],
         )
         self.assertEqual(expanded["project_candidate_count"], 1)
+        self.assertEqual(expanded["reparse_candidate_count"], 1)
+
+    def test_folder_expansion_omits_stale_file_rows_and_reports_them(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        current_file = folder + r"content-v2\current.bin"
+        stale_file = folder + r"content-v2\stale.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": current_file, "Size": "800000"},
+            {"File Name": stale_file, "Size": "700000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False):
+            expanded = self.analyze_rows(
+                rows,
+                exists=lambda path: str(path).rstrip("\\/").casefold() != stale_file.rstrip("\\/").casefold(),
+                expand_under=folder,
+                expand_priority="high",
+            )
+
+        self.assertEqual(expanded["stale_candidate_count"], 1)
+        self.assertEqual(
+            [candidate["item"]["path"] for candidate in expanded["expanded_candidates"]],
+            [current_file],
+        )
+
+    def test_folder_expansion_does_not_relabel_more_cautious_entries_as_selected_tier(self):
+        folder = r"C:\Users\A\AppData\Local\Temp\cleanup-area" + "\\"
+        gradle_cache = folder + r".gradle\caches" + "\\"
+        cache_file = gradle_cache + r"modules-2\package.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": gradle_cache, "Size": "800000"},
+            {"File Name": cache_file, "Size": "700000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False):
+            high_only = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+            all_levels = self.analyze_rows(rows, expand_under=folder)
+
+        self.assertEqual(high_only["expanded_candidates"], [])
+        self.assertEqual(
+            [(candidate["priority"], candidate["item"]["path"])
+             for candidate in all_levels["expanded_candidates"]],
+            [("low", gradle_cache), ("low", cache_file)],
+        )
 
     def test_solution_project_and_requirements_files_protect_project_caches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
