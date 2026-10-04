@@ -3137,13 +3137,14 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
                 f"{item.get('size_formatted', 'unknown size')} | {item.get('name', 'candidate')}"
             )
             print(f"      {item_path}")
-        print("Numbers add or remove entries. N/P changes page; F filters by name or path; D finishes; B returns.")
+        print("Numbers add or remove entries. N/P changes page; F filters by name or path; D finishes and keeps these picks; B returns without adding them.")
         answer = input("Choose entries on this page: ").strip()
         command = answer.casefold()
         if command in {"d", "done", ""}:
             return list(selected.values())
         if command in {"b", "back"}:
-            return list(selected.values())
+            print("Folder browse cancelled; its entries were not added to the cleanup plan.")
+            return []
         if command in {"n", "next"}:
             if page + 1 < page_count:
                 page += 1
@@ -3169,7 +3170,7 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
             print(str(exc))
             continue
         if indexes is None:
-            print("Enter item numbers, N/P, F, D, or B.")
+            print("Enter item numbers, N/P, F, D to keep these picks, or B to discard them and return.")
             continue
         for index in indexes:
             candidate_priority, item = page_entries[index - 1]

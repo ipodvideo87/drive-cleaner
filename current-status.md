@@ -1,6 +1,6 @@
 # Current status
 
-Updated: 2026-10-03
+Updated: 2026-10-04
 
 GitHub repository: https://github.com/ipodvideo87/drive-cleaner (public; local scan exports and generated plans are ignored).
 
@@ -10,7 +10,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 
 ## Current capabilities
 
-- Guided prompts use the same plain-language terms from scanning through review, file/folder selection, cleanup-plan confirmation, and recovery-backup management. The picker explicitly says you can choose individual files, folders, or both, and warns that choosing a folder may also clean eligible contents inside it. Enter `D` to browse scan entries that the summary grouped under a folder; the paginated browser supports filtering and adds only exact selected paths to the cleanup plan. Browsing follows the selected review group, and skipped stale, project, or linked entries are explained. Reports keep their compact, non-overlapping folder totals.
+- Guided prompts use the same plain-language terms from scanning through review, file/folder selection, cleanup-plan confirmation, and recovery-backup management. The picker explicitly says you can choose individual files, folders, or both, and warns that choosing a folder may also clean eligible contents inside it. Enter `D` to browse scan entries that the summary grouped under a folder; the paginated browser supports filtering and adds only exact selected paths to the cleanup plan. In that browser, `D` keeps its picks and returns to the main list; `B` returns without adding picks from the current browse, while preserving earlier main-list selections. Browsing follows the selected review group, and skipped stale, project, or linked entries are explained. Reports keep their compact, non-overlapping folder totals.
 - Guided single-command menu starts with an original ASCII space-map welcome screen, a short scan-to-clean workflow, and a clear statement that scans and reviews do not delete files; menu choices remain visible immediately below. The menu covers scanning, previous-scan review, and backup management; scan option prompts retry invalid yes/no and numeric input and support explicit cancellation. The review menu, direct analyzer, and backup confirmations cancel cleanly on Ctrl+C or end-of-input.
 - Project detection protects caches under VS Code `.vscode` workspace folders, alongside `*.code-workspace` files, and in folders with AI project guidance or settings such as `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`, `.cursorrules`, `.cursor`, `.claude`, `.github`, or `copilot-instructions.md`, including nested cleanup-plan checks. Shared guidance/settings at the profile root do not make the entire user profile a project. The profile-level `.vscode` extensions directory remains protected.
 - Agent/editor settings folders `.claude`, `.cursor`, `.gemini`, `.github`, `.opencode`, and `.windsurf` are excluded from cleanup suggestions because they can hold authentication, user settings, history, and project instructions; close names such as `.cursorBackup` still follow normal review rules.
@@ -68,6 +68,7 @@ This is a Python command-line utility for Windows that uses WizTree or WinDirSta
 
 ## Verification snapshot
 
+- Nested folder-picker exit behavior (2026-10-04): `D` keeps items chosen during the current browse; `B` returns without adding those items and preserves main-list selections. An end-to-end mocked-picker regression covers both behaviors. All 256 local safety tests passed in 342.789 seconds; Python compilation and `git diff --check` passed. Cleanup/restore coverage used isolated fixtures; no real user paths were cleaned.
 - Cleanup knowledge-base alignment (2026-10-03): documented the automatic high/medium/low rule groups and identified guide examples such as Recycle Bin, DISM, Maven `.m2`, and WER reports as manual guidance where they are not direct analyzer rules. A regression test checks representative automated categories and manual-only examples.
 - WinDirStat guided-review coverage (2026-10-03): a mocked `/SaveTo` scan creates and validates a synthetic export, then the guided review selects an exact file and saves a cleanup plan. The target remains present; the generated plan is not run.
 - Scan timeout hardening (2026-10-03): export-file stabilization uses monotonic time so wall-clock corrections cannot skew the deadline. Focused wait/cancel tests and the full 209-test suite passed.

@@ -207,6 +207,42 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertNotIn(f"Path = '{folder_path}'", script)
         self.assertEqual(results["categories"]["high"]["items"], [folder_item])
 
+    def test_folder_browser_back_discards_browse_picks_and_keeps_main_selection(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        main_file = r"C:\Users\A\AppData\Local\Temp\selected.tmp"
+        nested_file = folder_path + r"content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label,
+        }
+        main_file_item = {
+            "path": main_file, "size": 10, "size_formatted": "10 B",
+            "kind": "File", "name": "Temporary file",
+        }
+        nested_file_item = {
+            "path": nested_file, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [main_file_item, folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value={
+                "expanded_candidates": [{"priority": "high", "item": nested_file_item}]}), \
+             mock.patch("builtins.input", side_effect=["1", "D", "1", "1", "B", ""]), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [main_file])
+        self.assertEqual(expanded, [])
+        self.assertIn("B returns without adding them", output.getvalue())
+        self.assertIn("Folder browse cancelled; its entries were not added", output.getvalue())
+
     def test_folder_browser_paginates_and_filters_exact_scan_entries(self):
         folder_path = r"C:\Users\A\AppData\Local\npm-cache"
         label = "Temporary files (check for installers or builds in progress)"
