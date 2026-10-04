@@ -2250,11 +2250,7 @@ if ($CreateBackup) {{
     $backupEnabled = $true
 }} elseif ($SkipBackup) {{
     $backupEnabled = $false
-}} elseif ($Force) {{
-    # Noninteractive cleanup keeps the verified backup unless the reviewed
-    # command explicitly requests permanent removal with -NoBackup.
-    $backupEnabled = $true
-}} else {{
+}} elseif (-not $Force) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
         $backupEnabled = $true

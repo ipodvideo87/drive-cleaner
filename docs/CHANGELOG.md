@@ -34,7 +34,8 @@
 - Ignore the full local `data/` tree and default `*.clean.ps1` plans so scan exports and generated cleanup plans stay out of commits by default.
 - After guided plan creation, detect an elevated administrator session and offer to run the saved plan there; declining leaves it saved, and the script's own cleanup confirmation remains required.
 - Show detected project roots and the marker evidence that caused cleanup candidates beneath them to be withheld from console and exported review reports.
-- Keep verified recovery backups optional for interactive cleanup, require distinct typed confirmation when declined, and preserve the backup by default for `-Force`; use explicit `-NoBackup` for noninteractive permanent cleanup.
+- Keep recovery backups optional in every cleanup mode: interactive users can decline with Enter, while reviewed noninteractive `-Force` cleanup creates a backup only with explicit `-Backup`.
+- Show progress while sizing, copying, compressing, hashing, and verifying large backups, including periodic heartbeats during Robocopy; keep `--json` output parseable by sending progress to stderr.
 - Show CSV byte-read percentage while analyzing a scan export, with 100% reported after parsing finishes.
 - Use monotonic time for scan-export stabilization deadlines so system-clock corrections do not shorten or extend the wait unexpectedly.
 - Distinguish automatically suggested cleanup paths from manual-only examples in the safety knowledge base, and align its cache/log summaries with the analyzer's review tiers.

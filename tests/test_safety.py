@@ -1581,6 +1581,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
         self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
         self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
+        self.assertIn("} elseif (-not $Force) {", script)
+        self.assertNotIn("Noninteractive cleanup keeps the verified backup", script)
         self.assertIn("Create a verified backup of these selected items first? [y/N]", script)
         self.assertIn("A verified recovery backup will be created before cleanup.", script)
         self.assertIn("Type CLEAN to back up and remove", script)
@@ -1753,7 +1755,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-Force"],
+                 "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=120,
             )
 
@@ -1801,7 +1803,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-Force"],
+                 "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=120,
             )
 
@@ -1838,7 +1840,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-Force"],
+                 "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -1906,7 +1908,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-Force"],
+                 "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=120, env=env,
             )
 
@@ -2214,7 +2216,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("Cancelled; nothing was changed.", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_explicit_no_backup_flag_allows_noninteractive_cleanup_with_warning(self):
+    def test_noninteractive_cleanup_does_not_create_backup_without_opt_in(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -2234,7 +2236,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.generate_clean_script(results, str(script_path))
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
-                 "-Select", "1", "-NoBackup", "-Force"],
+                 "-Select", "1", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -2501,7 +2503,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_helper.write_text(helper_contents, encoding="utf-8")
 
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -2585,7 +2587,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_helper.write_text(helper_contents, encoding="utf-8")
 
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -2593,6 +2595,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse(target.exists(), result.stdout + result.stderr)
             self.assertIn("Backup created:", result.stdout)
             self.assertIn("Cleanup complete!", result.stdout)
+            self.assertIn("Copying backup file complete.", result.stderr)
             backup_dirs = list(backup_root.glob("backup_*"))
             self.assertEqual(len(backup_dirs), 1)
             backup_id = backup_dirs[0].name
@@ -2848,7 +2851,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -2895,7 +2898,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -3065,7 +3068,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3102,7 +3105,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertEqual((selected / "keep.bin").read_bytes(), b"keep")
@@ -3155,7 +3158,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertTrue(outside_sentinel.exists(), result.stdout + result.stderr)
@@ -3264,7 +3267,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3355,7 +3358,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3389,7 +3392,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -3426,7 +3429,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_PROJECT_MARKER=str(marker))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertTrue(marker.exists(), result.stdout + result.stderr)
@@ -3468,7 +3471,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertTrue(marker.exists(), result.stdout + result.stderr)
@@ -3506,7 +3509,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_PROJECT_MARKER=str(marker))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertTrue(marker.exists(), result.stdout + result.stderr)
@@ -3552,7 +3555,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -3656,7 +3659,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     result = subprocess.run(
-                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                         capture_output=True, text=True, timeout=90,
                     )
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -4625,6 +4628,27 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    def test_backup_json_mode_keeps_progress_off_json_stdout(self):
+        manifest = {"status": "completed", "id": "backup_20261003_123456", "items": []}
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def create_with_progress(_paths, _priority, progress_stream=None):
+            print("Copying backup file: payload.bin (50%).", file=progress_stream)
+            return manifest
+
+        with mock.patch.object(
+                backup.sys, "argv",
+                ["backup.py", "create", "--paths", r"C:\Temp\payload.bin", "--json"]), \
+             mock.patch.object(backup, "create_backup", side_effect=create_with_progress) as create, \
+             redirect_stdout(stdout), redirect_stderr(stderr):
+            backup.main()
+
+        create.assert_called_once()
+        self.assertIs(create.call_args.kwargs["progress_stream"], stderr)
+        self.assertEqual(json.loads(stdout.getvalue()), manifest)
+        self.assertIn("payload.bin (50%)", stderr.getvalue())
+
     def test_backup_cleanup_requires_exact_confirmation(self):
         backups = [{
             "id": "backup_20260928_123456_000001",
@@ -4913,7 +4937,7 @@ class BackupSafetyTests(unittest.TestCase):
             (source / "payload.bin").write_bytes(b"mock data")
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=RuntimeError("mock robocopy failure")):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=RuntimeError("mock robocopy failure")):
                 result = backup.create_backup([str(source)])
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["items"], [])
@@ -4980,6 +5004,93 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(item["format"], "file")
             self.assertEqual(Path(item["backup_path"]).read_bytes(), b"mock cache data")
 
+    def test_file_backup_reports_progress_during_copy_and_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            with source.open("wb") as stream:
+                stream.truncate(128 * 1024 * 1024)
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Checking backup contents", output.getvalue())
+        self.assertIn("Copying backup file", output.getvalue())
+        self.assertIn("Verifying backup contents", output.getvalue())
+        self.assertIn("64.00 MB of 128.00 MB copied (50%).", output.getvalue())
+        self.assertIn("64.00 MB of 128.00 MB checked (50%).", output.getvalue())
+
+    def test_zip_backup_reports_progress_while_compressing_and_checking(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "large-directory"
+            source.mkdir()
+            with (source / "payload.bin").open("wb") as stream:
+                stream.truncate(2 * 1024 * 1024)
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Compressing backup folder: payload.bin: 1.00 MB of 2.00 MB added to archive (50%).", output.getvalue())
+        self.assertIn("Verifying compressed backup: payload.bin: 1.00 MB of 2.00 MB verified (50%).", output.getvalue())
+
+    def test_folder_backup_size_scan_reports_periodic_item_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "many-files"
+            source.mkdir()
+            for index in range(105):
+                (source / f"item-{index:03}.bin").write_bytes(b"temporary")
+
+            def mock_copy(command, **_kwargs):
+                shutil.copytree(command[1], command[2])
+                return 1
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_copy), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Checking backup contents: 100 items checked", output.getvalue())
+        self.assertIn("1 item checked", output.getvalue())
+        self.assertNotIn("1 items checked", output.getvalue())
+        self.assertIn("Verifying backup contents", output.getvalue())
+
+    def test_robocopy_backup_emits_a_progress_heartbeat(self):
+        command = ["robocopy", "source", "destination"]
+
+        class MockProcess:
+            def __init__(self):
+                self.wait_calls = 0
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                return 1
+
+        process = MockProcess()
+        output = io.StringIO()
+        with mock.patch.object(backup.subprocess, "Popen", return_value=process) as launch, \
+             redirect_stdout(output):
+            return_code = backup._run_robocopy_with_progress(
+                command, progress=backup._BackupProgress("Copying backup folder")
+            )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("Still working after", output.getvalue())
+        launch.assert_called_once_with(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
     def test_large_directory_with_named_streams_uses_verified_copy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4995,7 +5106,7 @@ class BackupSafetyTests(unittest.TestCase):
 
             def mock_robocopy(command, **_kwargs):
                 Path(command[2]).mkdir()
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
@@ -5004,7 +5115,7 @@ class BackupSafetyTests(unittest.TestCase):
                  mock.patch.object(backup, "get_dir_size", return_value=19), \
                  mock.patch.object(backup, "_directory_fingerprint", return_value=fingerprint), \
                  mock.patch.object(backup, "_create_zip_backup") as create_zip, \
-                 mock.patch.object(backup.subprocess, "run", side_effect=mock_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
                 manifest = backup.create_backup([str(source)])
 
             self.assertEqual(manifest["version"], 2)
@@ -5026,12 +5137,12 @@ class BackupSafetyTests(unittest.TestCase):
             }
             copied_without_stream = {"payload.bin": ("file", 7, "a" * 64)}
 
-            def fingerprint(path, include_named_streams=True):
+            def fingerprint(path, include_named_streams=True, **_kwargs):
                 return source_fingerprint if os.path.normcase(path) == os.path.normcase(str(source)) else copied_without_stream
 
             def mock_robocopy(command, **_kwargs):
                 Path(command[2]).mkdir()
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
@@ -5039,7 +5150,7 @@ class BackupSafetyTests(unittest.TestCase):
                  mock.patch.object(backup, "_path_size_and_named_streams", return_value=(19, True)), \
                  mock.patch.object(backup, "get_dir_size", return_value=19), \
                  mock.patch.object(backup, "_directory_fingerprint", side_effect=fingerprint), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=mock_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
                 manifest = backup.create_backup([str(source)])
 
             self.assertEqual(manifest["status"], "partial")
@@ -5067,7 +5178,7 @@ class BackupSafetyTests(unittest.TestCase):
             backup_root = root / "backups"
             backup_root.mkdir()
 
-            def copy_default_stream_only(source_path, backup_path):
+            def copy_default_stream_only(source_path, backup_path, **_kwargs):
                 # Reproduce the Windows copy behavior used by Python 3.10,
                 # which does not include NTFS named streams in shutil.copy2.
                 with open(source_path, "rb") as source_file, \
@@ -5077,7 +5188,7 @@ class BackupSafetyTests(unittest.TestCase):
 
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.shutil, "copy2", side_effect=copy_default_stream_only):
+                 mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_default_stream_only):
                 manifest = backup.create_backup([str(source)])
 
             self.assertEqual(manifest["status"], "completed")
@@ -5131,12 +5242,12 @@ class BackupSafetyTests(unittest.TestCase):
                 # Model Robocopy's /COPY:DAT behavior independently of the
                 # Python version running the test.
                 shutil.copytree(command[1], command[2], copy_function=copy_file_with_named_streams)
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
                  mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=mock_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
                 manifest = backup.create_backup([str(source)])
 
             self.assertEqual(manifest["status"], "completed")
@@ -5244,12 +5355,12 @@ class BackupSafetyTests(unittest.TestCase):
             source = Path(temp_dir) / "cache-file.bin"
             source.write_bytes(b"original payload")
 
-            def corrupt_copy(_source, destination):
+            def corrupt_copy(_source, destination, **_kwargs):
                 Path(destination).write_bytes(b"X" * source.stat().st_size)
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.shutil, "copy2", side_effect=corrupt_copy):
+                 mock.patch.object(backup, "_copy_file_with_progress", side_effect=corrupt_copy):
                 result = backup.create_backup([str(source)])
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["items"], [])
@@ -5267,11 +5378,11 @@ class BackupSafetyTests(unittest.TestCase):
                 destination.mkdir(parents=True)
                 relative_file = Path("payload.bin")
                 (destination / relative_file).write_bytes(b"X" * (copy_source / relative_file).stat().st_size)
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=corrupt_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=corrupt_robocopy):
                 result = backup.create_backup([str(source)])
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["items"], [])
@@ -5285,7 +5396,7 @@ class BackupSafetyTests(unittest.TestCase):
             source_snapshot = {"payload.bin": ("file", 4, "a" * 64)}
             archived_snapshot = {"payload.bin": ("file", 4, "b" * 64)}
 
-            def write_changed_archive(source_path, archive_path):
+            def write_changed_archive(source_path, archive_path, **_kwargs):
                 with zipfile.ZipFile(archive_path, "w") as archive:
                     archive.write(Path(source_path) / "payload.bin", "payload.bin")
                 return archived_snapshot
@@ -5592,11 +5703,11 @@ class BackupSafetyTests(unittest.TestCase):
                 copy_source = Path(command[1])
                 destination = Path(command[2])
                 shutil.copytree(copy_source, destination)
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=mock_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
                 manifest = backup.create_backup([str(source)])
             item = manifest["items"][0]
             (Path(item["backup_path"]) / "payload.bin").write_bytes(b"X" * len(b"original payload"))
