@@ -2157,7 +2157,14 @@ for ($i = 0; $i -lt $cleanTargets.Count; $i++) {{
         Write-Host "  [Missing] $($target.ItemType) | $($target.Name) | $($target.Path)" -ForegroundColor Gray
     }}
 }}
-if ($available.Count -eq 0) {{ Write-Host "None of the files or folders in this plan still exist." -ForegroundColor Yellow; exit 0 }}
+if ($available.Count -eq 0) {{
+    if ($PreviewOnly) {{
+        Write-Host "Preview incomplete: none of the selected files or folders still exist. Nothing was changed." -ForegroundColor Yellow
+        exit 1
+    }}
+    Write-Host "None of the files or folders in this plan still exist." -ForegroundColor Yellow
+    exit 0
+}}
 $availableIndexes = @($available | ForEach-Object {{ $_.Index }})
 
 if ($Select.Count -gt 0) {{

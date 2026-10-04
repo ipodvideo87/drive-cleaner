@@ -2032,6 +2032,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "kind": "File",
             }]}}}
             script_path = Path(plan_temp) / "preview.ps1"
+            backup_called = Path(plan_temp) / "backup-called.txt"
+            (Path(plan_temp) / "backup.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(backup_called)!r}).write_text('called', encoding='utf-8')\n"
+                "raise SystemExit(9)\n",
+                encoding="utf-8",
+            )
             with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
                 analyze.generate_clean_script(
                     results, str(script_path), selected_paths=[str(target)]
@@ -2062,6 +2069,46 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("No recovery backup was created and nothing was removed", result.stdout)
             self.assertNotIn("Type CLEAN", result.stdout)
             self.assertNotIn("Type DELETE WITHOUT BACKUP", result.stdout)
+            self.assertFalse(backup_called.exists(), "preview mode must not invoke the backup helper")
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_refuses_to_report_a_stale_missing_selection_as_complete(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "payload.bin"
+            target.write_bytes(b"stale preview fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": "21 B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "preview-stale.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target)]
+                )
+            target.unlink()
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Force"],
+                capture_output=True, text=True, timeout=60,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("Preview incomplete: none of the selected files or folders still exist", result.stdout)
+            self.assertNotIn("Preview complete", result.stdout)
+            self.assertFalse(target.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_preview_only_lists_eligible_folder_contents_and_keeps_protected_data(self):
@@ -3416,12 +3463,16 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.generate_clean_script(results, str(script_path))
 
             script_text = script_path.read_text(encoding="utf-8-sig")
-            path_guard = "                Assert-CleanupEntryPathWithinSelection $target $entry\n"
+            path_guard = (
+                "                Assert-CleanupEntryPathWithinSelection $target $entry\n"
+                "                if ($entry.PSIsContainer) {\n"
+            )
             self.assertIn(path_guard, script_text)
             script_text = script_text.replace(
                 path_guard,
-                path_guard +
-                "                [System.IO.File]::SetLastWriteTimeUtc($entry.FullName, $entry.LastWriteTimeUtc.AddSeconds(5))\n",
+                "                Assert-CleanupEntryPathWithinSelection $target $entry\n"
+                "                [System.IO.File]::SetLastWriteTimeUtc($entry.FullName, $entry.LastWriteTimeUtc.AddSeconds(5))\n"
+                "                if ($entry.PSIsContainer) {\n",
                 1,
             )
             script_path.write_text(script_text, encoding="utf-8-sig")
