@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -32,6 +33,11 @@ if hasattr(sys.stderr, "reconfigure"):
 # Configuration
 BACKUP_DIR_NAME = "CleanBackups"
 SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # Compress directories at or above 1 GB.
+BACKUP_PROGRESS_BYTES_INTERVAL = 64 * 1024 * 1024
+BACKUP_PROGRESS_TIME_INTERVAL_SECONDS = 10
+BACKUP_PROGRESS_ENTRY_INTERVAL = 100
+ROBOCOPY_TIMEOUT_SECONDS = 300
+ROBOCOPY_PROGRESS_INTERVAL_SECONDS = 10
 WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{index}" for index in range(1, 10)),
@@ -54,6 +60,67 @@ def format_size(size_bytes: int) -> str:
     elif size_bytes >= 1024:
         return f"{size_bytes / 1024:.2f} KB"
     return f"{size_bytes} B"
+
+
+class _BackupProgress:
+    """Print throttled English progress for backup and verification work."""
+
+    def __init__(self, phase: str, stream=None):
+        self.phase = phase
+        self.stream = sys.stdout if stream is None else stream
+        self.items = 0
+        self.known_bytes = 0
+        self._last_message = time.monotonic()
+        self._active_file = None
+        self._active_file_bytes = 0
+        self._last_file_message_bytes = 0
+
+    def _emit(self, message: str) -> None:
+        print(f"{self.phase}: {message}", file=self.stream, flush=True)
+        self._last_message = time.monotonic()
+
+    def item(self, path: str, known_bytes: int = 0) -> None:
+        self.items += 1
+        self.known_bytes += max(0, int(known_bytes))
+        elapsed = time.monotonic() - self._last_message
+        if (self.items == 1 or self.items % BACKUP_PROGRESS_ENTRY_INTERVAL == 0 or
+                elapsed >= BACKUP_PROGRESS_TIME_INTERVAL_SECONDS):
+            name = _safe_terminal_text(os.path.basename(str(path).rstrip("\\/")), "item")
+            item_label = "item" if self.items == 1 else "items"
+            self._emit(
+                f"{self.items:,} {item_label} checked; {format_size(self.known_bytes)} of file data found so far. Current item: {name}"
+            )
+
+    def file_bytes(self, path: str, processed: int, total: int, action: str = "checked") -> None:
+        processed = max(0, int(processed))
+        total = max(0, int(total))
+        if path != self._active_file:
+            self._active_file = path
+            self._active_file_bytes = 0
+            self._last_file_message_bytes = 0
+        self._active_file_bytes = max(self._active_file_bytes, processed)
+        elapsed = time.monotonic() - self._last_message
+        if (processed - self._last_file_message_bytes >= BACKUP_PROGRESS_BYTES_INTERVAL or
+                elapsed >= BACKUP_PROGRESS_TIME_INTERVAL_SECONDS or
+                (total >= BACKUP_PROGRESS_BYTES_INTERVAL and processed == total)):
+            name = _safe_terminal_text(os.path.basename(str(path)), "file")
+            percent = int(min(100, 100 * processed / total)) if total else 100
+            self._emit(
+                f"{name}: {format_size(processed)} of {format_size(total)} {action} ({percent}%)."
+            )
+            self._last_file_message_bytes = processed
+
+    def heartbeat(self, elapsed_seconds: float) -> None:
+        elapsed = max(0, int(elapsed_seconds))
+        self._emit(
+            f"Still working after {elapsed} seconds; Drive Cleanr will report when this step is finished."
+        )
+
+    def finish(self) -> None:
+        item_label = "item" if self.items == 1 else "items"
+        detail = f"{self.items:,} {item_label} checked" if self.items else ""
+        suffix = f": {detail}." if detail else "."
+        print(f"{self.phase} complete{suffix}", file=self.stream, flush=True)
 
 
 def _safe_terminal_text(value, fallback="Unknown") -> str:
@@ -164,35 +231,218 @@ def _paths_overlap(left: str, right: str) -> bool:
     )
 
 
-def get_dir_size(path: str) -> int:
-    """Get the complete size without following links or hiding read errors."""
+def _named_data_streams(path: str) -> list[tuple[str, int]]:
+    """List named NTFS data streams without treating the default stream as an extra."""
+    if os.name != "nt":
+        return []
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FindStreamData(ctypes.Structure):
+        _fields_ = [("StreamSize", ctypes.c_longlong), ("cStreamName", ctypes.c_wchar * 296)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    find_first = kernel32.FindFirstStreamW
+    find_first.argtypes = [wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(FindStreamData), wintypes.DWORD]
+    find_first.restype = wintypes.HANDLE
+    find_next = kernel32.FindNextStreamW
+    find_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(FindStreamData)]
+    find_next.restype = wintypes.BOOL
+    find_close = kernel32.FindClose
+    find_close.argtypes = [wintypes.HANDLE]
+    find_close.restype = wintypes.BOOL
+
+    data = FindStreamData()
+    handle = find_first(os.fspath(path), 0, ctypes.byref(data), 0)
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in (38, 87):  # No streams, or a file system without stream support.
+            return []
+        raise OSError(error, ctypes.FormatError(error), os.fspath(path))
+
+    streams = {}
+    try:
+        while True:
+            name = data.cStreamName
+            if name and name.casefold() != "::$data":
+                if not name.startswith(":") or not name.casefold().endswith(":$data"):
+                    raise OSError(f"Could not safely identify a named data stream on {path}")
+                streams[name] = int(data.StreamSize)
+            if not find_next(handle, ctypes.byref(data)):
+                error = ctypes.get_last_error()
+                if error == 38:  # ERROR_HANDLE_EOF
+                    break
+                raise OSError(error, ctypes.FormatError(error), os.fspath(path))
+    finally:
+        find_close(handle)
+
+    return sorted(streams.items(), key=lambda item: item[0].casefold())
+
+
+def _named_stream_fingerprints(path: str, progress: Optional[_BackupProgress] = None) -> list[tuple[str, int, str]]:
+    """Hash every named stream and fail if its enumerated size changes while read."""
+    streams = _named_data_streams(path)
+    fingerprints = []
+    for stream_name, expected_size in streams:
+        stream_path = os.fspath(path) + stream_name
+        digest = _sha256_file(stream_path, progress=progress)
+        if os.path.getsize(stream_path) != expected_size:
+            raise RuntimeError(f"A named data stream changed while it was being checked: {path}")
+        fingerprints.append((stream_name, expected_size, digest))
+    if _named_data_streams(path) != streams:
+        raise RuntimeError(f"Named data streams changed while they were being checked: {path}")
+    return fingerprints
+
+
+def _copy_named_data_streams(
+    source: str, destination: str, progress: Optional[_BackupProgress] = None
+) -> None:
+    """Copy a file's named streams explicitly across Python versions."""
+    streams = _named_data_streams(source)
+    for stream_name, expected_size in streams:
+        source_stream_path = os.fspath(source) + stream_name
+        destination_stream_path = os.fspath(destination) + stream_name
+        stream_size = os.path.getsize(source_stream_path)
+        copied = 0
+        with open(source_stream_path, "rb") as source_stream:
+            with open(destination_stream_path, "wb") as destination_stream:
+                while True:
+                    chunk = source_stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination_stream.write(chunk)
+                    copied += len(chunk)
+                    if progress is not None:
+                        progress.file_bytes(source_stream_path, copied, stream_size, action="copied")
+        if os.path.getsize(destination_stream_path) != expected_size:
+            raise RuntimeError(f"A named data stream was not fully copied: {source}")
+    if _named_data_streams(source) != streams:
+        raise RuntimeError(f"Named data streams changed while they were being copied: {source}")
+
+
+def _file_integrity_sha256(path: str, progress: Optional[_BackupProgress] = None) -> str:
+    """Hash the default file data and all named streams when the file system supports them."""
+    default_hash = _sha256_file(path, progress=progress)
+    streams = _named_stream_fingerprints(path, progress=progress)
+    if not streams:
+        # Keep the existing digest for ordinary files and older manifests.
+        return default_hash
+    snapshot = {
+        "default": [os.path.getsize(path), default_hash],
+        "streams": [[name, size, digest] for name, size, digest in streams],
+    }
+    canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _path_size_and_named_streams(
+    path: str, include_named_streams: bool = True,
+    progress: Optional[_BackupProgress] = None,
+) -> tuple[int, bool]:
+    """Measure file data and detect named streams without following links."""
+    if _is_reparse_point(path):
+        raise RuntimeError(f"Refusing to size a path containing a link: {path}")
+    streams = _named_data_streams(path) if include_named_streams else []
+    total = sum(size for _name, size in streams)
     if os.path.isfile(path):
-        return os.path.getsize(path)
-    total = 0
+        total += os.path.getsize(path)
+        if progress is not None:
+            progress.item(path, total)
+        return total, bool(streams)
+    if progress is not None:
+        progress.item(path)
+    streams_found = bool(streams)
     with os.scandir(path) as entries:
         for entry in entries:
             if _is_reparse_point(entry.path):
                 raise RuntimeError(f"Refusing to back up a path containing a link: {entry.path}")
-            if entry.is_file(follow_symlinks=False):
-                total += entry.stat(follow_symlinks=False).st_size
-            elif entry.is_dir(follow_symlinks=False):
-                total += get_dir_size(entry.path)
-    return total
+            if entry.is_file(follow_symlinks=False) or entry.is_dir(follow_symlinks=False):
+                child_size, child_has_streams = _path_size_and_named_streams(
+                    entry.path, include_named_streams, progress
+                )
+                total += child_size
+                streams_found = streams_found or child_has_streams
+    return total, streams_found
 
 
-def _sha256_file(path: str) -> str:
+def get_dir_size(
+    path: str, include_named_streams: bool = True,
+    progress: Optional[_BackupProgress] = None,
+) -> int:
+    """Get the complete size without following links or hiding read errors."""
+    return _path_size_and_named_streams(path, include_named_streams, progress)[0]
+
+
+def _sha256_file(path: str, progress: Optional[_BackupProgress] = None) -> str:
     """Hash a file in bounded memory for content-level backup verification."""
     digest = hashlib.sha256()
+    total = os.path.getsize(path) if progress is not None else 0
+    processed = 0
     with open(path, "rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
+            processed += len(chunk)
+            if progress is not None:
+                progress.file_bytes(path, processed, total)
     return digest.hexdigest()
+
+
+def _copy_file_with_progress(
+    source_path: str, destination_path: str,
+    progress: Optional[_BackupProgress] = None,
+) -> str:
+    """Copy a file in bounded chunks while preserving copy2 metadata."""
+    total = os.path.getsize(source_path) if progress is not None else 0
+    copied = 0
+    with open(source_path, "rb") as source, open(destination_path, "xb") as destination:
+        while True:
+            chunk = source.read(4 * 1024 * 1024)
+            if not chunk:
+                break
+            destination.write(chunk)
+            copied += len(chunk)
+            if progress is not None:
+                progress.file_bytes(source_path, copied, total, action="copied")
+    shutil.copystat(source_path, destination_path)
+    return destination_path
+
+
+def _run_robocopy_with_progress(
+    command: list[str], timeout: int = ROBOCOPY_TIMEOUT_SECONDS,
+    progress: Optional[_BackupProgress] = None,
+) -> int:
+    """Run quiet Robocopy with an English heartbeat and bounded runtime."""
+    process = subprocess.Popen(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    started = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - started
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            try:
+                process.kill()
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            raise subprocess.TimeoutExpired(command, timeout)
+        try:
+            return process.wait(timeout=min(ROBOCOPY_PROGRESS_INTERVAL_SECONDS, remaining))
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - started
+            if progress is not None:
+                progress.heartbeat(elapsed)
 
 
 def _write_file_atomically(destination: str, write_staged: Callable[[str], None], overwrite: bool,
                            expected_sha256: Optional[str] = None,
                            expected_size: Optional[int] = None,
-                           timestamp: Optional[float] = None) -> bool:
+                           timestamp: Optional[float] = None,
+                           verify_named_streams: bool = True) -> bool:
     """Write and verify a same-directory staging file before publishing it."""
     if _path_has_reparse_component(destination):
         raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
@@ -209,7 +459,11 @@ def _write_file_atomically(destination: str, write_staged: Callable[[str], None]
     try:
         write_staged(staged_path)
         if expected_sha256:
-            if _sha256_file(staged_path).lower() != expected_sha256.lower():
+            actual_digest = (
+                _file_integrity_sha256(staged_path) if verify_named_streams
+                else _sha256_file(staged_path)
+            )
+            if actual_digest.lower() != expected_sha256.lower():
                 raise RuntimeError("Staged restore file failed its SHA-256 integrity check")
         elif (not isinstance(expected_size, int) or
               os.path.getsize(staged_path) != expected_size):
@@ -237,24 +491,36 @@ def _write_file_atomically(destination: str, write_staged: Callable[[str], None]
 
 
 def _restore_file_atomically(backup_path: str, destination: str, overwrite: bool,
-                             expected_sha256: Optional[str], expected_size: Optional[int]) -> bool:
+                             expected_sha256: Optional[str], expected_size: Optional[int],
+                             verify_named_streams: bool = True) -> bool:
     """Stage and verify a backup file before making it visible at its destination."""
     def copy_backup(staged_path):
         shutil.copy2(backup_path, staged_path)
+        if verify_named_streams:
+            _copy_named_data_streams(backup_path, staged_path)
 
     return _write_file_atomically(
-        destination, copy_backup, overwrite, expected_sha256, expected_size
+        destination, copy_backup, overwrite, expected_sha256, expected_size,
+        verify_named_streams=verify_named_streams,
     )
 
 
-def _directory_fingerprint(path: str) -> Dict[str, tuple]:
-    """Map directory entries to content hashes without following reparse points."""
+def _directory_fingerprint(
+    path: str, include_named_streams: bool = True,
+    progress: Optional[_BackupProgress] = None,
+) -> Dict[str, tuple]:
+    """Map directory entries and optional named streams to hashes without following links."""
     root = os.path.abspath(path)
 
     def raise_walk_error(error):
         raise error
 
     entries = {}
+    if progress is not None:
+        progress.item(root)
+    if include_named_streams:
+        for stream_name, stream_size, stream_hash in _named_stream_fingerprints(root, progress):
+            entries[f".\0{stream_name}"] = ("stream", stream_size, stream_hash)
     for current, directories, files in os.walk(root, topdown=True, onerror=raise_walk_error, followlinks=False):
         directories.sort()
         files.sort()
@@ -264,19 +530,34 @@ def _directory_fingerprint(path: str) -> Dict[str, tuple]:
                 raise RuntimeError(f"Refusing to verify a reparse point: {item_path}")
             relative = os.path.normcase(os.path.relpath(item_path, root))
             entries[relative] = ("directory",)
+            if progress is not None:
+                progress.item(item_path)
+            if include_named_streams:
+                for stream_name, stream_size, stream_hash in _named_stream_fingerprints(item_path, progress):
+                    entries[f"{relative}\0{stream_name}"] = ("stream", stream_size, stream_hash)
         for name in files:
             item_path = os.path.join(current, name)
             if _is_reparse_point(item_path):
                 raise RuntimeError(f"Refusing to verify a reparse point: {item_path}")
             relative = os.path.normcase(os.path.relpath(item_path, root))
             size = os.path.getsize(item_path)
-            entries[relative] = ("file", size, _sha256_file(item_path))
+            entries[relative] = ("file", size, _sha256_file(item_path, progress=progress))
+            if progress is not None:
+                progress.item(item_path, size)
+            if include_named_streams:
+                for stream_name, stream_size, stream_hash in _named_stream_fingerprints(item_path, progress):
+                    entries[f"{relative}\0{stream_name}"] = ("stream", stream_size, stream_hash)
     return entries
 
 
-def _directory_fingerprint_sha256(path: str) -> str:
+def _directory_fingerprint_sha256(
+    path: str, include_named_streams: bool = True,
+    progress: Optional[_BackupProgress] = None,
+) -> str:
     """Hash a directory's names, types, sizes, and file contents deterministically."""
-    return _fingerprint_entries_sha256(_directory_fingerprint(path))
+    return _fingerprint_entries_sha256(
+        _directory_fingerprint(path, include_named_streams, progress)
+    )
 
 
 def _fingerprint_entries_sha256(entries: Dict[str, tuple]) -> str:
@@ -288,10 +569,15 @@ def _fingerprint_entries_sha256(entries: Dict[str, tuple]) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
-def _create_zip_backup(source_path: str, archive_path: str) -> Dict[str, tuple]:
+def _create_zip_backup(
+    source_path: str, archive_path: str,
+    progress: Optional[_BackupProgress] = None,
+) -> Dict[str, tuple]:
     """Write a ZIP64 archive and fingerprint the exact content it contains."""
     source_path = os.path.abspath(source_path)
     archived_entries = {}
+    if progress is not None:
+        progress.item(source_path)
 
     def raise_walk_error(error):
         raise error
@@ -311,6 +597,8 @@ def _create_zip_backup(source_path: str, archive_path: str) -> Dict[str, tuple]:
                 info.external_attr = (info.external_attr & 0xFFFF0000) | getattr(directory_attributes, "st_file_attributes", 0) & 0xFF
                 archive.writestr(info, b"")
                 archived_entries[os.path.normcase(relative_dir)] = ("directory",)
+                if progress is not None:
+                    progress.item(current)
             for name in files:
                 file_path = os.path.join(current, name)
                 if _is_reparse_point(file_path):
@@ -328,10 +616,44 @@ def _create_zip_backup(source_path: str, archive_path: str) -> Dict[str, tuple]:
                         destination.write(chunk)
                         digest.update(chunk)
                         written += len(chunk)
+                        if progress is not None:
+                            progress.file_bytes(
+                                file_path, written, info.file_size, action="added to archive"
+                            )
                 archived_entries[os.path.normcase(relative_file.replace("/", os.sep))] = (
                     "file", written, digest.hexdigest()
                 )
+                if progress is not None:
+                    progress.item(file_path, written)
     return archived_entries
+
+
+def _verify_zip_archive(archive_path: str, progress: Optional[_BackupProgress] = None) -> int:
+    """Read every ZIP member to EOF, checking CRCs while reporting progress."""
+    total_bytes = 0
+    with zipfile.ZipFile(archive_path) as archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                if progress is not None:
+                    progress.item(info.filename)
+                continue
+            member_bytes = 0
+            with archive.open(info, "r") as member:
+                while True:
+                    chunk = member.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    member_bytes += len(chunk)
+                    if progress is not None:
+                        progress.file_bytes(
+                            info.filename, member_bytes, info.file_size, action="verified"
+                        )
+            if member_bytes != info.file_size:
+                raise zipfile.BadZipFile(f"Incomplete ZIP member: {info.filename}")
+            total_bytes += member_bytes
+            if progress is not None:
+                progress.item(info.filename, member_bytes)
+    return total_bytes
 
 
 def _extract_zip_backup(archive_path: str, destination: str, overwrite: bool = False) -> list[str]:
@@ -541,7 +863,9 @@ def sanitize_path_name(path: str) -> str:
     return name
 
 
-def create_backup(paths: List[str], priority: str = "high") -> Dict:
+def create_backup(
+    paths: List[str], priority: str = "high", progress_stream=None,
+) -> Dict:
     """
     Create a backup
 
@@ -582,6 +906,7 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
     os.makedirs(backup_dir, exist_ok=False)
 
     manifest = {
+        "version": 2,
         "id": backup_id,
         "timestamp": datetime.now().isoformat(),
         "priority": priority,
@@ -608,7 +933,11 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             continue
 
         try:
-            dir_size = get_dir_size(path)
+            size_progress = _BackupProgress("Checking backup contents", stream=progress_stream)
+            dir_size, has_named_streams = _path_size_and_named_streams(
+                path, progress=size_progress
+            )
+            size_progress.finish()
         except (PermissionError, OSError, RuntimeError) as exc:
             manifest["errors"].append(f"Could not fully read {path}: {describe_error(exc)}")
             continue
@@ -627,42 +956,68 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
         safe_name = f"{sanitize_path_name(path) or 'item'}_{digest}"
         is_file = os.path.isfile(path)
         source_integrity_sha256 = None
+        source_fingerprint = None
+        if not is_file and dir_size >= SIZE_THRESHOLD and not has_named_streams:
+            try:
+                source_progress = _BackupProgress(
+                    "Checking source contents before backup", stream=progress_stream
+                )
+                source_fingerprint = _directory_fingerprint(path, progress=source_progress)
+                source_progress.finish()
+            except Exception as e:
+                manifest["errors"].append(
+                    f"Could not inspect directory before backup for {path}: {describe_error(e)}"
+                )
+                continue
+            has_named_streams = any(
+                isinstance(entry, tuple) and entry and entry[0] == "stream"
+                for entry in source_fingerprint.values()
+            )
 
         # Choose a backup format based on the target type and size.
         if is_file:
             backup_format = "file"
             backup_path = os.path.join(backup_dir, safe_name)
             try:
-                shutil.copy2(path, backup_path)
+                copy_progress = _BackupProgress("Copying backup file", stream=progress_stream)
+                _copy_file_with_progress(path, backup_path, progress=copy_progress)
+                # Python 3.10's shutil.copy2 uses a buffered copy on Windows
+                # that omits NTFS alternate data streams. Copy them explicitly
+                # so the backup guarantees do not depend on the Python version.
+                _copy_named_data_streams(path, backup_path, progress=copy_progress)
+                copy_progress.finish()
             except Exception as e:
                 print(f"        [Failed] {describe_error(e)}")
                 manifest["errors"].append(f"File backup failed for {path}: {describe_error(e)}")
                 continue
-        elif dir_size < SIZE_THRESHOLD:
+        elif dir_size < SIZE_THRESHOLD or has_named_streams:
             # Copy directories smaller than 1 GB.
             backup_format = "copy"
             backup_path = os.path.join(backup_dir, safe_name)
             print(f"[Backup] {format_size(dir_size):>10} {path}")
             print(f"        → Copy directly to {backup_path}")
+            if has_named_streams and dir_size >= SIZE_THRESHOLD:
+                print("        This folder contains extra Windows file data; the direct copy preserves and verifies it.")
 
             try:
                 # Copy with robocopy (preserves attributes and supports long paths)
-                result = subprocess.run(
+                copy_progress = _BackupProgress("Copying backup folder", stream=progress_stream)
+                return_code = _run_robocopy_with_progress(
                     [
                         "robocopy", path, backup_path,
                         "/E",  # Copy all subdirectories.
                         "/COPY:DAT",  # Copy data, attributes, and timestamps.
+                        "/DCOPY:DAT",  # Include data streams and timestamps on directories.
                         "/XJ",  # Never follow junctions
                         "/R:1",  # Retry once.
                         "/W:1",  # Wait one second between retries.
                         "/NFL", "/NDL", "/NJH", "/NJS",  # Reduce console output.
-                    ],
-                    capture_output=True,
-                    timeout=300  # Five-minute timeout.
+                    ], progress=copy_progress,
                 )
                 # Robocopy codes 0-7 indicate success or copied extras.
-                if result.returncode >= 8:
-                    raise RuntimeError(f"Robocopy failed with exit code {result.returncode}")
+                if return_code >= 8:
+                    raise RuntimeError(f"Robocopy failed with exit code {return_code}")
+                copy_progress.finish()
                 print(f"        [Done]")
             except Exception as e:
                 print(f"        [Failed] {describe_error(e)}")
@@ -676,8 +1031,13 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
             print(f"        → Compress to {backup_path}")
 
             try:
-                source_fingerprint = _directory_fingerprint(path)
-                archived_fingerprint = _create_zip_backup(path, backup_path)
+                archive_progress = _BackupProgress(
+                    "Compressing backup folder", stream=progress_stream
+                )
+                archived_fingerprint = _create_zip_backup(
+                    path, backup_path, progress=archive_progress
+                )
+                archive_progress.finish()
                 if archived_fingerprint != source_fingerprint:
                     manifest["errors"].append(f"Source changed while its backup archive was being created: {path}")
                     continue
@@ -689,45 +1049,65 @@ def create_backup(paths: List[str], priority: str = "high") -> Dict:
 
         if backup_format == "copy":
             try:
-                source_entries = _directory_fingerprint(path)
-                if (not os.path.isdir(backup_path) or get_dir_size(backup_path) != dir_size or
-                        source_entries != _directory_fingerprint(backup_path)):
+                verify_progress = _BackupProgress(
+                    "Verifying backup contents", stream=progress_stream
+                )
+                backup_size = get_dir_size(backup_path, progress=verify_progress)
+                source_entries = _directory_fingerprint(path, progress=verify_progress)
+                backup_entries = _directory_fingerprint(backup_path, progress=verify_progress)
+                if (not os.path.isdir(backup_path) or backup_size != dir_size or
+                        source_entries != backup_entries):
                     manifest["errors"].append(f"Backup output is missing, incomplete, or has different file contents for {path}")
                     continue
                 source_integrity_sha256 = _fingerprint_entries_sha256(source_entries)
+                verify_progress.finish()
             except (OSError, RuntimeError) as exc:
                 manifest["errors"].append(f"Could not verify backup output for {path}: {describe_error(exc)}")
                 continue
         if backup_format == "file":
             try:
-                source_integrity_sha256 = _sha256_file(path)
-                if (not os.path.isfile(backup_path) or os.path.getsize(backup_path) != dir_size or
-                        source_integrity_sha256 != _sha256_file(backup_path)):
+                verify_progress = _BackupProgress(
+                    "Verifying backup contents", stream=progress_stream
+                )
+                source_integrity_sha256 = _file_integrity_sha256(path, progress=verify_progress)
+                backup_size = get_dir_size(backup_path, progress=verify_progress)
+                backup_integrity_sha256 = _file_integrity_sha256(backup_path, progress=verify_progress)
+                if (not os.path.isfile(backup_path) or backup_size != dir_size or
+                        source_integrity_sha256 != backup_integrity_sha256):
                     manifest["errors"].append(f"Backup output is incomplete or has different file contents for {path}")
                     continue
-            except OSError as exc:
+                verify_progress.finish()
+            except (OSError, RuntimeError) as exc:
                 manifest["errors"].append(f"Could not verify backup output for {path}: {describe_error(exc)}")
                 continue
         if backup_format == "zip":
             try:
                 source_integrity_sha256 = _fingerprint_entries_sha256(source_fingerprint)
-                with zipfile.ZipFile(backup_path) as archive:
-                    damaged = archive.testzip()
-                    archive_size = sum(entry.file_size for entry in archive.infolist() if not entry.is_dir())
-                if damaged or archive_size != dir_size:
+                verify_progress = _BackupProgress(
+                    "Verifying compressed backup", stream=progress_stream
+                )
+                archive_size = _verify_zip_archive(backup_path, progress=verify_progress)
+                if archive_size != dir_size:
                     manifest["errors"].append(f"Backup archive is damaged or incomplete for {path}")
                     continue
+                verify_progress.finish()
             except (OSError, zipfile.BadZipFile) as exc:
                 manifest["errors"].append(f"Could not verify backup archive for {path}: {describe_error(exc)}")
                 continue
 
         try:
+            integrity_progress = _BackupProgress(
+                "Recording backup integrity", stream=progress_stream
+            )
             if backup_format == "file":
-                integrity_sha256 = _sha256_file(backup_path)
+                integrity_sha256 = _file_integrity_sha256(backup_path, progress=integrity_progress)
             elif backup_format == "copy":
-                integrity_sha256 = _directory_fingerprint_sha256(backup_path)
+                integrity_sha256 = _directory_fingerprint_sha256(
+                    backup_path, progress=integrity_progress
+                )
             else:
-                integrity_sha256 = _sha256_file(backup_path)
+                integrity_sha256 = _file_integrity_sha256(backup_path, progress=integrity_progress)
+            integrity_progress.finish()
         except (OSError, RuntimeError) as exc:
             manifest["errors"].append(f"Could not fingerprint backup output for {path}: {describe_error(exc)}")
             continue
@@ -817,7 +1197,8 @@ def list_backups() -> List[Dict]:
                     manifest = json.load(f)
             except (OSError, ValueError):
                 continue
-            if (not isinstance(manifest, dict) or manifest.get("id") != item or
+            if (not isinstance(manifest, dict) or _manifest_version(manifest) is None or
+                    manifest.get("id") != item or
                     not isinstance(manifest.get("timestamp"), str) or
                     not isinstance(manifest.get("items"), list)):
                 continue
@@ -854,11 +1235,21 @@ def get_backup(backup_id: str) -> Optional[Dict]:
     except (OSError, ValueError):
         return None
 
-    if (not isinstance(manifest, dict) or manifest.get("id") != backup_id or
+    if (not isinstance(manifest, dict) or _manifest_version(manifest) is None or
+            manifest.get("id") != backup_id or
             not isinstance(manifest.get("timestamp"), str) or
             not isinstance(manifest.get("items"), list)):
         return None
     return manifest
+
+
+def _manifest_version(manifest: Dict) -> Optional[int]:
+    version = manifest.get("version", 1)
+    return version if type(version) is int and version in (1, 2) else None
+
+
+def _manifest_uses_named_stream_integrity(manifest: Dict) -> bool:
+    return _manifest_version(manifest) == 2
 
 
 def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
@@ -868,6 +1259,9 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
             not isinstance(manifest.get("items"), list) or not manifest["items"]):
         print("Refusing to verify an incomplete or empty backup")
         return False
+    verify_named_streams = _manifest_uses_named_stream_integrity(manifest)
+    if not verify_named_streams:
+        print("Warning: this older backup does not verify named NTFS data streams.")
 
     backup_dir = _find_backup_dir(backup_id)
     if not backup_dir or _path_has_reparse_component(backup_dir):
@@ -909,6 +1303,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         selected_items = list(manifest["items"])
 
     backup_root = os.path.abspath(backup_dir)
+    progress = _BackupProgress("Verifying recovery backup")
     for item in selected_items:
         original_path = item["original_path"]
         backup_path = item.get("backup_path")
@@ -933,13 +1328,33 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
             print(f"Backup or source path is unavailable or linked: {original_path}")
             return False
 
+        if not verify_named_streams:
+            try:
+                source_has_streams = _path_size_and_named_streams(
+                    original_path, progress=progress
+                )[1]
+                backup_has_streams = (
+                    backup_format != "zip" and
+                    _path_size_and_named_streams(backup_path, progress=progress)[1]
+                )
+            except (OSError, RuntimeError) as exc:
+                print(f"Could not inspect named data streams for {original_path}: {describe_error(exc)}")
+                return False
+            if source_has_streams or backup_has_streams:
+                print("This older backup cannot verify the named data streams; refusing verification.")
+                return False
+
         try:
             if backup_format == "file":
                 if not os.path.isfile(backup_path) or not os.path.isfile(original_path):
                     print(f"Source item type changed since backup: {original_path}")
                     return False
-                current_source_digest = _sha256_file(original_path)
-                current_payload_digest = _sha256_file(backup_path)
+                if verify_named_streams:
+                    current_source_digest = _file_integrity_sha256(original_path, progress=progress)
+                    current_payload_digest = _file_integrity_sha256(backup_path, progress=progress)
+                else:
+                    current_source_digest = _sha256_file(original_path, progress=progress)
+                    current_payload_digest = _sha256_file(backup_path, progress=progress)
             elif backup_format == "copy":
                 if not os.path.isdir(backup_path) or not os.path.isdir(original_path):
                     print(f"Source item type changed since backup: {original_path}")
@@ -947,8 +1362,12 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 if _tree_has_reparse_point(backup_path) or _tree_has_reparse_point(original_path):
                     print(f"Source or backup tree contains a reparse point: {original_path}")
                     return False
-                current_source_digest = _directory_fingerprint_sha256(original_path)
-                current_payload_digest = _directory_fingerprint_sha256(backup_path)
+                current_source_digest = _directory_fingerprint_sha256(
+                    original_path, include_named_streams=verify_named_streams, progress=progress
+                )
+                current_payload_digest = _directory_fingerprint_sha256(
+                    backup_path, include_named_streams=verify_named_streams, progress=progress
+                )
             else:
                 if not os.path.isfile(backup_path) or not os.path.isdir(original_path):
                     print(f"Source item type changed since backup: {original_path}")
@@ -956,8 +1375,13 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 if _tree_has_reparse_point(original_path):
                     print(f"Source tree contains a reparse point: {original_path}")
                     return False
-                current_source_digest = _directory_fingerprint_sha256(original_path)
-                current_payload_digest = _sha256_file(backup_path)
+                current_source_digest = _directory_fingerprint_sha256(
+                    original_path, include_named_streams=verify_named_streams, progress=progress
+                )
+                current_payload_digest = (
+                    _file_integrity_sha256(backup_path, progress=progress) if verify_named_streams
+                    else _sha256_file(backup_path, progress=progress)
+                )
         except (OSError, RuntimeError) as exc:
             print(f"Could not verify source or backup contents for {original_path}: {describe_error(exc)}")
             return False
@@ -968,7 +1392,9 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         if current_source_digest.lower() != source_digest.lower():
             print(f"Source changed since backup; refusing cleanup: {original_path}")
             return False
+        progress.item(original_path)
 
+    progress.finish()
     print("Backup and selected source contents match.")
     return True
 
@@ -996,6 +1422,9 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     if not backup_dir or _path_has_reparse_component(backup_dir):
         print("Refusing to restore from an unavailable or linked backup location")
         return False
+    verify_named_streams = _manifest_uses_named_stream_integrity(manifest)
+    if not verify_named_streams:
+        print("Warning: this older backup predates named-stream verification and may not preserve every NTFS data stream.")
 
     # Validate the complete untrusted manifest before restoring any item. This
     # avoids arbitrary/network/device destinations and partial restores caused
@@ -1044,6 +1473,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     # Verify every saved payload before writing any restored data. This catches
     # later disk corruption (including same-size changes) without allowing a
     # failed later item to leave an earlier item partially restored.
+    progress = _BackupProgress("Checking saved backup")
     for item, _original_path, backup_path, backup_format in validated_items:
         expected_digest = item.get("integrity_sha256")
         if expected_digest is not None:
@@ -1052,15 +1482,23 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 return False
             try:
                 if backup_format == "copy":
-                    actual_digest = _directory_fingerprint_sha256(backup_path)
+                    actual_digest = _directory_fingerprint_sha256(
+                        backup_path, include_named_streams=verify_named_streams,
+                        progress=progress,
+                    )
+                elif backup_format == "file" and verify_named_streams:
+                    actual_digest = _file_integrity_sha256(backup_path, progress=progress)
+                elif backup_format == "zip" and verify_named_streams:
+                    actual_digest = _file_integrity_sha256(backup_path, progress=progress)
                 else:
-                    actual_digest = _sha256_file(backup_path)
+                    actual_digest = _sha256_file(backup_path, progress=progress)
             except (OSError, RuntimeError) as exc:
                 print(f"Refusing to restore an unreadable backup payload: {describe_error(exc)}")
                 return False
             if actual_digest.lower() != expected_digest.lower():
                 print("Refusing to restore: backup contents changed after verification")
                 return False
+            progress.item(backup_path)
         else:
             # Older manifests predate persistent hashes. Preserve their restore
             # support with structural/size checks, and tell users the limit.
@@ -1069,17 +1507,25 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 if backup_format == "file":
                     legacy_valid = isinstance(expected_size, int) and os.path.getsize(backup_path) == expected_size
                 elif backup_format == "copy":
-                    legacy_valid = isinstance(expected_size, int) and get_dir_size(backup_path) == expected_size
+                    legacy_valid = (
+                        isinstance(expected_size, int) and
+                        get_dir_size(
+                            backup_path, include_named_streams=verify_named_streams,
+                            progress=progress,
+                        ) == expected_size
+                    )
                 else:
-                    with zipfile.ZipFile(backup_path) as archive:
-                        archive_size = sum(entry.file_size for entry in archive.infolist() if not entry.is_dir())
-                        legacy_valid = archive.testzip() is None and archive_size == expected_size
+                    archive_size = _verify_zip_archive(backup_path, progress=progress)
+                    legacy_valid = archive_size == expected_size
             except (OSError, RuntimeError, zipfile.BadZipFile):
                 legacy_valid = False
             if not legacy_valid:
                 print("Refusing to restore: legacy backup data is incomplete or damaged")
                 return False
             print("Warning: this older backup has no content hash; only size and structure were checked.")
+            progress.item(backup_path)
+
+    progress.finish()
 
     print(f"Restoring backup: {backup_id}")
     print(f"Backup time: {manifest.get('timestamp', 'Unknown')}")
@@ -1107,6 +1553,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                     overwrite,
                     item.get("integrity_sha256"),
                     item.get("size"),
+                    verify_named_streams=verify_named_streams,
                 )
                 if not restored:
                     print("        [Skipped; destination appeared during restore and was preserved.]\n")
@@ -1125,7 +1572,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 # Restore by copying the saved directory.
                 command = [
                         "robocopy", backup_path, original_path,
-                        "/E", "/COPY:DAT", "/R:1", "/W:1",
+                        "/E", "/COPY:DAT", "/DCOPY:DAT", "/R:1", "/W:1",
                         "/XJ",
                         "/NFL", "/NDL", "/NJH", "/NJS",
                     ]
@@ -1312,7 +1759,9 @@ def main():
         try:
             if args.json:
                 with redirect_stdout(io.StringIO()):
-                    manifest = create_backup(args.paths, args.priority)
+                    manifest = create_backup(
+                        args.paths, args.priority, progress_stream=sys.stderr
+                    )
             else:
                 manifest = create_backup(args.paths, args.priority)
             print(json.dumps(manifest, ensure_ascii=bool(args.json), indent=2))

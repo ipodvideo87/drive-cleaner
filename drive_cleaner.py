@@ -74,15 +74,17 @@ def _scan_flow():
                     return
             elif normalized_target is not None:
                 wiztree_mode = "standard"
-                print("Folder scans use standard mode; fast MFT is available only for whole-drive scans.")
-            include_choice = _prompt_yes_no("Include individual files in the export?", default=True)
+                print("WizTree fast scanning is available only for a full drive; this folder will use standard scanning.")
+            include_choice = _prompt_yes_no("Include individual files as well as folders in the scan results?", default=True)
             if include_choice is None:
                 print("Scan cancelled.")
                 return
             include_files = include_choice
+            if not include_files:
+                print("Folder-only results cannot be used to select individual files later.")
             max_depth = _prompt_integer(
-                "Maximum export depth (0 = unlimited)", 0, 0,
-                "Export depth must be zero or greater.",
+                "Maximum folder depth to show (0 = all levels)", 0, 0,
+                "Folder depth cannot be negative.",
             )
             if max_depth is None:
                 print("Scan cancelled.")
@@ -116,7 +118,7 @@ def _scan_flow():
         _pause()
         return
     try:
-        choice = input("Open this scan in the review menu now? [Y/n]: ").strip().lower()
+        choice = input("Review this scan now? [Y/n]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         return
     if choice not in {"n", "no"}:
@@ -125,14 +127,15 @@ def _scan_flow():
 
 def _backup_menu():
     while True:
-        print("\nBackup manager")
+        print("\nRecovery backups")
+        print("Cleanup plans can create backups. Here you can list, check storage, restore, or delete saved backups.")
         print("1) List saved backups")
-        print("2) Check backup drive")
-        print("3) Restore a backup")
-        print("4) Permanently delete a backup")
-        print("0) Back")
+        print("2) Show the backup drive and free space")
+        print("3) Restore a saved backup")
+        print("4) Permanently delete a saved backup")
+        print("0) Back to the main menu")
         try:
-            choice = input("Choice: ").strip().lower()
+            choice = input("Select an option [0-4]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
         if choice in {"0", "q", "back"}:
@@ -144,15 +147,15 @@ def _backup_menu():
             root = backup.find_backup_drive()
             if root:
                 free_bytes = backup._get_drive_free_space(root)
-                print(f"Backup drive: {root}\nFree space: {backup.format_size(free_bytes)}")
+                print(f"Backup location: {root}\nAvailable space: {backup.format_size(free_bytes)}")
             else:
-                print("No suitable non-system backup drive was found.")
+                print("No separate backup drive with enough free space was found.")
             _pause()
         elif choice in {"3", "4"}:
             manifests = backup.list_backups()
             backup.print_backups_table(manifests)
             try:
-                backup_id = input("Backup ID (blank to cancel): ").strip()
+                backup_id = input("Enter the backup ID shown in the list (blank to cancel): ").strip()
             except (EOFError, KeyboardInterrupt):
                 return
             if not backup_id:
@@ -163,11 +166,11 @@ def _backup_menu():
                 _pause()
                 continue
             if choice == "3":
-                print("Choose how to handle files that already exist at these saved paths:")
+                print("Some destination files already exist. Choose what to do:")
                 for item in manifest.get("items", []):
                     print(f"  {item.get('original_path', '(unknown path)')}")
                 try:
-                    confirm = input("Type OVERWRITE to replace existing files, MERGE to preserve them and restore missing files, or press Enter to cancel: ").strip().upper()
+                    confirm = input("Type OVERWRITE to replace them, MERGE to keep them and restore missing files, or press Enter to cancel: ").strip().upper()
                 except (EOFError, KeyboardInterrupt):
                     return
                 if confirm in {"OVERWRITE", "MERGE"}:
@@ -177,7 +180,7 @@ def _backup_menu():
                     print("Restore cancelled.")
             else:
                 try:
-                    confirm = input(f"Permanently delete backup {backup_id}? Type DELETE to continue: ").strip()
+                    confirm = input(f"Permanently delete saved backup {backup_id}? Type DELETE to continue: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     return
                 if confirm == "DELETE":
@@ -186,7 +189,7 @@ def _backup_menu():
                     print("Backup deletion cancelled.")
             _pause()
         else:
-            print("Enter 0, 1, 2, 3, or 4.")
+            print("Choose 0, 1, 2, 3, or 4.")
 
 
 def _print_welcome():
@@ -198,9 +201,14 @@ def _print_welcome():
       '-----------------------------'
           FIND SPACE. KEEP CONTROL.
 
-    Scan -> Review -> Select -> Back up -> Clean
-    Scans and reviews never delete files. You choose targets before a separate cleanup.
-    Start with 1 to scan, or 2 to review a previous scan.
+    Scan -> Review -> Choose files/folders -> Optional backup -> Confirm -> Clean
+    Scanning and review never remove anything.
+    Choose individual files, folders, or both from the review list.
+    Protected and project data are always kept. Higher-risk candidates inside a folder are kept unless you explicitly select their listed entries too.
+    The preview shows up to 12 direct items; other contents may also be removed.
+    The saved plan lets you choose the final items again before cleanup.
+    Without a backup, removed items cannot be restored by Drive Cleanr.
+    Choose 1 to scan now or 2 to review a saved scan.
 """)
 
 
@@ -210,12 +218,12 @@ def main_menu():
     while True:
         print("\nDrive Cleanr")
         print("=" * 48)
-        print("1) Scan a drive or folder (choose WizTree or WinDirStat)")
-        print("2) Use a previous scan")
-        print("3) Manage backups")
+        print("1) Scan a drive or folder (WizTree or WinDirStat)")
+        print("2) Review a previous scan")
+        print("3) Manage recovery backups")
         print("0) Exit")
         try:
-            choice = input("Choice: ").strip().lower()
+            choice = input("Select an option [0-3]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             return
