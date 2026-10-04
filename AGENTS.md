@@ -4,6 +4,10 @@
 
 Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservative Windows cleanup plans. A scan is evidence for a review, not permission to remove anything.
 
+## Source of truth
+
+- Treat these requirements as the current project policy. If older documentation or behavior conflicts with them, bring the documentation or implementation up to date; do not silently weaken a safety requirement.
+
 ## Safety requirements
 
 - Never run a cleanup against a real user path as part of development or tests. Use temporary directories and mocked process calls.

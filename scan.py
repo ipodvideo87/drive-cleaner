@@ -596,8 +596,8 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
                '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
     else:
         # WinDirStat 2.6+ /SaveTo runs headlessly and selects CSV from the suffix.
-        print("Note: WinDirStat applies its saved filters and scan exclusions.")
-        print("Check them in WinDirStat if you expect a full scan.")
+        print("Note: WinDirStat follows its saved filters, exclusions, and other scan settings.")
+        print("These settings can leave files out of the results; review them in WinDirStat before expecting a full scan.")
         cmd = [executable, '/SaveTo', partial_file, drive]
 
     print(f"Starting {app_name} scan: {drive}")

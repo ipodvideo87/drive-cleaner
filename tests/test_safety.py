@@ -5451,7 +5451,8 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertEqual(Path(captured["command"][2]).parent.name, ".incomplete")
         self.assertNotIn("Command:", output_text)
         self.assertNotIn("python scan.py --cleanup", output_text)
-        self.assertIn("applies its saved filters and scan exclusions", output_text)
+        self.assertIn("follows its saved filters, exclusions, and other scan settings", output_text)
+        self.assertIn("can leave files out of the results", output_text)
         self.assertIn("Earlier scans and cleanup plans were kept.", output_text)
 
     def test_windirstat_rejects_wiztree_only_export_options(self):
