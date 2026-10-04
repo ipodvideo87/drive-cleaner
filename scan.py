@@ -14,7 +14,7 @@ import stat
 from datetime import datetime
 from pathlib import Path
 
-from error_messages import describe_error
+from error_messages import describe_error, safe_terminal_text
 
 # Configuration: resolve relative to this script's directory instead of hardcoding an absolute path
 SKILL_DIR = Path(__file__).resolve().parent
@@ -376,23 +376,28 @@ def _scan_process_has_exited(process):
 
 
 def _remove_or_preserve_partial_scan(process, filepath):
-    """Remove a failed export only after confirming its scanner has stopped."""
+    """Stop a scanner before cleanup and report how its partial export ended."""
     if _stop_scan_process(process):
-        _remove_partial_scan_export(filepath)
-        return True
+        return _remove_partial_scan_export(filepath)
     print("Scanner could not be confirmed stopped; preserving its incomplete export:")
-    print(filepath)
-    return False
+    print(safe_terminal_text(filepath))
+    return "running"
 
 
 def _remove_partial_scan_export(filepath):
     if _path_has_reparse_component(filepath):
-        print("Refusing to remove a partial export through a reparse point")
-        return
+        print("Refusing to remove a partial export through a reparse point or junction; it was preserved at:")
+        print(safe_terminal_text(filepath))
+        return "preserved"
     try:
         os.unlink(filepath)
-    except OSError:
-        pass
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        print(f"Could not remove the incomplete scan export; it was preserved. {describe_error(exc)}")
+        print(safe_terminal_text(filepath))
+        return "preserved"
+    return "removed"
 
 
 def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner"):
@@ -638,8 +643,13 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         print("Process timed out")
         return None
     except KeyboardInterrupt:
-        if _remove_or_preserve_partial_scan(process, partial_file):
+        partial_status = _remove_or_preserve_partial_scan(process, partial_file)
+        if partial_status == "removed":
             print("\nScan cancelled; the scanner was stopped and its partial export was removed.")
+        elif partial_status == "missing":
+            print("\nScan cancelled; the scanner was stopped and no incomplete export remained.")
+        elif partial_status == "preserved":
+            print("\nScan cancelled; the scanner was stopped, but its incomplete export could not be removed and was preserved.")
         else:
             print("\nScan cancelled; its incomplete export was preserved because the scanner may still be running.")
         return None

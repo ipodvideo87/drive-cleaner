@@ -6219,6 +6219,58 @@ class ScanSafetyTests(unittest.TestCase):
                 finally:
                     scan.DATA_DIR = old_data_dir
 
+    def test_cancelled_scan_reports_partial_export_when_removal_fails(self):
+        fixed_time = datetime(2026, 9, 28, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            partial_export = data_dir / ".incomplete" / "scan_windirstat_20260928120000000000.csv"
+
+            class StoppableProcess:
+                exited = False
+
+                def poll(self):
+                    return 0 if self.exited else None
+
+                def terminate(self):
+                    self.exited = True
+
+                def wait(self, timeout=None):
+                    self.exited = True
+                    return 0
+
+                def kill(self):
+                    self.exited = True
+
+            process = StoppableProcess()
+
+            def fake_popen(command, **_kwargs):
+                Path(command[2]).write_text("partial scan", encoding="utf-8")
+                return process
+
+            def refuse_partial_unlink(path):
+                if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(partial_export)):
+                    raise PermissionError(5, "mocked access denied")
+                return original_unlink(path)
+
+            original_unlink = os.unlink
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
+                 mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                 mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0)), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                 mock.patch.object(scan, "wait_for_scan_process", side_effect=KeyboardInterrupt()), \
+                 mock.patch.object(scan.os, "unlink", side_effect=refuse_partial_unlink), \
+                 redirect_stdout(output):
+                self.assertIsNone(scan.scan("D:", app="windirstat"))
+
+            self.assertTrue(process.exited)
+            self.assertEqual(partial_export.read_text(encoding="utf-8"), "partial scan")
+            self.assertIn("Could not remove the incomplete scan export; it was preserved.", output.getvalue())
+            self.assertIn(str(partial_export), output.getvalue())
+            self.assertIn("scanner was stopped, but its incomplete export could not be removed and was preserved", output.getvalue())
+            self.assertNotIn("because the scanner may still be running", output.getvalue())
+
 
 class BackupSafetyTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "backup verification uses Windows paths")
