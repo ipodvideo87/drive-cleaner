@@ -7,6 +7,7 @@ import sys
 import analyze
 import backup
 import scan
+from error_messages import safe_terminal_text
 
 
 def _prompt_yes_no(prompt, default=True):
@@ -54,12 +55,31 @@ def _pause():
 def _prompt_scanner_executable_path(app):
     """Let a guided user locate an installed or portable scanner for one scan."""
     finder = scan.find_wiztree if app == "wiztree" else scan.find_windirstat
-    if finder():
-        return ""
-
     scanner_name = "WizTree" if app == "wiztree" else "WinDirStat"
-    print(f"Drive Cleanr could not find {scanner_name} automatically.")
-    print("Enter the full path to its .exe file, or press Enter to cancel.")
+    detected_executable = finder()
+    if detected_executable:
+        shown_path = safe_terminal_text(detected_executable, fallback="scanner path")
+        print(f"Found {scanner_name}: {shown_path}")
+        while True:
+            try:
+                answer = input("Use this scanner for this scan? [Y/n/q]: ").strip().lower()
+            except EOFError:
+                print("Scan setup cancelled.")
+                return None
+            except KeyboardInterrupt:
+                print("\nScan setup cancelled.")
+                return None
+            if answer in {"", "y", "yes"}:
+                return ""
+            if answer in {"n", "no"}:
+                break
+            if answer in {"q", "quit", "cancel"}:
+                print("Scan setup cancelled.")
+                return None
+            print("Enter Y to use the found scanner, N to choose another .exe file, or Q to cancel.")
+    else:
+        print(f"Drive Cleanr could not find {scanner_name} automatically.")
+    print("Enter the full path to its .exe file for this scan, or press Enter to cancel.")
     while True:
         try:
             value = input(f"{scanner_name} executable path: ").strip()
