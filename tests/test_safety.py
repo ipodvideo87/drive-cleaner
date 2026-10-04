@@ -4403,6 +4403,31 @@ class ScanSafetyTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"WINDIRSTAT_PATH": str(windirstat)}):
                 self.assertEqual(scan.find_windirstat(), str(windirstat))
 
+    def test_manual_scanner_path_requires_an_existing_absolute_exe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            text_file = executable.with_suffix(".txt")
+            text_file.touch()
+
+            self.assertEqual(scan.normalize_scanner_executable_path(f'"{executable}"'), str(executable))
+            self.assertIsNone(scan.normalize_scanner_executable_path("relative\\WizTree64.exe"))
+            self.assertIsNone(scan.normalize_scanner_executable_path(str(text_file)))
+            self.assertIsNone(scan.normalize_scanner_executable_path(str(executable.with_name("missing.exe"))))
+            self.assertIsNone(scan.normalize_scanner_executable_path(None))
+
+    def test_manual_wiztree_launcher_path_prefers_paired_64_bit_worker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher = Path(temp_dir) / "WizTree.exe"
+            worker = Path(temp_dir) / "WizTree64.exe"
+            launcher.touch()
+            worker.touch()
+            self.assertEqual(
+                scan.normalize_scanner_executable_path(str(launcher), app="wiztree"),
+                str(worker),
+            )
+
     def test_scan_target_accepts_drive_roots_and_existing_local_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertEqual(scan._normalize_scan_target("d:"), "D:")
@@ -4458,6 +4483,53 @@ class ScanSafetyTests(unittest.TestCase):
                 self.assertIn(expected_flag, captured["command"])
                 expected_mode = "standard" if expected_flag == "/admin=0" else "fast"
                 self.assertTrue(Path(result).name.startswith(f"scan_wiztree_{expected_mode}_"))
+
+    def test_scan_uses_a_manually_selected_scanner_executable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            executable = root / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            data_dir = root / "scan-data"
+            captured = {}
+
+            def write_mock_export(command, **_kwargs):
+                captured["command"] = command
+                export_path = Path(next(
+                    argument.split("=", 1)[1] for argument in command
+                    if argument.startswith("/export=")
+                ))
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
+                return object()
+
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "check_admin", return_value=False), \
+                 mock.patch.object(scan, "find_wiztree", side_effect=AssertionError("auto-discovery should not run")), \
+                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_export), \
+                 redirect_stdout(io.StringIO()):
+                result = scan.scan(
+                    "D:", app="wiztree", wiztree_mode="standard",
+                    scanner_executable_path=str(executable),
+                )
+
+            self.assertTrue(result and Path(result).is_file())
+            self.assertEqual(captured["command"][0], str(executable))
+
+    def test_scan_does_not_launch_an_invalid_manual_scanner_path(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "check_admin", return_value=False), \
+             mock.patch.object(scan, "find_wiztree", side_effect=AssertionError("manual path must not fall back")), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             redirect_stdout(output):
+            result = scan.scan(
+                "D:", app="wiztree", wiztree_mode="standard",
+                scanner_executable_path="relative\\missing.exe",
+            )
+        self.assertIsNone(result)
+        launch.assert_not_called()
+        self.assertIn("full path to an existing .exe file", output.getvalue())
 
     def test_wiztree_auto_mode_uses_standard_for_folders_even_when_elevated(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as temp_dir:
@@ -4572,6 +4644,7 @@ class ScanSafetyTests(unittest.TestCase):
     def test_guided_scan_runs_chosen_scanner_then_opens_review(self):
         output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui") as run_review, \
              mock.patch("builtins.input", side_effect=["D:", "", ""]) as input_mock, \
@@ -4583,6 +4656,59 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertFalse(any("individual files" in prompt for prompt in prompts))
         self.assertNotIn("python scan.py", output.getvalue())
         self.assertNotIn("python analyze.py", output.getvalue())
+
+    def test_guided_scan_can_locate_a_portable_scanner_when_discovery_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            output = io.StringIO()
+            with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+                 mock.patch.object(scan, "find_wiztree", return_value=None), \
+                 mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+                 mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "relative\\missing.exe", f'"{executable}"', "D:", "y", "0", "30",
+                 ]), \
+                 redirect_stdout(output):
+                drive_cleaner._scan_flow()
+
+            run_scan.assert_called_once_with(
+                drive="D:", include_files=True, max_depth=0, timeout=1800,
+                app="wiztree", wiztree_mode="auto",
+                scanner_executable_path=str(executable),
+            )
+            self.assertIn("could not find WizTree automatically", output.getvalue())
+            self.assertIn("That is not an existing .exe file", output.getvalue())
+            self.assertIn("full path to its .exe file", output.getvalue())
+
+    def test_guided_scan_can_locate_windirstat_when_discovery_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WinDirStat.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+                 mock.patch.object(scan, "find_windirstat", return_value=None), \
+                 mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 mock.patch("builtins.input", side_effect=[str(executable), "D:", "", "n"]):
+                drive_cleaner._scan_flow()
+        run_scan.assert_called_once_with(
+            drive="D:", include_files=True, max_depth=0, timeout=1800,
+            app="windirstat", scanner_executable_path=str(executable),
+        )
+
+    def test_guided_scanner_path_prompt_can_be_cancelled(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value=None), \
+             mock.patch.object(scan, "scan") as run_scan, \
+             mock.patch("builtins.input", return_value=""), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+        run_scan.assert_not_called()
+        self.assertIn("Scan setup cancelled.", output.getvalue())
 
     def test_direct_scan_cli_points_back_to_review_menu_without_extra_command(self):
         output = io.StringIO()
@@ -4599,6 +4725,7 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_guided_wiztree_scan_keeps_the_file_rows_choice(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
              mock.patch("builtins.input", side_effect=["D:", "1", "n", "0", "30", "n"]) as input_mock:
@@ -4609,6 +4736,7 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_guided_wiztree_scan_passes_requested_export_depth(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
              mock.patch("builtins.input", side_effect=["C:", "", "", "4", "30", "n"]):
@@ -4620,6 +4748,7 @@ class ScanSafetyTests(unittest.TestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode") as choose_mode, \
              mock.patch.object(scan, "scan", return_value=None) as run_scan, \
              mock.patch.object(drive_cleaner, "_pause"), \
@@ -4634,6 +4763,7 @@ class ScanSafetyTests(unittest.TestCase):
     def test_guided_wiztree_prompts_retry_invalid_values(self):
         output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
@@ -4650,6 +4780,7 @@ class ScanSafetyTests(unittest.TestCase):
     def test_guided_scan_can_cancel_during_option_prompts(self):
         output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan") as run_scan, \
              mock.patch("builtins.input", side_effect=["D:", "q"]), \

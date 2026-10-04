@@ -51,9 +51,39 @@ def _pause():
         pass
 
 
+def _prompt_scanner_executable_path(app):
+    """Let a guided user locate an installed or portable scanner for one scan."""
+    finder = scan.find_wiztree if app == "wiztree" else scan.find_windirstat
+    if finder():
+        return ""
+
+    scanner_name = "WizTree" if app == "wiztree" else "WinDirStat"
+    print(f"Drive Cleanr could not find {scanner_name} automatically.")
+    print("Enter the full path to its .exe file, or press Enter to cancel.")
+    while True:
+        try:
+            value = input(f"{scanner_name} executable path: ").strip()
+        except EOFError:
+            print("Scan setup cancelled.")
+            return None
+        except KeyboardInterrupt:
+            print("\nScan setup cancelled.")
+            return None
+        if not value or value.casefold() in {"q", "quit", "cancel"}:
+            print("Scan setup cancelled.")
+            return None
+        normalized = scan.normalize_scanner_executable_path(value, app=app)
+        if normalized:
+            return normalized
+        print("That is not an existing .exe file at a full path. Try again, or press Enter to cancel.")
+
+
 def _scan_flow():
     app = scan.choose_scanner()
     if not app:
+        return
+    scanner_executable_path = _prompt_scanner_executable_path(app)
+    if scanner_executable_path is None:
         return
     try:
         target = input("Drive or folder to scan [C:]: ").strip() or "C:"
@@ -113,6 +143,8 @@ def _scan_flow():
     }
     if app == "wiztree":
         scan_options["wiztree_mode"] = wiztree_mode
+    if scanner_executable_path:
+        scan_options["scanner_executable_path"] = scanner_executable_path
     csv_path = scan.scan(**scan_options)
     if not csv_path:
         _pause()

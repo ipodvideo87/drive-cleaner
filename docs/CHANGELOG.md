@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Let guided users enter the full path to an installed or portable scanner executable when automatic discovery fails, and validate it before passing it to the scan process.
 - Use the project directory consistently in `SKILL.md` script examples and guard its quoted YAML description against regressions.
 - Reject malformed backup manifest field types and unsafe verification source paths cleanly before source filesystem checks.
 - Render unrecognized backup manifest statuses as `Unknown` so malformed backups remain manageable for deletion without being treated as restorable.

@@ -58,6 +58,28 @@ def find_windirstat():
     return shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
 
 
+def normalize_scanner_executable_path(path, app=None):
+    """Return a normalized absolute path to an existing scanner executable."""
+    try:
+        value = os.fspath(path).strip()
+        if len(value) >= 2 and value[0] == value[-1] == '"':
+            value = value[1:-1]
+        value = os.path.expandvars(os.path.expanduser(value))
+        if (not value or not os.path.isabs(value)
+                or Path(value).suffix.casefold() != ".exe"
+                or not os.path.isfile(value)):
+            return None
+        normalized = os.path.normpath(value)
+        if (isinstance(app, str) and app.casefold() == "wiztree"
+                and Path(normalized).name.casefold() == "wiztree.exe"):
+            worker = Path(normalized).with_name("WizTree64.exe")
+            if worker.is_file():
+                return os.path.normpath(str(worker))
+        return normalized
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _get_windows_file_version(path):
     """Read a Windows executable's fixed product version, or return None."""
     if os.name != "nt":
@@ -415,9 +437,10 @@ def _is_whole_drive_target(target):
     return bool(re.fullmatch(r"[A-Za-z]:", normalized.rstrip("\\/")))
 
 
-def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree", wiztree_mode="auto"):
+def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree",
+         wiztree_mode="auto", scanner_executable_path=None):
     """
-    Run a WizTree scan
+    Run a scan with the selected disk-usage scanner.
 
     Args:
         drive: drive to scan
@@ -426,6 +449,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         max_depth: maximum export depth; 0 means unlimited
         app: scanner to invoke ("wiztree" or "windirstat")
         wiztree_mode: "auto", "fast" (full-drive scan; Administrator required), or "standard"
+        scanner_executable_path: optional full path selected for this scan
 
     Returns:
         str: exported CSV file path, or None on failure
@@ -474,7 +498,13 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         else:
             print("WizTree fast full-drive scan selected.")
 
-    executable = find_wiztree() if app == "wiztree" else find_windirstat()
+    if scanner_executable_path is None:
+        executable = find_wiztree() if app == "wiztree" else find_windirstat()
+    else:
+        executable = normalize_scanner_executable_path(scanner_executable_path, app=app)
+        if executable is None:
+            print("Error: scanner location must be the full path to an existing .exe file")
+            return None
     app_name = "WizTree" if app == "wiztree" else "WinDirStat"
     if not executable:
         print(f"Error: {app_name} executable was not found")

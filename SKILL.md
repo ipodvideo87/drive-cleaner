@@ -24,6 +24,7 @@ Use WizTree or WinDirStat scans and a conservative review to help the user choos
    python "<project directory>/drive_cleaner.py"
    ```
    Automatic WizTree mode uses fast scanning for a whole drive when elevated and standard scanning otherwise. Standard scans may miss files this account cannot access. WinDirStat 2.6.0 or newer exports through `/SaveTo`; a detected older version is rejected before scanning, while unreadable version information produces a warning and a scan attempt. Review WinDirStat's saved filters before a whole-drive scan.
+   If automatic scanner discovery fails in the guided menu, enter the full path to its `.exe` file. Direct `scan.py` commands can use `WIZTREE_PATH` or `WINDIRSTAT_PATH`.
 3. Direct scan commands are also available:
    ```bash
    python "<project directory>/scan.py" C: --app wiztree --wiztree-mode standard

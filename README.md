@@ -16,13 +16,13 @@ cd drive-cleaner
 - Windows 10 or newer
 - Python 3.10+
 - Windows PowerShell 5.1 (included with Windows) or PowerShell 7 to run generated cleanup plans
-- [WizTree](https://diskanalyzer.com/) or [WinDirStat](https://github.com/windirstat/windirstat), installed or available through `WIZTREE_PATH` / `WINDIRSTAT_PATH`
+- [WizTree](https://diskanalyzer.com/) or [WinDirStat](https://github.com/windirstat/windirstat), installed or available through the guided scanner-path prompt or `WIZTREE_PATH` / `WINDIRSTAT_PATH`
 - An administrator terminal for WizTree's fast full-drive scan (standard WizTree scans do not require elevation)
 - Optional: a separate non-system drive with enough free space for recovery backups
 
 ### Portable versions
 
-Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. If Windows reports an older version, Drive Cleanr stops before scanning and asks you to update; if it cannot read the version, it warns and tries the scan. WizTree's fast full-drive scan requires an Administrator terminal; its standard scan can run without administrator access but may miss files this account cannot access. If automatic discovery misses either executable, set `WIZTREE_PATH` to the 64-bit `WizTree64.exe` or `WINDIRSTAT_PATH` to the `WinDirStat.exe` full path.
+Drive Cleanr supports the official portable versions of [WizTree](https://diskanalyzer.com/download) and [WinDirStat](https://github.com/windirstat/windirstat/releases). Automated WinDirStat scans require version 2.6.0 or newer and use its `/SaveTo` export. If Windows reports an older version, Drive Cleanr stops before scanning and asks you to update; if it cannot read the version, it warns and tries the scan. WizTree's fast full-drive scan requires an Administrator terminal; its standard scan can run without administrator access but may miss files this account cannot access. If the guided menu cannot find a scanner, it lets you enter the full path to its executable for that scan. For direct `scan.py` use, set `WIZTREE_PATH` to the 64-bit `WizTree64.exe` or `WINDIRSTAT_PATH` to the `WinDirStat.exe` full path.
 
 ## Quick start
 
