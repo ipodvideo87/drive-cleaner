@@ -254,6 +254,9 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
     stable_count = 0
 
     while time.monotonic() - start < timeout:
+        if _path_has_reparse_component(filepath):
+            print("Scan results path changed to a reparse point or junction; refusing to read it.")
+            return False
         if os.path.exists(filepath):
             try:
                 size = os.path.getsize(filepath)
@@ -405,6 +408,10 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
             return False
 
         if elapsed - last_report >= 5:
+            if _path_has_reparse_component(filepath):
+                print(f"\nScan export path changed to a reparse point or junction; stopping {scanner_name}.")
+                _stop_scan_process(process)
+                return False
             try:
                 size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
             except OSError:
@@ -419,11 +426,20 @@ def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner
         print(f"\nScanner exited with code {return_code}")
         return False
     print("\nScan finished; checking the results file...")
+    if _path_has_reparse_component(filepath):
+        print("Refusing to read scan results through a reparse point or junction.")
+        return False
     if not wait_for_file(filepath, timeout=30, stable_time=2):
+        return False
+    if _path_has_reparse_component(filepath):
+        print("Scan results changed to a reparse point or junction; refusing to validate them.")
         return False
     valid, error = validate_scan_export(filepath)
     if not valid:
         print(f"\nScan results could not be validated: {error}")
+        return False
+    if _path_has_reparse_component(filepath):
+        print("Scan results changed while they were being validated; refusing to use them.")
         return False
     return True
 
@@ -597,6 +613,10 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         )
 
         if wait_for_scan_process(process, partial_file, timeout=timeout, scanner_name=app_name):
+            if (_path_has_reparse_component(partial_file) or
+                    _path_has_reparse_component(output_file)):
+                print("Scan storage or its export changed to a reparse point or junction; refusing to save it.")
+                return None
             try:
                 os.rename(partial_file, output_file)
             except OSError as exc:

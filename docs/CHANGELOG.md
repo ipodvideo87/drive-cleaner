@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Reject scanner exports that pass through a reparse point or junction before validation or promotion into the saved-scan list.
 - Let guided scan users use the detected executable by default or choose another installed/portable scanner executable for one scan.
 - Ignore a shared `.gitignore` at the user-profile root when detecting project roots, while continuing to protect nested projects and roots containing `.git`.
 - Show byte and percentage progress during the final locked content check immediately before deletion, and while checking large named data streams.

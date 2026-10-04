@@ -5820,6 +5820,46 @@ class ScanSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "unexpected"):
                     scan.wait_for_file(str(export_path), timeout=1)
 
+    def test_wait_for_file_refuses_reparse_paths_before_checking_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+                 mock.patch.object(scan.os.path, "exists") as exists, \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_file(str(export_path), timeout=3))
+
+            exists.assert_not_called()
+            self.assertIn("refusing to read it", output.getvalue())
+
+    def test_scan_process_stops_if_export_becomes_a_reparse_path_during_progress(self):
+        class RunningProcess:
+            def __init__(self):
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.terminated = True
+                return 0
+
+        process = RunningProcess()
+        output = io.StringIO()
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+             mock.patch.object(scan.os.path, "getsize") as getsize, \
+             mock.patch.object(scan.time, "sleep", return_value=None), \
+             redirect_stdout(output):
+            self.assertFalse(scan.wait_for_scan_process(process, "partial.csv", timeout=10))
+
+        self.assertTrue(process.terminated)
+        getsize.assert_not_called()
+        self.assertIn("stopping scanner", output.getvalue())
+
     def test_wait_for_file_separates_progress_from_completion_message(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "scan.csv"
@@ -5904,6 +5944,72 @@ class ScanSafetyTests(unittest.TestCase):
             with mock.patch.object(scan, "wait_for_file", return_value=True), \
                  mock.patch("builtins.print"):
                 self.assertFalse(scan.wait_for_scan_process(FinishedProcess(), str(export_path)))
+
+    def test_scan_process_refuses_reparse_export_before_reading_it(self):
+        class FinishedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+                 mock.patch.object(scan, "wait_for_file") as wait_for_file, \
+                 mock.patch.object(scan, "validate_scan_export") as validate_export, \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_scan_process(FinishedProcess(), str(export_path)))
+
+            wait_for_file.assert_not_called()
+            validate_export.assert_not_called()
+            self.assertIn("reparse point or junction", output.getvalue())
+
+    def test_scan_refuses_to_promote_export_that_becomes_a_reparse_path(self):
+        fixed_time = datetime(2026, 9, 28, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            partial_export = data_dir / ".incomplete" / "scan_windirstat_20260928120000000000.csv"
+
+            class FinishedProcess:
+                def poll(self):
+                    return 0
+
+                def wait(self):
+                    return 0
+
+            def fake_popen(command, **_kwargs):
+                export_path = Path(command[2])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
+                return FinishedProcess()
+
+            def reports_partial_export_as_reparse(path):
+                return os.path.normpath(os.fspath(path)) == os.path.normpath(str(partial_export))
+
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
+                 mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                 mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0)), \
+                 mock.patch.object(
+                     scan, "_path_has_reparse_component",
+                     side_effect=reports_partial_export_as_reparse,
+                 ), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen) as launch, \
+                 mock.patch.object(scan, "wait_for_scan_process", return_value=True) as wait_for_scan, \
+                 redirect_stdout(output):
+                result = scan.scan("D:", app="windirstat")
+                self.assertIsNone(scan.get_latest_scan())
+
+            self.assertIsNone(result)
+            self.assertTrue(partial_export.is_file())
+            self.assertFalse((data_dir / "scan_windirstat_20260928120000000000.csv").exists())
+            launch.assert_called_once()
+            wait_for_scan.assert_called_once()
+            self.assertIn("refusing to save it", output.getvalue())
 
     def test_timeout_terminates_a_stuck_scan(self):
         class StuckProcess:
