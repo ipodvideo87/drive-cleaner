@@ -645,6 +645,56 @@ class AnalyzeSafetyTests(unittest.TestCase):
         run_preview.assert_not_called()
         self.assertIn("PowerShell was not found", output.getvalue())
 
+    @unittest.skipUnless(os.name == "nt", "generated cleanup plans target Windows")
+    def test_guided_preview_runs_generated_plan_without_removing_fixture(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        temp_root = Path.home()
+        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected_folder = root / "Temp"
+            selected_folder.mkdir()
+            candidate = selected_folder / "preview-target.tmp"
+            candidate.write_bytes(b"guided preview fixture")
+            plan_path = root / "reviewed-preview.ps1"
+            label = "Folder named Temp (inspect its owner and contents; the name alone does not prove it is temporary)"
+            item = {
+                "path": str(selected_folder) + "\\",
+                "name": label,
+                "size": candidate.stat().st_size,
+                "size_formatted": f"{candidate.stat().st_size} B",
+                "kind": "Directory",
+            }
+            results = {"categories": {"medium": {"name": "Medium", "items": [item]}}}
+            analyze.generate_clean_script(
+                results, str(plan_path), "medium", selected_paths=[item["path"]]
+            )
+
+            command = []
+            preview_stdout = []
+            real_run = cleanup_runner.subprocess.run
+
+            def capture_preview(args, check=False):
+                command.extend(args)
+                result = real_run(
+                    args, check=check, capture_output=True, text=True, timeout=90,
+                )
+                preview_stdout.append(result.stdout)
+                return SimpleNamespace(returncode=result.returncode)
+
+            with mock.patch("builtins.input", return_value="y"), \
+                 mock.patch.object(cleanup_runner.shutil, "which", return_value=powershell), \
+                 mock.patch.object(cleanup_runner.subprocess, "run", side_effect=capture_preview), \
+                 redirect_stdout(io.StringIO()):
+                self.assertTrue(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            self.assertEqual(command[-1], "-PreviewOnly")
+            self.assertEqual(command[command.index("-File") + 1], str(plan_path))
+            self.assertIn("Preview complete: 1 file and 1 folder would be removed", preview_stdout[0])
+            self.assertTrue(candidate.is_file())
+            self.assertEqual(candidate.read_bytes(), b"guided preview fixture")
+
     def test_review_menu_blank_selection_creates_no_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
