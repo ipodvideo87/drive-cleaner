@@ -11,6 +11,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Never bypass the user's explicit plan review. Generated scripts must ask before doing work unless the user separately starts them with `-Force` after reviewing the script.
 - Recovery backups are optional and must never be created without the user's choice. Interactive cleanup must offer one; Enter means no backup, and declining it must not block cleanup. A reviewed script started with `-Force` must not create a backup unless the user explicitly passes `-Backup`; `-NoBackup` explicitly skips it, and passing both switches must be rejected. If backup is enabled, create and verify it fully before the first removal; any missing, incomplete, or failed backup must stop cleanup. Without a backup, clearly warn that Drive Cleanr cannot restore removed data and require a distinct typed confirmation in the interactive flow; for a reviewed script, `-Force` is the explicit confirmation.
 - Treat CSV content and backup manifests as untrusted input. Quote it as data, constrain paths and backup IDs, recheck target type and reparse-point status immediately before removal, and preserve safety exclusions.
+- Cleanup selection must let users choose individual scanned files as well as folders. A file selection targets that file; a folder selection targets its eligible descendants and must preserve protected contents. Never imply that a file can be selected individually when the scan did not record file-level entries; explain how to create a scan that includes them.
 - Do not include local scan exports, backup contents, generated scripts, or personal paths in source control.
 - Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
 - Prefer leaving uncertain files untouched. Avoid overstating reclaimable size: folder totals can overlap and hard links can inflate apparent savings.
@@ -18,7 +19,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 ## User-facing wording
 
 - Keep the entire user workflow clear and consistent in plain English: welcome screen, menus, prompts, progress messages, reports, cleanup results, and recovery options.
-- Explain what each choice controls. Make it clear when a selection is an individual file or a folder, and when choosing a folder may preserve protected contents.
+- Explain what each choice controls. Label each selection as an individual file or a folder, say whether a folder choice includes eligible descendants, and explain when protected contents will be preserved.
 - Keep instructions brief and actionable. Prefer guided menu choices over follow-up command examples when the user can continue inside the running program.
 - Use consistent everyday terms, explain necessary technical terms at the point of use, and check English-language output for accidental untranslated or garbled text.
 - For long operations, say what is being checked and show periodic progress so users can tell the program is still working.

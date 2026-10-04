@@ -140,19 +140,125 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "low": {"name": "Low", "items": []},
         }}
         output = io.StringIO()
-        with mock.patch("builtins.input", return_value="1,2"), redirect_stdout(output):
-            selected = analyze.select_cleanup_candidates(results, "high")
+        with mock.patch("builtins.input", side_effect=["1,2", ""]), redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(results, "high")
         self.assertEqual(selected, [
             r"C:\Users\A\AppData\Local\Temp\large-file.tmp",
             r"C:\Users\A\AppData\Local\Temp\cache",
         ])
+        self.assertEqual(expanded, [])
         self.assertIn("| File |", output.getvalue())
         self.assertIn("| Folder |", output.getvalue())
         self.assertIn("Each row is labeled File or Folder.", output.getvalue())
         self.assertIn("Choose individual files, folders, or both by number.", output.getvalue())
         self.assertIn("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.", output.getvalue())
         self.assertIn("Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too.", output.getvalue())
-        self.assertIn("Only listed entries can be selected.", output.getvalue())
+        self.assertIn("To choose scan entries inside a folder, enter D.", output.getvalue())
+        self.assertIn("The scan must include file rows to select individual files.", output.getvalue())
+
+    def test_picker_browses_collapsed_folder_contents_and_can_select_one_exact_file(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        file_path = folder_path + r"content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label, "safe": True,
+        }
+        file_item = {
+            "path": file_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label, "safe": True,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": file_item}]}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value=expanded_results) as expand, \
+             mock.patch("builtins.input", side_effect=["D", "1", "1", "D", ""]), \
+             redirect_stdout(output):
+            selected_paths, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+        self.assertEqual(selected_paths, [file_path])
+        self.assertEqual(expanded, [("high", file_item)])
+        expand.assert_called_once_with(
+            "saved-scan.csv", 50, progress_callback=mock.ANY,
+            expand_under=folder_path, expand_priority="high",
+        )
+        self.assertIn("Searching the saved scan for matching files and folders", output.getvalue())
+        self.assertIn("Found 1 matching scan entries", output.getvalue())
+
+        plan_results = analyze._results_with_expanded_candidates(results, expanded)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "exact-file.ps1"
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
+                 mock.patch.object(analyze, "_matches_cleanup_rule", return_value=True), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                analyze.generate_clean_script(
+                    plan_results, str(output_path), "high", selected_paths=selected_paths
+                )
+            script = output_path.read_text(encoding="utf-8-sig")
+        self.assertIn(f"Path = '{file_path}'", script)
+        self.assertNotIn(f"Path = '{folder_path}'", script)
+        self.assertEqual(results["categories"]["high"]["items"], [folder_item])
+
+    def test_folder_browser_paginates_and_filters_exact_scan_entries(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label,
+        }
+        expanded_candidates = []
+        for index in range(26):
+            item = {
+                "path": folder_path + f"\\cache-{index:02}.bin",
+                "size": index + 1, "size_formatted": f"{index + 1} B",
+                "kind": "File", "name": label,
+            }
+            expanded_candidates.append({"priority": "high", "item": item})
+        output = io.StringIO()
+        with mock.patch.object(
+                analyze, "analyze_csv", return_value={"expanded_candidates": expanded_candidates}), \
+             mock.patch("builtins.input", side_effect=["1", "N", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected[0][1]["path"], folder_path + r"\cache-00.bin")
+        self.assertIn("Page 1 of 2", output.getvalue())
+        self.assertIn("Page 2 of 2", output.getvalue())
+
+        output = io.StringIO()
+        with mock.patch.object(
+                analyze, "analyze_csv", return_value={"expanded_candidates": expanded_candidates}), \
+             mock.patch("builtins.input", side_effect=["1", "F", "cache-12.bin", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected[0][1]["path"], folder_path + r"\cache-12.bin")
+        self.assertIn("Filter: cache-12.bin", output.getvalue())
+
+    def test_folder_browser_explains_when_no_individual_scan_entries_are_available(self):
+        folder_item = {
+            "path": r"C:\Users\A\AppData\Local\npm-cache", "size": 1000,
+            "size_formatted": "1000 B", "kind": "Directory", "name": "npm cache",
+        }
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value={"expanded_candidates": []}), \
+             mock.patch("builtins.input", return_value="1"), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected, [])
+        self.assertIn("If the scan did not include individual files", output.getvalue())
 
     def test_generated_plan_contains_only_explicitly_selected_candidates(self):
         first_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
@@ -230,7 +336,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with mock.patch.object(analyze, "analyze_csv", return_value=results), \
                  mock.patch.object(analyze, "clear_screen"), \
                  mock.patch("builtins.input", side_effect=[
-                     "3", "high", "1", str(plan_path), "", "0",
+                     "3", "high", "1", "", str(plan_path), "", "0",
                  ]), \
                  mock.patch.object(analyze, "generate_clean_script") as generate, \
                  mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
@@ -243,6 +349,52 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("Minimum item size shown: 50 MB", output.getvalue())
             self.assertIn("3) Choose individual files, folders, or both for a cleanup plan", output.getvalue())
             self.assertIn("| Folder |", output.getvalue())
+
+    def test_review_menu_browses_folder_and_generates_plan_for_exact_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+            file_path = folder_path + r"\content.bin"
+            label = "Temporary files (check for installers or builds in progress)"
+            folder_item = {
+                "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+                "kind": "Directory", "name": label, "safe": True,
+            }
+            file_item = {
+                "path": file_path, "size": 100, "size_formatted": "100 B",
+                "kind": "File", "name": label, "safe": True,
+            }
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": [folder_item]},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            expanded_results = {"expanded_candidates": [{"priority": "high", "item": file_item}]}
+            plan_path = root / "exact-file.ps1"
+            output = io.StringIO()
+            with mock.patch.object(analyze, "analyze_csv", side_effect=[results, expanded_results]), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "3", "high", "D", "1", "1", "D", "", str(plan_path), "", "0",
+                 ]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script"), \
+                 redirect_stdout(output):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            args, kwargs = generate.call_args
+            self.assertEqual(args[0]["categories"]["high"]["items"], [folder_item, file_item])
+            self.assertEqual(args[1], str(plan_path))
+            self.assertEqual(args[2], "high")
+            self.assertEqual(kwargs["selected_paths"], [file_path])
+            self.assertEqual(results["categories"]["high"]["items"], [folder_item])
+            self.assertIn("C:\\Users\\A\\AppData\\Local\\npm-cache\\content.bin", output.getvalue())
 
     def test_cleanup_script_run_offer_is_hidden_without_admin_token(self):
         with mock.patch.object(analyze.scan, "check_admin", return_value=False), \
@@ -304,7 +456,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.run_tui(initial_csv=str(csv_path))
             generate.assert_not_called()
 
-    def analyze_rows(self, rows):
+    def analyze_rows(self, rows, **analyze_options):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -314,7 +466,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with mock.patch("analyze.os.path.exists", return_value=True):
                 with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
-                        return analyze.analyze_csv(str(csv_path), min_size_mb=0)
+                        return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
 
     @staticmethod
     def _synthetic_types(rows):
@@ -441,6 +593,55 @@ class AnalyzeSafetyTests(unittest.TestCase):
             exported_report = candidate_list.read_text(encoding="utf-8")
         self.assertIn(str(project), exported_report)
         self.assertIn("project marker: .git", exported_report)
+
+    def test_folder_expansion_finds_exact_nested_items_without_changing_summary_totals(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        nested_file = folder + r"content-v2\entry.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": nested_file, "Size": "800000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False):
+            summary = self.analyze_rows(rows)
+            expanded = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+
+        self.assertEqual([item["path"] for item in summary["categories"]["high"]["items"]], [folder])
+        self.assertEqual(summary["categories"]["high"]["total_size"], 1000000)
+        self.assertEqual(
+            [(candidate["priority"], candidate["item"]["path"])
+             for candidate in expanded["expanded_candidates"]],
+            [("high", nested_file)],
+        )
+        self.assertEqual(expanded["categories"]["high"]["items"][0]["path"], nested_file)
+
+    def test_folder_expansion_keeps_protected_and_project_files_out_of_choices(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        allowed_file = folder + "content-v2\\allowed.bin"
+        protected_file = folder + "content-v2\\protected-token.bin"
+        project_file = folder + "content-v2\\project-cache\\build.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": allowed_file, "Size": "800000"},
+            {"File Name": protected_file, "Size": "700000"},
+            {"File Name": project_file, "Size": "600000"},
+        ]
+
+        def excluded(path, *_args, **_kwargs):
+            return "protected-token" in str(path).casefold()
+
+        def in_project(path, *_args, **_kwargs):
+            return "project-cache" in str(path).casefold()
+
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_is_excluded_path", side_effect=excluded), \
+             mock.patch.object(analyze, "_inside_project_tree", side_effect=in_project):
+            expanded = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+
+        self.assertEqual(
+            [candidate["item"]["path"] for candidate in expanded["expanded_candidates"]],
+            [allowed_file],
+        )
+        self.assertEqual(expanded["project_candidate_count"], 1)
 
     def test_solution_project_and_requirements_files_protect_project_caches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2842,7 +3043,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 self.assertNotEqual(Path(csv_path).parent.name, ".incomplete")
 
                 with mock.patch("builtins.input", side_effect=[
-                        "3", "", "1", str(plan_path), "", "0"]):
+                        "3", "", "1", "", str(plan_path), "", "0"]):
                     analyze.run_tui(initial_csv=csv_path, min_size_mb=0)
 
             self.assertTrue(plan_path.is_file(), output.getvalue())

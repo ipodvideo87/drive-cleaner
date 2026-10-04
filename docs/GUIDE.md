@@ -30,7 +30,7 @@ Choose the most recent scan or enter a scan file path. The picker accepts files,
 
 The report shows when the scan file last changed. Files and folders can change after a scan; scan again before creating a cleanup plan if anything may have changed.
 
-Each selectable entry is labeled **File** or **Folder**. The selection screen lists the exact files and folders available to choose. A file will not appear if it was not included in the scan.
+Each selectable entry is labeled **File** or **Folder**. The main selection list shows the exact suggestions available to choose. Enter `D` to browse scan entries inside a listed folder and select an individual file or subfolder that the summary merged into its parent. The browser shows 25 entries per page; enter `F` to filter by name or path, `N`/`P` to change pages, and `D` when finished. Then press Enter in the main list to finish. `A` selects every suggestion in the main list only. If a scan did not include file rows, individual files cannot be selected; scan again with individual files enabled. A selected folder includes its eligible contents, while protected paths and detected projects remain protected.
 
 High, medium, and low are review levels, not a guarantee of safety. Only standard Windows/user temp roots and the configured `TEMP`/`TMP` locations receive the lower-risk temporary-files label. The recognized temp root itself is omitted so qualifying items inside it can be reviewed and selected individually; folders merely named `Temp` or `Tmp` elsewhere stay in the caution tier. Read [the knowledge base](../references/knowledge.md) before approving unfamiliar targets. Folder sizes may include data that the cleanup plan keeps, so actual free-space gains can be smaller.
 

@@ -1348,7 +1348,8 @@ def _project_protection_lines(results, limit=8):
     return lines
 
 
-def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
+def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=None,
+                expand_priority=None):
     """Analyze a scanner CSV export."""
     csv_size_bytes = os.path.getsize(csv_path)
     results = {
@@ -1377,6 +1378,26 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
     if min_size_mb < 0:
         raise ValueError("min_size_mb must be zero or greater")
     min_size = min_size_mb * 1024 * 1024
+
+    expand_paths = None
+    if expand_under is not None:
+        if isinstance(expand_under, str):
+            expand_under = [expand_under]
+        if not isinstance(expand_under, (list, tuple)) or not expand_under:
+            raise ValueError("expand_under must contain one or more reviewed folder paths")
+        if expand_priority not in (None, "high", "medium", "low"):
+            raise ValueError("expand_priority must be high, medium, low, or None")
+        expand_paths = []
+        for expand_path in expand_under:
+            if not isinstance(expand_path, str) or not _is_local_drive_path(expand_path):
+                raise ValueError("Only reviewed local drive folders can be expanded")
+            clean_path = expand_path.rstrip("\\/")
+            if (_is_excluded_path(expand_path) or
+                    scan._path_has_reparse_component(clean_path) or
+                    not os.path.isdir(clean_path)):
+                raise ValueError("The selected folder is protected, unavailable, or changed; scan it again")
+            expand_paths.append(expand_path)
+        results["expanded_candidates"] = []
 
     def has_named_required_headers(fields):
         keys = {str(value or "").strip().casefold().replace(" ", "") for value in fields}
@@ -1498,6 +1519,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
         source_drives = set()
         project_path_cache = {}
         detected_projects = {}
+        expanded_candidate_keys = set()
         for row in reader:
             rows_processed += 1
             if progress_callback and rows_processed % ANALYSIS_PROGRESS_INTERVAL == 0:
@@ -1511,6 +1533,11 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                 # Resolve column positions once per export. csv.reader parses
                 # quoted rows without allocating a dictionary for every item.
                 path = cell(row, path_column) or ''
+                # An on-demand folder expansion still reads the CSV from start
+                # to finish for byte progress, but avoids filesystem checks for
+                # rows outside the folder the user chose to inspect.
+                if expand_paths and not any(_is_under(path, parent) for parent in expand_paths):
+                    continue
                 logical_size = int(cell(row, size_column) or 0)
                 normalized_path = path.replace("/", "\\")
                 drive, drive_tail = ntpath.splitdrive(normalized_path)
@@ -1611,6 +1638,25 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                                     # or work in progress as one broad target.
                                     results["temp_root_candidate_count"] += 1
                                 else:
+                                    candidate_item = {
+                                        "path": path,
+                                        "size": size,
+                                        "size_formatted": format_size(size),
+                                        "name": pattern_info["name"],
+                                        "safe": pattern_info["safe"],
+                                        "kind": classify_path(path),
+                                    }
+                                    if (expand_paths and
+                                            (expand_priority is None or priority == expand_priority) and
+                                            any(_is_under(path, parent) for parent in expand_paths)):
+                                        candidate_key = (priority, _path_key(path))
+                                        if candidate_key not in expanded_candidate_keys:
+                                            results["expanded_candidates"].append({
+                                                "priority": priority,
+                                                "item": candidate_item,
+                                            })
+                                            expanded_candidate_keys.add(candidate_key)
+
                                     # Avoid double-counting an entry under a selected parent.
                                     existing_paths = [item["path"] for item in results["categories"][priority]["items"]]
                                     is_subdir = any(_is_under(path, p) for p in existing_paths)
@@ -1622,14 +1668,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None):
                                             if not _is_under(item["path"], path) and _path_key(item["path"]) != _path_key(path)
                                         ]
 
-                                        results["categories"][priority]["items"].append({
-                                            "path": path,
-                                            "size": size,
-                                            "size_formatted": format_size(size),
-                                            "name": pattern_info["name"],
-                                            "safe": pattern_info["safe"],
-                                            "kind": classify_path(path),
-                                        })
+                                        results["categories"][priority]["items"].append(candidate_item)
                         break
             except (ValueError, KeyError):
                 continue
@@ -2962,8 +3001,183 @@ def parse_cleanup_selection(answer, item_count):
     return selected
 
 
-def select_cleanup_candidates(results, priority):
-    """Show exact candidates and return the paths explicitly selected by the user."""
+def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
+    """Find and let the user choose exact scan entries inside one listed folder."""
+    if not folder_entries:
+        print("There are no listed folders to browse inside.")
+        return []
+
+    print("\nFolders you can inspect for individual scan entries:")
+    for index, (candidate_priority, item) in enumerate(folder_entries, start=1):
+        print(
+            f"  [{index}] {CLEANABLE_PATTERNS[candidate_priority]['name']} | "
+            f"Folder | {item.get('size_formatted', 'unknown size')} | {item.get('name', 'candidate')}"
+        )
+        print(f"      {item.get('path', '(unknown path)')}")
+    print("Choose one folder number, or B to return.")
+
+    while True:
+        answer = input("Folder to inspect: ").strip()
+        if answer.casefold() in {"b", "back"}:
+            return []
+        if not answer.isdecimal() or not 1 <= int(answer) <= len(folder_entries):
+            print(f"Enter a folder number from 1 to {len(folder_entries)}, or B to return.")
+            continue
+        folder_priority, folder_item = folder_entries[int(answer) - 1]
+        break
+
+    folder_path = folder_item.get("path")
+    if not isinstance(folder_path, str) or not folder_path:
+        print("This folder entry is incomplete. Scan the drive again before selecting it.")
+        return []
+
+    print("Searching the saved scan for matching files and folders inside this folder...")
+
+    def show_search_progress(percent_complete):
+        print(f"\rSearching scan file... {percent_complete:3d}%", end="", flush=True)
+
+    try:
+        expanded_results = analyze_csv(
+            csv_file,
+            min_size_mb,
+            progress_callback=show_search_progress,
+            expand_under=folder_path,
+            expand_priority=None if priority == "all" else folder_priority,
+        )
+    except (ValueError, csv.Error, OSError) as exc:
+        print(f"\nCould not search inside this folder: {describe_error(exc)}")
+        return []
+    print("\rFolder search complete.                              ", flush=True)
+
+    expanded = expanded_results.get("expanded_candidates", [])
+    entries = [
+        (candidate.get("priority"), candidate.get("item"))
+        for candidate in expanded
+        if isinstance(candidate, dict)
+    ]
+    entries = [
+        (candidate_priority, item)
+        for candidate_priority, item in entries
+        if candidate_priority in {"high", "medium", "low"} and isinstance(item, dict)
+    ]
+    entries.sort(key=lambda pair: (-pair[1].get("size", 0), _path_key(pair[1].get("path", ""))))
+    if not entries:
+        print("No matching files or folders were found inside this folder in the saved scan.")
+        print("If the scan did not include individual files, scan again with files included to choose them separately.")
+        return []
+
+    print(f"Found {len(entries)} matching scan entries inside the folder.")
+    print("Selecting a listed folder includes its eligible contents; protected data and detected projects remain protected.")
+    page_size = 25
+    selected = {}
+    page = 0
+    filter_text = ""
+
+    while True:
+        filtered_entries = [
+            entry for entry in entries
+            if not filter_text or filter_text in (
+                str(entry[1].get("name", "")) + " " + str(entry[1].get("path", ""))
+            ).casefold()
+        ]
+        page_count = max(1, (len(filtered_entries) + page_size - 1) // page_size)
+        page = min(page, page_count - 1)
+        first = page * page_size
+        page_entries = filtered_entries[first:first + page_size]
+        print(f"\nMatching entries: {len(filtered_entries)} | Page {page + 1} of {page_count}")
+        if filter_text:
+            print(f"Filter: {filter_text}")
+        if not page_entries:
+            print("No entries match this filter.")
+        for index, (candidate_priority, item) in enumerate(page_entries, start=1):
+            item_path = item.get("path", "")
+            marker = "*" if _path_key(item_path) in selected else " "
+            tier_name = CLEANABLE_PATTERNS[candidate_priority]["name"]
+            print(
+                f"{marker} [{index}] {tier_name} | {display_item_type(item)} | "
+                f"{item.get('size_formatted', 'unknown size')} | {item.get('name', 'candidate')}"
+            )
+            print(f"      {item_path}")
+        print("Numbers add or remove entries. N/P changes page; F filters by name or path; D finishes; B returns.")
+        answer = input("Choose entries on this page: ").strip()
+        command = answer.casefold()
+        if command in {"d", "done", ""}:
+            return list(selected.values())
+        if command in {"b", "back"}:
+            return list(selected.values())
+        if command in {"n", "next"}:
+            if page + 1 < page_count:
+                page += 1
+            else:
+                print("You are already on the last page.")
+            continue
+        if command in {"p", "previous", "prev"}:
+            if page > 0:
+                page -= 1
+            else:
+                print("You are already on the first page.")
+            continue
+        if command in {"f", "filter"}:
+            filter_text = input("Filter by name or path text (blank clears the filter): ").strip().casefold()
+            page = 0
+            continue
+        if command in {"a", "all"}:
+            print("Choose entries by number so you can review each exact path.")
+            continue
+        try:
+            indexes = parse_cleanup_selection(answer, len(page_entries))
+        except ValueError as exc:
+            print(str(exc))
+            continue
+        if indexes is None:
+            print("Enter item numbers, N/P, F, D, or B.")
+            continue
+        for index in indexes:
+            candidate_priority, item = page_entries[index - 1]
+            key = _path_key(item.get("path", ""))
+            if key in selected:
+                selected.pop(key)
+            else:
+                selected[key] = (candidate_priority, item)
+
+
+def _results_with_expanded_candidates(results, expanded_candidates):
+    """Copy scan results and add only browsed items for plan validation."""
+    if not expanded_candidates:
+        return results
+    categories = results.get("categories")
+    if not isinstance(categories, dict):
+        raise ValueError("Cleanup plan contains malformed candidate categories")
+    copied_results = dict(results)
+    copied_categories = {}
+    for candidate_priority in ("high", "medium", "low"):
+        category = categories.get(candidate_priority)
+        if not isinstance(category, dict) or not isinstance(category.get("items"), list):
+            raise ValueError("Cleanup plan contains malformed candidate categories")
+        copied_category = dict(category)
+        copied_items = list(category["items"])
+        present_paths = {
+            _path_key(item["path"])
+            for item in copied_items
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        }
+        for expanded_priority, item in expanded_candidates:
+            if expanded_priority != candidate_priority:
+                continue
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise ValueError("Cleanup plan contains a malformed expanded candidate")
+            item_key = _path_key(item["path"])
+            if item_key not in present_paths:
+                copied_items.append(item)
+                present_paths.add(item_key)
+        copied_category["items"] = copied_items
+        copied_categories[candidate_priority] = copied_category
+    copied_results["categories"] = copied_categories
+    return copied_results
+
+
+def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
+    """Show exact candidates and return paths plus any browsed scan entries."""
     if priority not in {"high", "medium", "low", "all"}:
         raise ValueError("priority must be high, medium, low, or all")
     categories = results.get("categories")
@@ -2980,7 +3194,7 @@ def select_cleanup_candidates(results, priority):
 
     if not entries:
         print("No files or folders are available at that review level.")
-        return []
+        return ([], [])
 
     print("\nChoose the files and folders to include in the cleanup plan:")
     for index, (candidate_priority, item) in enumerate(entries, start=1):
@@ -2995,29 +3209,62 @@ def select_cleanup_candidates(results, priority):
     print("Each row is labeled File or Folder. Choose individual files, folders, or both by number.")
     print("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.")
     print("Protected paths and detected projects are kept. Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too. The plan preview shows up to 12 direct items; other contents may also be removed.")
-    print("Only listed entries can be selected. Files omitted from the scan cannot be selected separately.")
-    print("Nothing is selected automatically. Enter numbers separated by commas, A for all listed entries, or Q/Enter to cancel.")
+    print("To choose scan entries inside a folder, enter D. The scan must include file rows to select individual files.")
+    print("Enter item numbers to add, A for all listed suggestions, D to browse inside a folder, then Enter to finish. Q cancels.")
 
+    selected_entries = []
+    selected_keys = set()
+    expanded_candidates = []
+    folders = [
+        (candidate_priority, item) for candidate_priority, item in entries
+        if display_item_type(item) == "Folder"
+    ]
     while True:
-        answer = input("Select entries by number (for example, 1,3): ")
+        answer = input("Add entries by number, D to browse, Enter to finish, or Q to cancel: ").strip()
+        if answer.casefold() in {"d", "browse"}:
+            if not csv_file:
+                print("The saved scan file is unavailable for folder browsing.")
+                continue
+            browsed = _browse_folder_candidates(
+                csv_file, min_size_mb, folders, priority
+            )
+            for candidate_priority, item in browsed:
+                key = _path_key(item["path"])
+                if key not in selected_keys:
+                    selected_entries.append((candidate_priority, item))
+                    expanded_candidates.append((candidate_priority, item))
+                    selected_keys.add(key)
+            continue
+        if not answer and selected_entries:
+            break
         try:
             indexes = parse_cleanup_selection(answer, len(entries))
-            break
         except ValueError as exc:
             print(str(exc))
+            continue
 
-    if indexes is None:
+        if indexes is None:
+            print("Selection cancelled; no cleanup plan was created.")
+            return None
+        for index in indexes:
+            candidate_priority, item = entries[index - 1]
+            key = _path_key(item.get("path", ""))
+            if key not in selected_keys:
+                selected_entries.append((candidate_priority, item))
+                selected_keys.add(key)
+
+    if not selected_entries:
         print("Selection cancelled; no cleanup plan was created.")
         return None
 
-    selected = [entries[index - 1][1] for index in indexes]
-    selected_paths = [item["path"] for item in selected]
+    selected_paths = [item["path"] for _candidate_priority, item in selected_entries]
+    selected = [item for _candidate_priority, item in selected_entries]
     estimate = sum(item["size"] for item in _non_overlapping_items(selected))
     print(f"\nAdded {len(selected_paths)} selected item(s) to the cleanup plan; estimated listed size: {format_size(estimate)}")
-    for item in selected:
-        print(f"  {display_item_type(item)} | {item['size_formatted']} | {item['name']}")
+    for candidate_priority, item in selected_entries:
+        print(f"  {CLEANABLE_PATTERNS[candidate_priority]['name']} | {display_item_type(item)} | {item['size_formatted']} | {item['name']}")
         print(f"  {item['path']}")
-    return selected_paths
+    return selected_paths, expanded_candidates
 
 
 def offer_to_run_cleanup_script(script_path):
@@ -3175,15 +3422,22 @@ def _run_tui(initial_csv=None, min_size_mb=50):
             elif choice == "3":
                 print("Review groups: high = lower risk, medium = review carefully, low = confirm impact, all = every group.")
                 priority = prompt_choice("Choose groups to include", ["high", "medium", "low", "all"], default="high")
-                selected_paths = select_cleanup_candidates(results, priority)
+                selection = select_cleanup_candidates(
+                    results, priority, csv_file=csv_file, min_size_mb=current_min_size
+                )
+                if not selection:
+                    input("Press Enter to continue...")
+                    continue
+                selected_paths, expanded_candidates = selection
                 if not selected_paths:
                     input("Press Enter to continue...")
                     continue
                 default_name = f"{Path(csv_file).stem}.clean.ps1"
                 output_path = input(f"Save the PowerShell cleanup plan to [{default_name}]: ").strip().strip('"') or default_name
                 try:
+                    plan_results = _results_with_expanded_candidates(results, expanded_candidates)
                     generate_clean_script(
-                        results, output_path, priority, selected_paths=selected_paths
+                        plan_results, output_path, priority, selected_paths=selected_paths
                     )
                     print(f"Cleanup plan saved to: {output_path}")
                     offer_to_run_cleanup_script(output_path)
