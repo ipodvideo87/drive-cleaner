@@ -5045,6 +5045,20 @@ class ScanSafetyTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"WINDIRSTAT_PATH": str(windirstat)}):
                 self.assertEqual(scan.find_windirstat(), str(windirstat))
 
+    def test_scanner_discovery_accepts_quoted_environment_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            portable_dir = Path(temp_dir) / "portable scanner tools"
+            portable_dir.mkdir()
+            wiztree = portable_dir / "WizTree64.exe"
+            windirstat = portable_dir / "WinDirStat.exe"
+            wiztree.touch()
+            windirstat.touch()
+
+            with mock.patch.dict(os.environ, {"WIZTREE_PATH": f'"{wiztree}"'}):
+                self.assertEqual(scan.find_wiztree(), str(wiztree))
+            with mock.patch.dict(os.environ, {"WINDIRSTAT_PATH": f'"{windirstat}"'}):
+                self.assertEqual(scan.find_windirstat(), str(windirstat))
+
     def test_manual_scanner_path_requires_an_existing_absolute_exe(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"

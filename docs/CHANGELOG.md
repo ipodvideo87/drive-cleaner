@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Normalize scanner discovery through the same executable-path validation as guided selection, including environment-variable values wrapped in quotes.
 - Report accurately when a cancelled or failed scan's partial export remains because the scanner may still be running or Windows refused its removal; keep it outside saved-scan review.
 - Sanitize paths discovered inside selected folders in cleanup errors and preview output while retaining original paths for cleanup safety checks.
 - Show sanitized current paths alongside cleanup byte and percentage progress, and preserve folder descendants that contain hidden formatting characters.

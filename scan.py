@@ -42,17 +42,11 @@ def find_wiztree():
         r"C:\Program Files (x86)\WizTree\WizTree64.exe",
     ]
     for c in candidates:
-        if c and os.path.isfile(c):
-            candidate = Path(c)
-            # On 64-bit Windows, WizTree.exe is the 32-bit launcher and may
-            # return before its WizTree64.exe worker finishes exporting. Use
-            # the paired 64-bit executable whenever it is available.
-            if candidate.name.casefold() == "wiztree.exe":
-                wide_candidate = candidate.with_name("WizTree64.exe")
-                if wide_candidate.is_file():
-                    return str(wide_candidate)
-            return c
-    return shutil.which("WizTree64.exe") or shutil.which("WizTree64")
+        normalized = normalize_scanner_executable_path(c, app="wiztree") if c else None
+        if normalized:
+            return normalized
+    path_candidate = shutil.which("WizTree64.exe") or shutil.which("WizTree64")
+    return normalize_scanner_executable_path(path_candidate, app="wiztree") if path_candidate else None
 
 
 def find_windirstat():
@@ -65,9 +59,11 @@ def find_windirstat():
         r"C:\Program Files (x86)\WinDirStat\WinDirStat.exe",
     ]
     for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
-            return candidate
-    return shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
+        normalized = normalize_scanner_executable_path(candidate, app="windirstat") if candidate else None
+        if normalized:
+            return normalized
+    path_candidate = shutil.which("WinDirStat.exe") or shutil.which("WinDirStat")
+    return normalize_scanner_executable_path(path_candidate, app="windirstat") if path_candidate else None
 
 
 def normalize_scanner_executable_path(path, app=None):
