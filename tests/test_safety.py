@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import ntpath
 import os
 import shutil
 import subprocess
@@ -639,11 +640,73 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_analysis_omits_unmatched_files_that_cross_reparse_points(self):
         linked_file = r"C:\Users\A\LargeFiles\redirected.bin"
         rows = [{"File Name": linked_file, "Size": "900000000", "Allocated": "900000000"}]
-        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True), \
+        with mock.patch.object(analyze, "_path_has_reparse_component_cached", return_value=True), \
              mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
             results = self.analyze_rows(rows)
 
         self.assertEqual(results["manual_review_files"], [])
+
+    def test_manual_review_reparse_checks_reuse_safe_parent_components(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "shared" / "files"
+            folder.mkdir(parents=True)
+            checked_paths = []
+
+            def report_no_reparse(path):
+                checked_paths.append(os.path.normcase(os.path.abspath(path)))
+                return False
+
+            with mock.patch.object(analyze.scan, "_is_reparse_point", side_effect=report_no_reparse):
+                cache = {}
+                self.assertFalse(analyze._path_has_reparse_component_cached(
+                    str(folder / "first.bin"), cache
+                ))
+                first_check_count = len(checked_paths)
+                self.assertFalse(analyze._path_has_reparse_component_cached(
+                    str(folder / "second.bin"), cache
+                ))
+
+            self.assertEqual(len(checked_paths), first_check_count + 1)
+            self.assertEqual(Path(checked_paths[-1]).name, "second.bin")
+
+    def test_manual_review_filters_projects_and_links_before_bounded_shortlist(self):
+        eligible_paths = [
+            r"C:\Users\A\LargeFiles\eligible-one.iso",
+            r"C:\Users\A\LargeFiles\eligible-two.iso",
+        ]
+        eligible_rows = [
+            {"File Name": eligible_paths[0], "Size": "1000"},
+            {"File Name": eligible_paths[1], "Size": "900"},
+        ]
+
+        for blocker in ("project", "redirected"):
+            with self.subTest(blocker=blocker):
+                blocked_rows = []
+                for index in range(analyze.MANUAL_REVIEW_HEAP_LIMIT + 1):
+                    if blocker == "project":
+                        path = rf"C:\Users\A\Projects\project-{index:04}\large.bin"
+                    else:
+                        path = rf"C:\Users\A\Redirected\large-{index:04}.bin"
+                    blocked_rows.append({"File Name": path, "Size": str(10_000 + index)})
+
+                def has_project_marker(directory, marker_out=None):
+                    is_project_root = ntpath.basename(directory).startswith("project-")
+                    if is_project_root and marker_out is not None:
+                        marker_out.append(".git")
+                    return is_project_root
+
+                def crosses_link(path, _cache):
+                    return blocker == "redirected" and "\\redirected\\" in path.casefold()
+
+                with mock.patch.object(
+                        analyze, "_path_has_reparse_component_cached", side_effect=crosses_link), \
+                     mock.patch.object(
+                         analyze, "_directory_has_project_marker", side_effect=has_project_marker):
+                    results = self.analyze_rows(blocked_rows + eligible_rows)
+
+                self.assertEqual(
+                    [item["path"] for item in results["manual_review_files"]], eligible_paths
+                )
 
     def test_manual_review_picker_requires_individual_file_choices_and_supports_pages(self):
         files = [{

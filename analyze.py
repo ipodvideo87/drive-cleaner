@@ -937,6 +937,23 @@ def _path_key(path):
     return ntpath.normcase(ntpath.normpath(path.replace("/", "\\")))
 
 
+def _path_has_reparse_component_cached(path, cache):
+    """Check path components for links while reusing unchanged ancestors."""
+    absolute = os.path.abspath(os.fspath(path))
+    drive, tail = os.path.splitdrive(absolute)
+    current = drive + os.sep if drive else os.path.abspath(os.sep)
+    for part in tail.strip("\\/").replace("/", os.sep).split(os.sep):
+        if not part:
+            continue
+        current = os.path.join(current, part)
+        key = _path_key(current)
+        if key not in cache:
+            cache[key] = scan._is_reparse_point(current)
+        if cache[key]:
+            return True
+    return False
+
+
 def _path_components(path, drive_tail=None):
     """Return case-insensitive Windows path components without drive/root syntax."""
     if drive_tail is None:
@@ -1539,6 +1556,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         rows_processed = 0
         source_drives = set()
         project_path_cache = {}
+        manual_file_reparse_cache = {}
         detected_projects = {}
         expanded_candidate_keys = set()
         manual_file_heap = []
@@ -1719,12 +1737,30 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                     elif scanner_type is None:
                         scanner_type = 'file'
                     if scanner_type == 'file':
-                        manual_file_sequence += 1
-                        manual_file = (size, manual_file_sequence, path)
-                        if len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT:
-                            heapq.heappush(manual_file_heap, manual_file)
-                        elif size > manual_file_heap[0][0]:
-                            heapq.heapreplace(manual_file_heap, manual_file)
+                        # Rank only files that can actually appear in the
+                        # manual-review list. Filtering projects and redirected
+                        # paths after building a bounded shortlist can let
+                        # hundreds of ineligible large files hide eligible
+                        # files lower in the scan's size ranking.
+                        can_enter_shortlist = (
+                            len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT or
+                            size > manual_file_heap[0][0]
+                        )
+                        if can_enter_shortlist:
+                            current_path = path.rstrip('\\/')
+                            if (not _path_has_reparse_component_cached(
+                                    current_path, manual_file_reparse_cache) and
+                                    os.path.isfile(current_path) and
+                                    not os.path.isdir(current_path) and
+                                    not _inside_project_tree(
+                                        path, False, project_path_cache,
+                                        detected_projects=detected_projects)):
+                                manual_file_sequence += 1
+                                manual_file = (size, manual_file_sequence, path)
+                                if len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT:
+                                    heapq.heappush(manual_file_heap, manual_file)
+                                else:
+                                    heapq.heapreplace(manual_file_heap, manual_file)
             except (ValueError, KeyError):
                 continue
 
@@ -1740,10 +1776,11 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         except OSError:
             pass
 
-    # Keep only a bounded set of the largest unmatched file rows. Before
-    # exposing them for manual review, confirm each still names an ordinary
-    # local file outside protected paths, reparse points, and detected projects.
+    # Recheck shortlisted files at the end in case their type, protection,
+    # project markers, or reparse-point status changed while the CSV was read.
     manual_files_seen = set()
+    final_manual_project_cache = {}
+    final_manual_reparse_cache = {}
     for size, _sequence, path in sorted(
             manual_file_heap, key=lambda entry: (-entry[0], entry[2].casefold())):
         path_key = _path_key(path)
@@ -1751,12 +1788,13 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
             continue
         manual_files_seen.add(path_key)
         current_path = path.rstrip('\\/')
-        if (scan._path_has_reparse_component(current_path) or
+        if (_path_has_reparse_component_cached(current_path, final_manual_reparse_cache) or
                 _is_excluded_path(path) or _matches_any_cleanup_rule(path) or
                 not os.path.isfile(current_path) or os.path.isdir(current_path)):
             continue
         if _inside_project_tree(
-                path, False, project_path_cache, detected_projects=detected_projects):
+                path, False, final_manual_project_cache,
+                detected_projects=detected_projects):
             continue
         results["manual_review_files"].append({
             "path": path,
