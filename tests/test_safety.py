@@ -21,10 +21,18 @@ import analyze
 import backup
 import scan
 import drive_cleaner
-from error_messages import describe_error
+from error_messages import describe_error, safe_terminal_text
 
 
 class ErrorMessageTests(unittest.TestCase):
+    def test_untrusted_error_text_escapes_terminal_controls(self):
+        message = describe_error(RuntimeError("bad\x1b[2J\nspoof\u202e"))
+        self.assertEqual(message, r"bad\x1b[2J\x0aspoof\u202e")
+        self.assertNotIn("\x1b", message)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\u202e", message)
+        self.assertEqual(safe_terminal_text(None), "Unknown")
+
     def test_localized_os_error_text_is_replaced_with_english_summary(self):
         error = PermissionError(13, "localized access-denied text", "private-path")
         message = describe_error(error)
@@ -5947,6 +5955,36 @@ class ScanSafetyTests(unittest.TestCase):
 
 
 class BackupSafetyTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "backup verification uses Windows paths")
+    def test_verify_escapes_terminal_controls_in_manifest_paths(self):
+        backup_id = "backup_20261004_123456_000003"
+        source_path = r"C:\Users\A\cache" + chr(0x009B) + ".bin"
+        manifest = {
+            "version": 2,
+            "id": backup_id,
+            "status": "completed",
+            "timestamp": "2026-10-04T12:34:56",
+            "items": [{
+                "original_path": source_path,
+                "backup_path": r"D:\CleanBackups\payload.bin",
+                "format": "file",
+                "size": 1,
+                "source_integrity_sha256": "invalid",
+                "integrity_sha256": "a" * 64,
+            }],
+        }
+        output = io.StringIO()
+        with mock.patch.object(backup, "get_backup", return_value=manifest), \
+             mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\" + backup_id), \
+             mock.patch.object(backup, "_path_has_reparse_component", return_value=False), \
+             redirect_stdout(output):
+            self.assertFalse(backup.verify_backup(backup_id))
+
+        rendered = output.getvalue()
+        self.assertNotIn(chr(0x009B), rendered)
+        self.assertIn(r"\x9b.bin", rendered)
+        self.assertIn("Backup lacks verifiable integrity data", rendered)
+
     def test_backup_json_mode_keeps_progress_off_json_stdout(self):
         manifest = {"status": "completed", "id": "backup_20261003_123456", "items": []}
         stdout = io.StringIO()
@@ -6146,6 +6184,45 @@ class BackupSafetyTests(unittest.TestCase):
         self.assertIn(r"\x1b[31m", rendered)
         self.assertIn(r"\x0aInjected output", rendered)
 
+    def test_restore_escapes_control_characters_in_manifest_timestamp(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "CleanBackups"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"saved fixture")
+            destination = root / "restored.bin"
+            destination.write_bytes(b"preserve existing fixture")
+            manifest = {
+                "version": 2,
+                "id": backup_id,
+                "status": "completed",
+                "timestamp": "2026-09-28T12:34:56\x1b[2J\nInjected",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                    "integrity_sha256": backup._file_integrity_sha256(str(payload)),
+                }],
+            }
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)),
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(backup_id))
+
+            rendered = output.getvalue()
+            self.assertNotIn("\x1b", rendered)
+            self.assertNotIn("\nInjected", rendered)
+            self.assertIn(r"\x1b[2J\x0aInjected", rendered)
+            self.assertEqual(destination.read_bytes(), b"preserve existing fixture")
+
     def test_delete_refuses_backup_tree_with_reparse_point(self):
         output = io.StringIO()
         with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\backup_20260928_123456_123456"), \
@@ -6187,8 +6264,8 @@ class BackupSafetyTests(unittest.TestCase):
             manifest = {
                 "status": "completed",
                 "items": [
-                    {"original_path": parent},
-                    {"original_path": str(Path(parent) / "nested" / "cache.bin")},
+                    {"original_path": parent, "size": 1},
+                    {"original_path": str(Path(parent) / "nested" / "cache.bin"), "size": 1},
                 ],
             }
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
@@ -6210,6 +6287,7 @@ class BackupSafetyTests(unittest.TestCase):
                     "original_path": invalid_source,
                     "backup_path": str(payload),
                     "format": "file",
+                    "size": payload.stat().st_size,
                     "source_integrity_sha256": "a" * 64,
                     "integrity_sha256": "b" * 64,
                 }],
@@ -6233,6 +6311,7 @@ class BackupSafetyTests(unittest.TestCase):
                     "original_path": str(Path(temp_dir) / "source.bin"),
                     "backup_path": str(payload),
                     "format": ["file"],
+                    "size": payload.stat().st_size,
                     "source_integrity_sha256": "a" * 64,
                     "integrity_sha256": "b" * 64,
                 }],
@@ -6254,6 +6333,7 @@ class BackupSafetyTests(unittest.TestCase):
                     "original_path": str(Path(temp_dir) / "source.bin"),
                     "backup_path": str(payload) + "\x00",
                     "format": "file",
+                    "size": payload.stat().st_size,
                     "source_integrity_sha256": "a" * 64,
                     "integrity_sha256": "b" * 64,
                 }],
@@ -7465,8 +7545,11 @@ class BackupSafetyTests(unittest.TestCase):
                         backup._extract_zip_backup(str(archive_path), str(destination))
                     self.assertFalse(destination.exists())
 
-    def test_zip_restore_rejects_windows_invalid_characters_before_writing(self):
-        invalid_names = ("bad<name.txt", "bad>name.txt", 'bad"name.txt', "bad|name.txt")
+    def test_zip_restore_rejects_windows_invalid_or_hidden_names_before_writing(self):
+        invalid_names = (
+            "bad<name.txt", "bad>name.txt", 'bad"name.txt', "bad|name.txt",
+            "hidden" + chr(0x202E) + ".txt",
+        )
         for index, invalid_name in enumerate(invalid_names):
             with self.subTest(name=invalid_name), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
@@ -7495,11 +7578,13 @@ class BackupSafetyTests(unittest.TestCase):
                         "original_path": str(root / "first-target.bin"),
                         "backup_path": str(payload),
                         "format": "file",
+                        "size": payload.stat().st_size,
                     },
                     {
                         "original_path": r"C:\Users\..\Windows\system32\target.bin",
                         "backup_path": str(payload),
                         "format": "file",
+                        "size": payload.stat().st_size,
                     },
                 ],
             }
@@ -7597,6 +7682,7 @@ class BackupSafetyTests(unittest.TestCase):
                     "original_path": str(destination),
                     "backup_path": str(backup_copy),
                     "format": "copy",
+                    "size": backup.get_dir_size(str(backup_copy)),
                 }],
             }
             linked_key = os.path.normcase(os.path.abspath(linked_child))
@@ -7608,8 +7694,47 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             run_process.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "backup restore targets Windows paths")
+    def test_restore_and_verify_reject_boolean_manifest_size(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "CleanBackups"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"x")
+            destination = root / "restored.bin"
+            manifest = {
+                "version": 2,
+                "id": backup_id,
+                "status": "completed",
+                "timestamp": "2026-09-28T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": True,
+                    "integrity_sha256": backup._file_integrity_sha256(str(payload)),
+                }],
+            }
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)),
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(backup_id, overwrite=True))
+                self.assertFalse(backup.verify_backup(backup_id))
+
+            self.assertFalse(destination.exists())
+            self.assertIn("Refusing to restore an invalid backup manifest entry", output.getvalue())
+            self.assertIn("Refusing to verify a malformed or unsafe backup manifest", output.getvalue())
+
     def test_restore_target_accepts_local_paths_and_rejects_unsafe_forms(self):
         self.assertTrue(backup._valid_restore_target(r"C:\Users\ExampleUser\file.bin"))
+        self.assertTrue(backup._valid_restore_target("C:\\Users\\control" + chr(0x009B) + ".bin"))
         for path in (
             "C:\\", r"\\server\share\file.bin", r"\??\C:\file.bin",
             r"C:\Users\..\Windows\file.bin", r"C:\Users\file.bin:stream",
@@ -7617,6 +7742,7 @@ class BackupSafetyTests(unittest.TestCase):
             'C:\\Users\\bad"name.bin', r"C:\Users\bad|name.bin",
             r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
             "C:\\Users\\LPT³.log", "C:\\Users\\trailing. ",
+            "C:\\Users\\hidden" + chr(0x202E) + ".bin",
         ):
             with self.subTest(path=path):
                 self.assertFalse(backup._valid_restore_target(path))

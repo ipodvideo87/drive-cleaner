@@ -17,13 +17,14 @@ import stat
 import subprocess
 import tempfile
 import time
+import unicodedata
 import zipfile
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Dict, Optional
 
-from error_messages import describe_error
+from error_messages import describe_error, safe_terminal_text as _safe_terminal_text
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="backslashreplace")
@@ -51,6 +52,11 @@ WINDOWS_RESERVED_NAMES = frozenset({
 
 def _is_windows_reserved_name(part: str) -> bool:
     return part.split(".")[0].rstrip(" .").upper() in WINDOWS_RESERVED_NAMES
+
+
+def _contains_hidden_formatting(value: str) -> bool:
+    """Detect Unicode format controls that can visually reorder or hide names."""
+    return any(unicodedata.category(character) == "Cf" for character in value)
 
 
 def format_size(size_bytes: int) -> str:
@@ -129,26 +135,6 @@ class _BackupProgress:
         print(f"{self.phase} complete{suffix}", file=self.stream, flush=True)
 
 
-def _safe_terminal_text(value, fallback="Unknown") -> str:
-    """Render manifest-controlled text without terminal control characters."""
-    if value is None:
-        value = fallback
-    text = str(value)
-    escaped = []
-    for character in text:
-        if character.isprintable():
-            escaped.append(character)
-        else:
-            codepoint = ord(character)
-            if codepoint <= 0xFF:
-                escaped.append(f"\\x{codepoint:02x}")
-            elif codepoint <= 0xFFFF:
-                escaped.append(f"\\u{codepoint:04x}")
-            else:
-                escaped.append(f"\\U{codepoint:08x}")
-    return "".join(escaped)
-
-
 def _is_reparse_point(path: str) -> bool:
     try:
         metadata = os.lstat(path)
@@ -204,7 +190,8 @@ def _tree_has_reparse_point(path: str) -> bool:
 
 def _valid_restore_target(path: str) -> bool:
     """Accept only normalized, non-root local Windows paths from manifests."""
-    if not isinstance(path, str) or not path or path.startswith(("\\\\", "//")):
+    if (not isinstance(path, str) or not path or _contains_hidden_formatting(path) or
+            path.startswith(("\\\\", "//"))):
         return False
     normalized = path.replace("/", "\\")
     drive, tail = ntpath.splitdrive(normalized)
@@ -747,6 +734,7 @@ def _extract_zip_backup(
             safe_parts = [part for part in parts if part]
             if (member.startswith("/") or any(part in {".", ".."} for part in parts) or
                     not safe_parts or
+                    any(_contains_hidden_formatting(part) for part in safe_parts) or
                     any(any(character in WINDOWS_INVALID_NAME_CHARS for character in part)
                         for part in safe_parts) or
                     any(part.endswith((".", " ")) for part in safe_parts) or
@@ -1004,7 +992,7 @@ def create_backup(
 
     for path in paths:
         if not os.path.exists(path):
-            print(f"[Skip] Path does not exist: {path}")
+            print(f"[Skip] Path does not exist: {_safe_terminal_text(path, 'path')}")
             manifest["errors"].append(f"Path does not exist: {path}")
             continue
 
@@ -1074,8 +1062,9 @@ def create_backup(
             # Copy directories smaller than 1 GB.
             backup_format = "copy"
             backup_path = os.path.join(backup_dir, safe_name)
-            print(f"[Backup] {format_size(dir_size):>10} {path}")
-            print(f"        → Copy directly to {backup_path}")
+            display_path = _safe_terminal_text(path, "path")
+            print(f"[Backup] {format_size(dir_size):>10} {display_path}")
+            print(f"        → Copy directly to {_safe_terminal_text(backup_path, 'backup path')}")
             if has_named_streams and dir_size >= SIZE_THRESHOLD:
                 print("        This folder contains extra Windows file data; the direct copy preserves and verifies it.")
 
@@ -1107,8 +1096,9 @@ def create_backup(
             # Compress directories of 1 GB or larger.
             backup_format = "zip"
             backup_path = os.path.join(backup_dir, f"{safe_name}.zip")
-            print(f"[Backup] {format_size(dir_size):>10} {path}")
-            print(f"        → Compress to {backup_path}")
+            display_path = _safe_terminal_text(path, "path")
+            print(f"[Backup] {format_size(dir_size):>10} {display_path}")
+            print(f"        → Compress to {_safe_terminal_text(backup_path, 'backup path')}")
 
             try:
                 archive_progress = _BackupProgress(
@@ -1332,6 +1322,11 @@ def _manifest_uses_named_stream_integrity(manifest: Dict) -> bool:
     return _manifest_version(manifest) == 2
 
 
+def _valid_manifest_size(size) -> bool:
+    """Require an exact, nonnegative byte count in untrusted manifests."""
+    return type(size) is int and size >= 0
+
+
 def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     """Verify saved payloads and ensure current sources still match them."""
     manifest = get_backup(backup_id)
@@ -1356,7 +1351,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         requested = set()
         for path in paths:
             if not _valid_restore_target(path):
-                print(f"Refusing to verify an unsafe source path: {path}")
+                print(f"Refusing to verify an unsafe source path: {_safe_terminal_text(path, 'path')}")
                 return False
             requested.add(_windows_path_key(path))
 
@@ -1364,7 +1359,8 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     seen_source_paths = []
     for item in manifest["items"]:
         if (not isinstance(item, dict) or
-                not _valid_restore_target(item.get("original_path"))):
+                not _valid_restore_target(item.get("original_path")) or
+                not _valid_manifest_size(item.get("size"))):
             print("Refusing to verify a malformed or unsafe backup manifest")
             return False
         key = _windows_path_key(item["original_path"])
@@ -1387,6 +1383,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     progress = _BackupProgress("Verifying recovery backup")
     for item in selected_items:
         original_path = item["original_path"]
+        display_path = _safe_terminal_text(original_path, "path")
         backup_path = item.get("backup_path")
         backup_format = item.get("format")
         source_digest = item.get("source_integrity_sha256")
@@ -1395,7 +1392,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_digest) or
                 not isinstance(payload_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", payload_digest) or
                 not isinstance(backup_path, str)):
-            print(f"Backup lacks verifiable integrity data for: {original_path}")
+            print(f"Backup lacks verifiable integrity data for: {display_path}")
             return False
 
         backup_path = os.path.abspath(backup_path)
@@ -1406,7 +1403,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         if (not contained or _path_has_reparse_component(backup_path) or
                 not os.path.exists(backup_path) or _path_has_reparse_component(original_path) or
                 not os.path.exists(original_path)):
-            print(f"Backup or source path is unavailable or linked: {original_path}")
+            print(f"Backup or source path is unavailable or linked: {display_path}")
             return False
 
         if not verify_named_streams:
@@ -1419,7 +1416,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                     _path_size_and_named_streams(backup_path, progress=progress)[1]
                 )
             except (OSError, RuntimeError) as exc:
-                print(f"Could not inspect named data streams for {original_path}: {describe_error(exc)}")
+                print(f"Could not inspect named data streams for {display_path}: {describe_error(exc)}")
                 return False
             if source_has_streams or backup_has_streams:
                 print("This older backup cannot verify the named data streams; refusing verification.")
@@ -1428,7 +1425,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         try:
             if backup_format == "file":
                 if not os.path.isfile(backup_path) or not os.path.isfile(original_path):
-                    print(f"Source item type changed since backup: {original_path}")
+                    print(f"Source item type changed since backup: {display_path}")
                     return False
                 if verify_named_streams:
                     current_source_digest = _file_integrity_sha256(original_path, progress=progress)
@@ -1438,10 +1435,10 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                     current_payload_digest = _sha256_file(backup_path, progress=progress)
             elif backup_format == "copy":
                 if not os.path.isdir(backup_path) or not os.path.isdir(original_path):
-                    print(f"Source item type changed since backup: {original_path}")
+                    print(f"Source item type changed since backup: {display_path}")
                     return False
                 if _tree_has_reparse_point(backup_path) or _tree_has_reparse_point(original_path):
-                    print(f"Source or backup tree contains a reparse point: {original_path}")
+                    print(f"Source or backup tree contains a reparse point: {display_path}")
                     return False
                 current_source_digest = _directory_fingerprint_sha256(
                     original_path, include_named_streams=verify_named_streams, progress=progress
@@ -1451,10 +1448,10 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 )
             else:
                 if not os.path.isfile(backup_path) or not os.path.isdir(original_path):
-                    print(f"Source item type changed since backup: {original_path}")
+                    print(f"Source item type changed since backup: {display_path}")
                     return False
                 if _tree_has_reparse_point(original_path):
-                    print(f"Source tree contains a reparse point: {original_path}")
+                    print(f"Source tree contains a reparse point: {display_path}")
                     return False
                 current_source_digest = _directory_fingerprint_sha256(
                     original_path, include_named_streams=verify_named_streams, progress=progress
@@ -1464,14 +1461,14 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                     else _sha256_file(backup_path, progress=progress)
                 )
         except (OSError, RuntimeError) as exc:
-            print(f"Could not verify source or backup contents for {original_path}: {describe_error(exc)}")
+            print(f"Could not verify source or backup contents for {display_path}: {describe_error(exc)}")
             return False
 
         if current_payload_digest.lower() != payload_digest.lower():
-            print(f"Backup contents changed since verification: {original_path}")
+            print(f"Backup contents changed since verification: {display_path}")
             return False
         if current_source_digest.lower() != source_digest.lower():
-            print(f"Source changed since backup; refusing cleanup: {original_path}")
+            print(f"Source changed since backup; refusing cleanup: {display_path}")
             return False
         progress.item(original_path)
 
@@ -1492,7 +1489,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     """
     manifest = get_backup(backup_id)
     if not manifest:
-        print(f"Backup not found: {backup_id}")
+        print(f"Backup not found: {_safe_terminal_text(backup_id)}")
         return False
     if (not isinstance(manifest, dict) or manifest.get("status") != "completed" or
             not isinstance(manifest.get("items"), list) or not manifest["items"]):
@@ -1522,7 +1519,8 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
         backup_format = item.get("format")
         if (not _valid_restore_target(original_path) or not isinstance(backup_path, str) or
                 not isinstance(backup_format, str) or
-                backup_format not in {"file", "copy", "zip"}):
+                backup_format not in {"file", "copy", "zip"} or
+                not _valid_manifest_size(item.get("size"))):
             print("Refusing to restore an invalid backup manifest entry")
             return False
         if _restore_path_overlaps_backup_storage(original_path, backup_storage_roots):
@@ -1620,7 +1618,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     progress.finish()
 
     print(f"Restoring backup: {backup_id}")
-    print(f"Backup time: {manifest.get('timestamp', 'Unknown')}")
+    print(f"Backup time: {_safe_terminal_text(manifest.get('timestamp', 'Unknown'))}")
     print(f"Items: {len(validated_items)}")
     print("-" * 50)
 
@@ -1630,7 +1628,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     restore_progress = _BackupProgress("Restoring backup")
 
     for item, original_path, backup_path, backup_format in validated_items:
-        print(f"[Restore] {original_path}")
+        print(f"[Restore] {_safe_terminal_text(original_path, 'path')}")
         item_conflicts = 0
 
         try:
@@ -1742,12 +1740,12 @@ def delete_backup(backup_id: str) -> bool:
         bool: Whether deletion succeeded.
     """
     if not _valid_backup_id(backup_id):
-        print(f"Invalid backup ID: {backup_id}")
+        print(f"Invalid backup ID: {_safe_terminal_text(backup_id)}")
         return False
     backup_dir = _find_backup_dir(backup_id)
 
     if not backup_dir:
-        print(f"Backup not found: {backup_id}")
+        print(f"Backup not found: {_safe_terminal_text(backup_id)}")
         return False
 
     try:
@@ -1804,7 +1802,7 @@ def print_backups_table(backups: List[Dict]):
     print("-" * 96)
 
     for backup in backups:
-        backup_id = backup["id"]
+        backup_id = _safe_terminal_text(backup.get("id", "Unknown"))
         timestamp = _safe_terminal_text(backup.get("timestamp", "Unknown")[:19].replace("T", " "))
         size = _safe_terminal_text(backup.get("total_size_formatted", "Unknown"))
         items = len(backup.get("items", []))
@@ -1948,9 +1946,9 @@ def main():
     elif args.command == 'info':
         manifest = get_backup(args.id)
         if manifest:
-            print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            print(json.dumps(manifest, ensure_ascii=True, indent=2))
         else:
-            print(f"Backup not found: {args.id}")
+            print(f"Backup not found: {_safe_terminal_text(args.id)}")
             sys.exit(1)
 
     elif args.command == 'verify':
