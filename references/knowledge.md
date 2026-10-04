@@ -4,6 +4,7 @@
 
 - Leave unclear paths untouched. Treat an unfamiliar file or application as protected until the user identifies it.
 - Review every exact path before cleanup. A classification is a suggestion, not permission to delete.
+- Keep the separate largest-file manual-review list informational: these entries did not match a cleanup rule and are not recommendations. List at most 100 exact ordinary files outside protected paths, reparse points, and detected projects; do not offer folders or bulk selection. A manual plan may contain only exact user-selected files after the user types `REVIEWED`, and it must keep the ordinary backup choice, current safety rechecks, and final cleanup confirmation. The user must recognize each file and confirm it is no longer needed.
 - Offer an optional recovery backup during interactive cleanup. If the user chooses one, create and verify a complete backup on a different drive before removing anything; if a target is skipped, storage is unavailable, or verification fails, stop cleanup. If the user declines, clearly warn that Drive Cleanr cannot restore removed data and require the cleanup script's distinct `DELETE WITHOUT BACKUP` confirmation. For a reviewed noninteractive plan, `-Force` creates and verifies a backup by default; pass `-NoBackup` to skip it.
 - Treat restore manifests and archives as untrusted: validate every destination before writing, reject network/device/traversal targets, and do not extract through reparse points.
 - Never directly remove Windows component stores, restore points, installed-program repair data, personal files, messaging data, or credentials.
@@ -84,13 +85,15 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 ## What Drive Cleanr suggests automatically
 
-Only entries matching the rules in `analyze.py` appear as cleanup candidates. The tiers currently cover:
+Only entries matching the rules in `analyze.py` appear as automatic cleanup suggestions. The tiers currently cover:
 
 - **High:** contents of recognized Windows or user temporary folders, plus known pip, Puppeteer, Electron, npm, and Yarn cache locations.
 - **Medium:** Windows crash dumps; Cargo install output and Chocolatey staging; Chrome's on-device model; recognized VS Code caches; generic cache, log, GPU, shader, and code-cache folders; and `Temp`/`Tmp` folders outside recognized temporary locations.
 - **Low:** Gradle, Cargo registry, NuGet, and Go module caches; Scoop downloaded installers; NVIDIA App update artifacts; Playwright browser runtimes; and Chrome/Edge profile IndexedDB data.
 
 Other examples in this guide, including the Recycle Bin, DISM component cleanup, `MyDrivers` leftovers, Maven `.m2`, GoogleUpdater `crx_cache`, and WER reports, are manual guidance rather than automatic Drive Cleanr cleanup candidates. Review the exact listed paths and labels before selecting anything.
+
+The scan report also shows up to 100 of the largest unclassified file rows in a separate manual-review section. Protected locations, links, and detected projects are omitted. These entries do not contribute to the suggested-space total and are never selected automatically. In the guided menu, a user can select exact files individually and type `REVIEWED` to create a manual-review plan; folders and bulk selection are unavailable. This is a way to inspect more of the scan, not evidence that a file is disposable. Do not include personal folders or files the user does not recognize.
 
 ## Path patterns to review
 

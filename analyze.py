@@ -3,6 +3,7 @@
 """Analyze WizTree and WinDirStat CSV exports and find cleanup candidates."""
 
 import csv
+import heapq
 import hashlib
 import ntpath
 import os
@@ -808,6 +809,10 @@ EXCLUDE_PATTERNS = [
 EXCLUDE_COMPONENT_PREFIXES = ("onedrive - ", "openai.codex_")
 
 ANALYSIS_PROGRESS_INTERVAL = 100_000
+MANUAL_REVIEW_FILE_LIMIT = 100
+MANUAL_REVIEW_HEAP_LIMIT = 500
+MANUAL_REVIEW_PAGE_SIZE = 25
+MANUAL_REVIEW_LABEL = "Large file (manual review required)"
 PROJECT_MARKERS = (
     ".drive-cleanr-protect", ".git", ".gitignore", ".gitattributes", ".editorconfig",
     ".hg", ".svn", ".idea", ".vscode", ".vs", ".cursorrules",
@@ -1106,6 +1111,21 @@ def _matches_cleanup_rule(path, priorities, name):
     return False
 
 
+def _matches_any_cleanup_rule(path):
+    """Return whether a path is covered by any automatic cleanup rule."""
+    components = _path_components(path)
+    component_set, sequences = _path_match_index(components)
+    for _priority, pattern_info, pattern_components in _CLEANABLE_RULES:
+        if (pattern_info.get("known_temp_location") and
+                _is_known_temp_root(path, components)):
+            continue
+        if _cleanup_rule_matches(
+                pattern_info, pattern_components, components, component_set,
+                sequences, path=path):
+            return True
+    return False
+
+
 def _inside_project_tree(path, directory, cache, detected_projects=None):
     """Recognize project roots above a candidate to avoid recursive project cleanup."""
     normalized = ntpath.normpath(path.replace("/", "\\"))
@@ -1368,6 +1388,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         "unsafe_display_path_count": 0,
         "type_mismatch_count": 0,
         "reparse_candidate_count": 0,
+        "manual_review_files": [],
         "categories": {
             "high": {"name": "High priority — lower risk (review each path)", "items": [], "total_size": 0},
             "medium": {"name": "Medium priority — review carefully", "items": [], "total_size": 0},
@@ -1520,6 +1541,8 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         project_path_cache = {}
         detected_projects = {}
         expanded_candidate_keys = set()
+        manual_file_heap = []
+        manual_file_sequence = 0
         for row in reader:
             rows_processed += 1
             if progress_callback and rows_processed % ANALYSIS_PROGRESS_INTERVAL == 0:
@@ -1586,10 +1609,14 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 if _is_excluded_path(path, path_components, path_component_set, path_sequences):
                     continue
 
-                # Match the path against cleanup categories.
+                # Match the path against cleanup categories. Files outside
+                # these rules can be shown separately for deliberate manual
+                # review, but never become automatic cleanup suggestions.
+                matched_cleanup_rule = False
                 for priority, pattern_info, pattern_components in _CLEANABLE_RULES:
                     if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
                                              path_component_set, path_sequences, path=path):
+                        matched_cleanup_rule = True
                         # Folder browsing honors the review level the user
                         # selected. Do not let a more cautious match fall
                         # through to a broader, lower-risk label.
@@ -1680,6 +1707,24 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
 
                                         results["categories"][priority]["items"].append(candidate_item)
                         break
+                if not matched_cleanup_rule and not expand_paths:
+                    scanner_type = 'directory' if path.endswith(('\\', '/')) else None
+                    if scanner_type is None and is_windirstat_export:
+                        scanner_type = _is_directory_row({
+                            'attributes': cell(row, attributes_column),
+                            'windirstatattributes': cell(row, windirstat_attributes_column),
+                            'files': cell(row, files_column),
+                            'folders': cell(row, folders_column),
+                        })
+                    elif scanner_type is None:
+                        scanner_type = 'file'
+                    if scanner_type == 'file':
+                        manual_file_sequence += 1
+                        manual_file = (size, manual_file_sequence, path)
+                        if len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT:
+                            heapq.heappush(manual_file_heap, manual_file)
+                        elif size > manual_file_heap[0][0]:
+                            heapq.heapreplace(manual_file_heap, manual_file)
             except (ValueError, KeyError):
                 continue
 
@@ -1694,6 +1739,35 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
             results["space_source"] = "current"
         except OSError:
             pass
+
+    # Keep only a bounded set of the largest unmatched file rows. Before
+    # exposing them for manual review, confirm each still names an ordinary
+    # local file outside protected paths, reparse points, and detected projects.
+    manual_files_seen = set()
+    for size, _sequence, path in sorted(
+            manual_file_heap, key=lambda entry: (-entry[0], entry[2].casefold())):
+        path_key = _path_key(path)
+        if path_key in manual_files_seen:
+            continue
+        manual_files_seen.add(path_key)
+        current_path = path.rstrip('\\/')
+        if (scan._path_has_reparse_component(current_path) or
+                _is_excluded_path(path) or _matches_any_cleanup_rule(path) or
+                not os.path.isfile(current_path) or os.path.isdir(current_path)):
+            continue
+        if _inside_project_tree(
+                path, False, project_path_cache, detected_projects=detected_projects):
+            continue
+        results["manual_review_files"].append({
+            "path": path,
+            "size": size,
+            "size_formatted": format_size(size),
+            "name": MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+        })
+        if len(results["manual_review_files"]) >= MANUAL_REVIEW_FILE_LIMIT:
+            break
 
     # Calculate category totals and sort candidates by size.
     for priority in results["categories"]:
@@ -1792,9 +1866,23 @@ def print_report(results, show_all_items=False, item_limit=10):
 
             print()
 
+    manual_files = results.get("manual_review_files", [])
+    if isinstance(manual_files, list) and manual_files:
+        print("-" * 60)
+        print("[Largest files outside automatic cleanup suggestions — manual review only]")
+        print("These files are not cleanup recommendations. Drive Cleanr cannot tell whether you need them.")
+        print("They are excluded from the suggested-space total and any plan unless you select each exact file.")
+        print("-" * 60)
+        print_category_items(
+            {"items": manual_files}, show_all=show_all_items, item_limit=item_limit
+        )
+        if not show_all_items and len(manual_files) > item_limit:
+            print(f"  ... and {len(manual_files) - item_limit} more manual-review files (up to {MANUAL_REVIEW_FILE_LIMIT} shown in the picker)")
+        print()
+
     print("=" * 60)
     unique_size = sum(item["size"] for item in _non_overlapping_items(all_items))
-    print(f"Estimated space in listed files and folders (counted once): {format_size(unique_size)}")
+    print(f"Estimated space in automatic cleanup suggestions (counted once): {format_size(unique_size)}")
     print("Drive Cleanr protects Windows system data, recovery data, personal folders, messaging data, and credentials.")
     print("WizTree allocated sizes are used when available; hard-linked files are excluded. Actual free space may differ.")
     print("Folder sizes can include protected contents that cleanup keeps, so the space recovered may be lower.")
@@ -1818,15 +1906,24 @@ def print_report(results, show_all_items=False, item_limit=10):
     print("=" * 60)
 
 
-def generate_clean_script(results, output_path, priority="high", selected_paths=None):
+def generate_clean_script(results, output_path, priority="high", selected_paths=None,
+                          manual_review_confirmed=False):
     """Generate a reviewed PowerShell cleanup script."""
-    if priority not in {"high", "medium", "low", "all"}:
-        raise ValueError("priority must be high, medium, low, or all")
+    if priority not in {"high", "medium", "low", "all", "manual"}:
+        raise ValueError("priority must be high, medium, low, all, or manual")
     categories = results.get("categories")
     if not isinstance(categories, dict):
         raise ValueError("Cleanup plan contains malformed candidate categories")
     priority_order = ("high", "medium", "low")
-    if priority == "all":
+    if priority == "manual":
+        if selected_paths is None or not manual_review_confirmed:
+            raise ValueError("Manual-review files require an explicit reviewed selection")
+        manual_items = results.get("manual_review_files")
+        if not isinstance(manual_items, list):
+            raise ValueError("Manual-review files are missing or malformed")
+        source_items = [("manual", item) for item in manual_items]
+        priority_name = "Manual review - exact files selected by the user"
+    elif priority == "all":
         source_items = []
         for key in priority_order:
             category = categories.get(key)
@@ -1887,12 +1984,18 @@ def generate_clean_script(results, output_path, priority="high", selected_paths=
             raise ValueError("Cleanup plan contains a path that crosses a junction or symbolic link; rescan before cleanup")
         if _is_excluded_path(path):
             raise ValueError("Cleanup plan contains a protected path; remove it and rescan")
-        if not _matches_cleanup_rule(path, (candidate_priority,), item["name"]):
-            raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
         kind = item.get("kind", classify_path(path))
         if not isinstance(kind, str) or kind.lower() not in ("file", "directory", "folder", "\u76ee\u5f55"):
             raise ValueError("Cleanup plan contains an invalid target type")
         is_directory = kind.lower() in ("directory", "folder", "\u76ee\u5f55")
+        if candidate_priority == "manual":
+            if (item.get("manual_review") is not True or is_directory or
+                    item["name"] != MANUAL_REVIEW_LABEL or
+                    not os.path.isfile(path.rstrip("\\/")) or
+                    os.path.isdir(path.rstrip("\\/")) or _matches_any_cleanup_rule(path)):
+                raise ValueError("Manual-review plans accept only current, unprotected files not matched by cleanup rules")
+        elif not _matches_cleanup_rule(path, (candidate_priority,), item["name"]):
+            raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
         return is_directory
@@ -1998,6 +2101,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ManualReviewOnly = {manual_review_only}
 if ($CreateBackup -and $SkipBackup) {{
     throw "Choose either -Backup or -NoBackup, not both."
 }}
@@ -2220,10 +2324,22 @@ function Assert-CleanupEntryPathWithinSelection([object]$Target, [object]$Entry)
 }}
 
 $available = @()
+if ($ManualReviewOnly) {{
+    Write-Host "Manual review only: these files did not match Drive Cleanr's cleanup rules." -ForegroundColor Yellow
+    Write-Host "Drive Cleanr cannot tell whether they are needed. Check every exact path before continuing." -ForegroundColor Yellow
+}}
 if ($Select.Count -gt 0) {{
-    Write-Host "Files and folders already selected for this plan:" -ForegroundColor White
+    if ($ManualReviewOnly) {{
+        Write-Host "Individual files already selected for this manual-review plan:" -ForegroundColor White
+    }} else {{
+        Write-Host "Files and folders already selected for this plan:" -ForegroundColor White
+    }}
 }} else {{
-    Write-Host "Files and folders available to choose from:" -ForegroundColor White
+    if ($ManualReviewOnly) {{
+        Write-Host "Individual files available for manual review:" -ForegroundColor White
+    }} else {{
+        Write-Host "Files and folders available to choose from:" -ForegroundColor White
+    }}
 }}
 for ($i = 0; $i -lt $cleanTargets.Count; $i++) {{
     $target = $cleanTargets[$i]
@@ -2253,7 +2369,12 @@ if ($Select.Count -gt 0) {{
         $cleanTargets += @($available | Where-Object {{ $_.Index -eq $index }})
     }}
 }} else {{
-    $choice = Read-Host "Choose listed files or folders by number (comma-separated), A for all, or Q to cancel"
+    $choicePrompt = if ($ManualReviewOnly) {{
+        "Choose listed files by number (comma-separated), A for all, or Q to cancel"
+    }} else {{
+        "Choose listed files or folders by number (comma-separated), A for all, or Q to cancel"
+    }}
+    $choice = Read-Host $choicePrompt
     if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(?i:q|quit)$') {{
         Write-Host "Cancelled; nothing was changed." -ForegroundColor Yellow
         exit 0
@@ -2331,7 +2452,11 @@ if ($directoryTargets.Count -gt 0) {{
 
 Write-Host "Use -PreviewOnly to list every eligible path after the safety checks without creating a backup or removing anything." -ForegroundColor Gray
 
-Write-Host "`nSelected targets (folder contents are included, except protected and project data and higher-risk candidates you did not explicitly select):" -ForegroundColor Cyan
+if ($ManualReviewOnly) {{
+    Write-Host "`nSelected targets (individual files only):" -ForegroundColor Cyan
+}} else {{
+    Write-Host "`nSelected targets (folder contents are included, except protected and project data and higher-risk candidates you did not explicitly select):" -ForegroundColor Cyan
+}}
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.ItemType) | $($target.Path) - $($target.Size)" }}
 $backupEnabled = $false
 if (-not $PreviewOnly -and $CreateBackup) {{
@@ -2360,10 +2485,20 @@ if ($PreviewOnly) {{
 }}
 if (-not $PreviewOnly -and -not $Force) {{
     if ($backupEnabled) {{
-        $confirm = Read-Host "Type CLEAN to back up and remove selected items, including folder contents except protected or project data and higher-risk candidates you did not explicitly select"
+        if ($ManualReviewOnly) {{
+            $confirmPrompt = "Type CLEAN to back up and remove only the selected individual files; verify that you recognize and no longer need them"
+        }} else {{
+            $confirmPrompt = "Type CLEAN to back up and remove selected items, including folder contents except protected or project data and higher-risk candidates you did not explicitly select"
+        }}
+        $confirm = Read-Host $confirmPrompt
         if ($confirm -cne "CLEAN") {{ Write-Host "Cancelled; nothing was changed." -ForegroundColor Yellow; exit 0 }}
     }} else {{
-        $confirm = Read-Host "Type DELETE WITHOUT BACKUP to permanently remove selected items, including folder contents except protected or project data and higher-risk candidates you did not explicitly select"
+        if ($ManualReviewOnly) {{
+            $confirmPrompt = "Type DELETE WITHOUT BACKUP to permanently remove only the selected individual files; verify that you recognize and no longer need them"
+        }} else {{
+            $confirmPrompt = "Type DELETE WITHOUT BACKUP to permanently remove selected items, including folder contents except protected or project data and higher-risk candidates you did not explicitly select"
+        }}
+        $confirm = Read-Host $confirmPrompt
         if ($confirm -cne "DELETE WITHOUT BACKUP") {{ Write-Host "Cancelled; nothing was changed." -ForegroundColor Yellow; exit 0 }}
     }}
 }}
@@ -2965,8 +3100,10 @@ Write-Host "========================================" -ForegroundColor Cyan
         re.escape(suffix) for suffix in PROJECT_MARKER_SUFFIXES
     ) + r")$"
 
+    manual_review_only = priority == "manual"
     script = script.format(
         priority_name=priority_name,
+        manual_review_only="$true" if manual_review_only else "$false",
         native_class_name=native_class_name,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         scan_file_time=_safe_scan_timestamp(results),
@@ -2976,7 +3113,7 @@ Write-Host "========================================" -ForegroundColor Cyan
         project_markers=project_markers_str,
         project_marker_suffix_pattern=_ps_literal(project_suffix_pattern),
         backup_script_literal=backup_script_literal,
-        priority_arg=priority if priority != "all" else "low"
+        priority_arg=("manual" if priority == "manual" else priority if priority != "all" else "low")
     )
     script = script.replace("__NATIVE_CLEANUP_GUARD__", native_guard)
 
@@ -2992,7 +3129,18 @@ def write_item_list_report(results, output_path):
     all_candidate_items = [
         item for category in results["categories"].values() for item in category["items"]
     ]
-    _ensure_output_outside_targets(output_path, all_candidate_items)
+    manual_review_files = results.get("manual_review_files", [])
+    if not isinstance(manual_review_files, list):
+        raise ValueError("Manual-review file list is malformed")
+    for item in manual_review_files:
+        if (not isinstance(item, dict) or item.get("manual_review") is not True or
+                not isinstance(item.get("path"), str) or not item["path"] or
+                not item["path"].isprintable() or display_item_type(item) != "File" or
+                not isinstance(item.get("size_formatted"), str)):
+            raise ValueError("Manual-review file list contains a malformed entry")
+    _ensure_output_outside_targets(
+        output_path, all_candidate_items + manual_review_files
+    )
     lines = []
     lines.append("Files and Folders for Cleanup Review")
     lines.append(f"Generated at: {datetime.now().isoformat()}")
@@ -3041,9 +3189,19 @@ def write_item_list_report(results, output_path):
 
     lines.append("=" * 60)
     unique_size = sum(item["size"] for item in _non_overlapping_items(all_items))
-    lines.append(f"Estimated space in listed files and folders (counted once): {format_size(unique_size)}")
+    lines.append(f"Estimated space in automatic cleanup suggestions (counted once): {format_size(unique_size)}")
     lines.append("Folder totals can include nested protected data, which cleanup preserves.")
     lines.append("Every exact path still requires review; estimates can differ from space actually recovered.")
+    if manual_review_files:
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("Largest files outside automatic cleanup suggestions — manual review only")
+        lines.append("These files are not recommendations. Drive Cleanr cannot tell whether they are needed.")
+        lines.append("They are excluded from the estimated cleanup space above.")
+        lines.append("=" * 60)
+        for item in manual_review_files:
+            lines.append(f"- {item['size_formatted']}  File  Manual review")
+            lines.append(f"  {item['path']}")
     lines.append("=" * 60)
 
     with open(output_path, "x", encoding="utf-8") as f:
@@ -3122,6 +3280,106 @@ def _folder_browse_skip_lines(results):
             f"Skipped {temp_root_count} recognized temporary folders; matching entries inside are considered separately."
         )
     return lines
+
+
+def select_manual_review_files(results):
+    """Let users choose exact files that were not automatically classified."""
+    items = results.get("manual_review_files")
+    if not isinstance(items, list):
+        raise ValueError("Manual-review file list is missing or malformed")
+    if not items:
+        print("No large, unclassified files are available for manual review in this scan.")
+        return []
+    for item in items:
+        if (not isinstance(item, dict) or item.get("manual_review") is not True or
+                not isinstance(item.get("path"), str) or not item["path"] or
+                not item["path"].isprintable() or item.get("name") != MANUAL_REVIEW_LABEL or
+                display_item_type(item) != "File" or
+                not isinstance(item.get("size"), int) or item["size"] < 0 or
+                not isinstance(item.get("size_formatted"), str)):
+            raise ValueError("Manual-review list contains a malformed or unsafe file entry")
+    if len(items) > MANUAL_REVIEW_FILE_LIMIT:
+        items = items[:MANUAL_REVIEW_FILE_LIMIT]
+
+    print("\nLargest files not included in automatic cleanup suggestions:")
+    print("Drive Cleanr cannot tell whether these files are needed. Choose only individual files you recognize and no longer need.")
+    print("Protected paths and detected projects are omitted. These entries are never selected automatically.")
+    selected = {}
+    page = 0
+    filter_text = ""
+
+    while True:
+        filtered_items = [
+            item for item in items
+            if not filter_text or filter_text in (
+                str(item.get("name", "")) + " " + str(item.get("path", ""))
+            ).casefold()
+        ]
+        page_count = max(1, (len(filtered_items) + MANUAL_REVIEW_PAGE_SIZE - 1) // MANUAL_REVIEW_PAGE_SIZE)
+        page = min(page, page_count - 1)
+        first = page * MANUAL_REVIEW_PAGE_SIZE
+        page_items = filtered_items[first:first + MANUAL_REVIEW_PAGE_SIZE]
+        print(f"\nFiles shown: {len(filtered_items)} | Page {page + 1} of {page_count}")
+        if filter_text:
+            print(f"Filter: {filter_text}")
+        if not page_items:
+            print("No files match this filter.")
+        for index, item in enumerate(page_items, start=1):
+            path = item.get("path", "")
+            marker = "*" if _path_key(path) in selected else " "
+            print(f"{marker} [{index}] File | {item.get('size_formatted', 'unknown size')} | Manual review")
+            print(f"      {path}")
+        print("Enter file numbers to select or clear them. N/P changes page; F filters; D finishes; B cancels.")
+        answer = input("Choose files on this page: ").strip()
+        command = answer.casefold()
+        if command in {"d", "done"}:
+            if selected:
+                chosen = list(selected.values())
+                scan_size = sum(item["size"] for item in chosen)
+                print(f"Selected {len(chosen)} individual file(s); scan-reported size: {format_size(scan_size)}.")
+                print("Check every selected path before creating a manual-review plan:")
+                for item in chosen:
+                    print(f"  File | {item['size_formatted']} | {item['path']}")
+                return chosen
+            print("Choose at least one file, or press B to return without creating a plan.")
+            continue
+        if command in {"b", "back", "q", "quit", "cancel"}:
+            print("Manual review cancelled; no files were added to a cleanup plan.")
+            return []
+        if command in {"n", "next"}:
+            if page + 1 < page_count:
+                page += 1
+            else:
+                print("You are already on the last page.")
+            continue
+        if command in {"p", "previous", "prev"}:
+            if page > 0:
+                page -= 1
+            else:
+                print("You are already on the first page.")
+            continue
+        if command in {"f", "filter"}:
+            filter_text = input("Filter by file name or path (blank clears the filter): ").strip().casefold()
+            page = 0
+            continue
+        if command in {"a", "all"}:
+            print("Bulk selection is unavailable for unclassified files. Choose each exact file by number.")
+            continue
+        try:
+            indexes = parse_cleanup_selection(answer, len(page_items))
+        except ValueError as exc:
+            print(str(exc))
+            continue
+        if indexes is None:
+            print("Enter file numbers, N/P, F, D to finish, or B to cancel.")
+            continue
+        for index in indexes:
+            item = page_items[index - 1]
+            key = _path_key(item.get("path", ""))
+            if key in selected:
+                selected.pop(key)
+            else:
+                selected[key] = item
 
 
 def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
@@ -3588,13 +3846,14 @@ def _run_tui(initial_csv=None, min_size_mb=50):
             print_report(results, item_limit=5)
             print()
             print("1) View all suggested files and folders")
-            print("2) Save the suggested files and folders to a text file")
+            print("2) Save the suggestions and separate manual-review list to a text file")
             print("3) Choose individual files, folders, or both for a cleanup plan")
             print("4) Change the minimum item size shown")
             print("5) Review a different scan")
+            print("6) Review the largest files outside cleanup suggestions")
             print("0) Back")
 
-            choice = input("\nSelect an option [0-5]: ").strip().lower()
+            choice = input("\nSelect an option [0-6]: ").strip().lower()
 
             if choice == "1":
                 clear_screen()
@@ -3635,6 +3894,38 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     offer_to_run_cleanup_script(output_path)
                 except (ValueError, OSError) as exc:
                     print(f"Could not save the cleanup plan: {describe_error(exc)}")
+                input("Press Enter to continue...")
+            elif choice == "6":
+                try:
+                    selected_manual_files = select_manual_review_files(results)
+                except ValueError as exc:
+                    print(f"Could not prepare the manual-review list: {describe_error(exc)}")
+                    input("Press Enter to continue...")
+                    continue
+                if not selected_manual_files:
+                    input("Press Enter to continue...")
+                    continue
+                confirmation = input(
+                    "Type REVIEWED to save a plan for these exact files, or Q to cancel: "
+                ).strip()
+                if confirmation != "REVIEWED":
+                    print("Cancelled; no manual-review plan was created.")
+                    input("Press Enter to continue...")
+                    continue
+                default_name = f"{Path(csv_file).stem}.manual-review.clean.ps1"
+                output_path = input(
+                    f"Save the manual-review PowerShell plan to [{default_name}]: "
+                ).strip().strip('"') or default_name
+                try:
+                    generate_clean_script(
+                        results, output_path, "manual",
+                        selected_paths=[item["path"] for item in selected_manual_files],
+                        manual_review_confirmed=True,
+                    )
+                    print(f"Manual-review plan saved to: {output_path}")
+                    offer_to_run_cleanup_script(output_path)
+                except (ValueError, OSError) as exc:
+                    print(f"Could not save the manual-review plan: {describe_error(exc)}")
                 input("Press Enter to continue...")
             elif choice == "4":
                 new_size = input(f"New minimum item size in MB [{current_min_size}]: ").strip()

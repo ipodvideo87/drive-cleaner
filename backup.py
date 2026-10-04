@@ -951,7 +951,7 @@ def create_backup(
 
     Args:
         paths: list of absolute local files or directories to back up
-        priority: priority label (high/medium/low)
+        priority: priority label (high/medium/low/all/manual)
 
     Returns:
         dict: backup information (including manifest)
@@ -1833,7 +1833,7 @@ def main():
     # Create command.
     create_parser = subparsers.add_parser('create', help='Create a backup')
     create_parser.add_argument('--paths', nargs='+', required=True, help='Absolute local files or directories to back up')
-    create_parser.add_argument('--priority', default='high', choices=['high', 'medium', 'low', 'all'],
+    create_parser.add_argument('--priority', default='high', choices=['high', 'medium', 'low', 'all', 'manual'],
                                help='Priority label')
     create_parser.add_argument('--json', action='store_true', help='Print only the JSON manifest (for automation)')
 

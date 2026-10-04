@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Show up to 100 of the largest unclassified files in a separate manual-review list, with exact-file-only selection, protected/project filtering, no bulk selection, and a typed acknowledgement before a manual cleanup plan can be created.
 - Include each folder's eligible descendant file-data size in cleanup-plan previews, and distinguish overlapping folder-row totals from the deduplicated overall total.
 - List retained scans newest first in the guided review picker, including recognized legacy scan folders, with numeric selection and pagination.
 - Limit scan retention cleanup to validated Drive Cleanr-generated scan exports and their exact paired plans; preserve unrelated CSV files and user-authored scripts.

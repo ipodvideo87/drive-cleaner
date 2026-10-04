@@ -418,6 +418,47 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("3) Choose individual files, folders, or both for a cleanup plan", output.getvalue())
             self.assertIn("| Folder |", output.getvalue())
 
+    def test_review_menu_creates_manual_review_plan_only_after_exact_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            manual_file = {
+                "path": r"C:\Users\A\LargeFiles\disk-image.iso",
+                "size": 900000000,
+                "size_formatted": "858.31 MB",
+                "name": analyze.MANUAL_REVIEW_LABEL,
+                "kind": "File",
+                "manual_review": True,
+            }
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "manual_review_files": [manual_file],
+                "categories": {
+                    "high": {"name": "High", "items": []},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            plan_path = root / "manual-review.ps1"
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "6", "REVIEWED", str(plan_path), "", "0",
+                 ]), \
+                 mock.patch.object(analyze, "select_manual_review_files", return_value=[manual_file]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
+                 redirect_stdout(io.StringIO()):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            generate.assert_called_once_with(
+                results, str(plan_path), "manual", selected_paths=[manual_file["path"]],
+                manual_review_confirmed=True,
+            )
+            offer.assert_called_once_with(str(plan_path))
+
     def test_review_menu_browses_folder_and_generates_plan_for_exact_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -537,6 +578,227 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
                         return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
+
+    def test_analysis_lists_large_unmatched_files_separately_from_cleanup_suggestions(self):
+        unmatched = r"C:\Users\A\LargeFiles\disk-image.iso"
+        automatic = r"C:\Users\A\AppData\Local\Temp\cache.bin"
+        personal = r"C:\Users\A\Documents\family-video.mp4"
+        rows = [
+            {"File Name": unmatched, "Size": "900000000", "Allocated": "900000000"},
+            {"File Name": automatic, "Size": "800000000", "Allocated": "800000000"},
+            {"File Name": personal, "Size": "700000000", "Allocated": "700000000"},
+        ]
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(
+            [item["path"] for item in results["manual_review_files"]], [unmatched]
+        )
+        self.assertTrue(results["manual_review_files"][0]["manual_review"])
+        self.assertEqual(results["manual_review_files"][0]["kind"], "File")
+        self.assertEqual(
+            [item["path"] for item in results["categories"]["high"]["items"]],
+            [automatic],
+        )
+        with mock.patch("builtins.print") as output:
+            analyze.print_report(results)
+        report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("manual review only", report)
+        self.assertIn("not cleanup recommendations", report)
+        self.assertIn(unmatched, report)
+        self.assertNotIn(personal, report)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "review.txt"
+            analyze.write_item_list_report(results, str(report_path))
+            saved_report = report_path.read_text(encoding="utf-8")
+        self.assertIn("Largest files outside automatic cleanup suggestions", saved_report)
+        self.assertIn("They are excluded from the estimated cleanup space above", saved_report)
+        self.assertIn(unmatched, saved_report)
+        self.assertNotIn(personal, saved_report)
+
+    def test_analysis_keeps_unmatched_files_inside_detected_projects_out_of_manual_review(self):
+        project_file = r"C:\Users\A\dev\my-project\large.bin"
+        project_root = r"C:\Users\A\dev\my-project"
+        rows = [{"File Name": project_file, "Size": "900000000", "Allocated": "900000000"}]
+
+        def has_marker(directory, marker_out=None):
+            if analyze._path_key(directory) == analyze._path_key(project_root):
+                if marker_out is not None:
+                    marker_out.append(".git")
+                return True
+            return False
+
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", side_effect=has_marker):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["manual_review_files"], [])
+        self.assertEqual(results["project_roots"], [{"path": project_root, "marker": ".git"}])
+
+    def test_analysis_omits_unmatched_files_that_cross_reparse_points(self):
+        linked_file = r"C:\Users\A\LargeFiles\redirected.bin"
+        rows = [{"File Name": linked_file, "Size": "900000000", "Allocated": "900000000"}]
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["manual_review_files"], [])
+
+    def test_manual_review_picker_requires_individual_file_choices_and_supports_pages(self):
+        files = [{
+            "path": rf"C:\Users\A\LargeFiles\file-{index:02}.bin",
+            "size": 1000 - index,
+            "size_formatted": f"{1000 - index} B",
+            "name": analyze.MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+        } for index in range(26)]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["A", "N", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze.select_manual_review_files({"manual_review_files": files})
+
+        self.assertEqual([item["path"] for item in selected], [files[-1]["path"]])
+        self.assertIn("Bulk selection is unavailable", output.getvalue())
+        self.assertIn("Page 1 of 2", output.getvalue())
+        self.assertIn("Page 2 of 2", output.getvalue())
+
+    def test_manual_cleanup_plan_needs_review_ack_and_accepts_only_unclassified_files(self):
+        path = r"C:\Users\A\LargeFiles\disk-image.iso"
+        item = {
+            "path": path,
+            "size": 900000000,
+            "size_formatted": "858.31 MB",
+            "name": analyze.MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+        }
+        results = {
+            "scan_file_time": "now",
+            "manual_review_files": [item],
+            "categories": {
+                "high": {"items": []},
+                "medium": {"items": []},
+                "low": {"items": []},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "manual.ps1"
+            with self.assertRaisesRegex(ValueError, "explicit reviewed selection"):
+                analyze.generate_clean_script(
+                    results, str(plan_path), "manual", selected_paths=[path]
+                )
+
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
+                 mock.patch.object(analyze, "_matches_any_cleanup_rule", return_value=False), \
+                 mock.patch.object(analyze.os.path, "isfile", return_value=True), \
+                 mock.patch.object(analyze.os.path, "isdir", return_value=False), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                analyze.generate_clean_script(
+                    results, str(plan_path), "manual", selected_paths=[path],
+                    manual_review_confirmed=True,
+                )
+
+            script = plan_path.read_text(encoding="utf-8-sig")
+            self.assertIn("Manual review - exact files selected by the user", script)
+            self.assertIn("$ManualReviewOnly = $true", script)
+            self.assertIn("Drive Cleanr cannot tell whether they are needed", script)
+            self.assertIn("Selected targets (individual files only)", script)
+            self.assertIn("--priority manual", script)
+            self.assertIn(f"Path = '{path}'", script)
+            self.assertNotIn("ItemType = 'Folder'", script)
+
+    def test_manual_plan_generator_rejects_protected_linked_and_project_files(self):
+        path = r"C:\Users\A\LargeFiles\disk-image.iso"
+        item = {
+            "path": path, "size": 900000000, "size_formatted": "858.31 MB",
+            "name": analyze.MANUAL_REVIEW_LABEL, "kind": "File", "manual_review": True,
+        }
+        results = {
+            "manual_review_files": [item],
+            "categories": {"high": {"items": []}, "medium": {"items": []}, "low": {"items": []}},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze, "_is_excluded_path", wraps=analyze._is_excluded_path), \
+                 mock.patch.object(analyze, "_matches_any_cleanup_rule", wraps=analyze._matches_any_cleanup_rule), \
+                 mock.patch.object(analyze.os.path, "isfile", return_value=True), \
+                 mock.patch.object(analyze.os.path, "isdir", return_value=False), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True):
+                    with self.assertRaisesRegex(ValueError, "crosses a junction or symbolic link"):
+                        analyze.generate_clean_script(
+                            results, str(Path(temp_dir) / "linked.ps1"), "manual",
+                            selected_paths=[path], manual_review_confirmed=True,
+                        )
+
+                protected = dict(item, path=r"C:\Users\A\Documents\private.iso")
+                protected_results = dict(results, manual_review_files=[protected])
+                with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False):
+                    with self.assertRaisesRegex(ValueError, "protected path"):
+                        analyze.generate_clean_script(
+                            protected_results, str(Path(temp_dir) / "protected.ps1"), "manual",
+                            selected_paths=[protected["path"]], manual_review_confirmed=True,
+                        )
+
+                    with mock.patch.object(analyze, "_inside_project_tree", return_value=True):
+                        with self.assertRaisesRegex(ValueError, "inside a detected project"):
+                            analyze.generate_clean_script(
+                                results, str(Path(temp_dir) / "project.ps1"), "manual",
+                                selected_paths=[path], manual_review_confirmed=True,
+                            )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup plans target Windows")
+    def test_manual_review_plan_removes_only_the_exact_selected_file_in_a_temp_fixture(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp:
+            root = Path(isolated_temp)
+            selected_file = root / "selected-large-file.iso"
+            unselected_file = root / "unselected-large-file.iso"
+            selected_file.write_bytes(b"explicitly selected fixture")
+            unselected_file.write_bytes(b"must remain untouched")
+            item = {
+                "path": str(selected_file),
+                "size": selected_file.stat().st_size,
+                "size_formatted": analyze.format_size(selected_file.stat().st_size),
+                "name": analyze.MANUAL_REVIEW_LABEL,
+                "kind": "File",
+                "manual_review": True,
+            }
+            results = {
+                "manual_review_files": [item],
+                "categories": {
+                    "high": {"items": []},
+                    "medium": {"items": []},
+                    "low": {"items": []},
+                },
+            }
+            script_path = root / "manual-review.ps1"
+            analyze.generate_clean_script(
+                results, str(script_path), "manual", selected_paths=[str(selected_file)],
+                manual_review_confirmed=True,
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(selected_file.exists(), result.stdout + result.stderr)
+            self.assertEqual(unselected_file.read_bytes(), b"must remain untouched")
+            self.assertIn("Manual review only", result.stdout)
+            self.assertIn(f"File | {analyze.MANUAL_REVIEW_LABEL} |", result.stdout)
+            self.assertIn("Cleanup complete! Removed 1 file", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
 
     @staticmethod
     def _synthetic_types(rows):
@@ -1023,7 +1285,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             report_path = Path(temp_dir) / "candidates.txt"
             analyze.write_item_list_report(results, str(report_path))
             report = report_path.read_text(encoding="utf-8")
-        self.assertIn("Estimated space in listed files and folders (counted once): 125 B", report)
+        self.assertIn("Estimated space in automatic cleanup suggestions (counted once): 125 B", report)
         self.assertIn("Some listed items are inside a listed folder. Each row is shown separately, but the same space is counted only once in the total.", report)
         self.assertIn(
             "50 B at C:\\Temp\\cache\\nested\\ is inside 100 B at C:\\Temp\\cache\\",
@@ -1059,7 +1321,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         )
         self.assertIn("[High] - Estimated space: 50 B", console_report)
         self.assertIn("[Medium] - Estimated space: 25 B", console_report)
-        self.assertIn("Estimated space in listed files and folders (counted once): 125 B", console_report)
+        self.assertIn("Estimated space in automatic cleanup suggestions (counted once): 125 B", console_report)
 
     def test_standard_wiztree_report_discloses_possible_access_gaps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
