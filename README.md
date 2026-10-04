@@ -127,7 +127,7 @@ Drive Cleanr's menus, prompts, and reports are in English. It accepts localized 
 - **Clear path display:** Scan entries with hidden formatting or terminal-control characters in their paths are omitted from cleanup review and counted in the report, because they can make a path appear to name something else.
 - **Space estimates:** Nested items are counted once across review levels, while each folder row shows its full size. A folder can contain protected data that the plan keeps, so the space actually recovered may be lower. WinDirStat does not save drive-capacity data; when possible, Drive Cleanr shows current capacity and free space and labels when it checked them.
 
-Scans retain previous exports and review plans; if a generated scan name is already occupied, Drive Cleanr chooses a suffixed name instead of overwriting it. To prune old scan files intentionally, run `python scan.py --cleanup --keep-latest 1`. This also removes only each pruned scan's default same-name `.clean.ps1` plan. Custom plan paths and unrelated PowerShell files are left alone.
+Scans retain previous exports and review plans; if a generated scan name is already occupied, Drive Cleanr chooses a suffixed name instead of overwriting it. To prune old scan exports intentionally, run `python scan.py --cleanup --keep-latest 1`. Retention removes only validated Drive Cleanr scan exports and each pruned scan's exact default `.clean.ps1` plan. Unrelated CSV files and user-authored PowerShell files are left alone.
 
 ## Backups
 

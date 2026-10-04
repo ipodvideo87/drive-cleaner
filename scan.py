@@ -18,6 +18,10 @@ from error_messages import describe_error
 # Configuration: resolve relative to this script's directory instead of hardcoding an absolute path
 SKILL_DIR = Path(__file__).resolve().parent
 DATA_DIR = str(SKILL_DIR / "data")
+_DRIVECLEANR_SCAN_NAME = re.compile(
+    r"^scan_(?:wiztree_(?:fast|standard)|windirstat)_\d{20}(?:_\d+)?$",
+    re.IGNORECASE,
+)
 
 
 def find_wiztree():
@@ -618,18 +622,32 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
 
 
 def get_latest_scan():
-    """Get the latest scan file"""
+    """Get the newest validated Drive Cleanr scan export."""
     data_path = Path(DATA_DIR)
-    if not data_path.exists():
+    if not data_path.exists() or _path_has_reparse_component(data_path):
         return None
 
-    csv_files = list(data_path.glob("*.csv"))
+    csv_files = [
+        path for path in data_path.glob("*.csv")
+        if _is_drive_cleanr_scan_export(path)
+    ]
     if not csv_files:
         return None
 
     # Sort by modification time and return the newest
     latest = max(csv_files, key=lambda f: f.stat().st_mtime)
     return str(latest)
+
+
+def _is_drive_cleanr_scan_export(path):
+    """Match a current generated scan name and a recognizable scan CSV."""
+    candidate = Path(path)
+    if not _DRIVECLEANR_SCAN_NAME.fullmatch(candidate.stem):
+        return False
+    if _path_has_reparse_component(candidate):
+        return False
+    valid, _error = validate_scan_export(str(candidate))
+    return valid
 
 
 def cleanup_old_scans(keep_latest=1, include_scripts=False):
@@ -660,7 +678,12 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
     old_exports = []
     pruned_exports = []
     if data_path.exists():
-        csv_files = list(data_path.glob("*.csv"))
+        # The data folder may also contain user-supplied CSVs. Only prune
+        # exports whose generated names and contents identify them as scans.
+        csv_files = [
+            path for path in data_path.glob("*.csv")
+            if _is_drive_cleanr_scan_export(path)
+        ]
         if len(csv_files) > keep_latest:
             # Sort by modification time (newest first)
             csv_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)

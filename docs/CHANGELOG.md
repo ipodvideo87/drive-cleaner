@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Limit scan retention cleanup to validated Drive Cleanr-generated scan exports and their exact paired plans; preserve unrelated CSV files and user-authored scripts.
 - Reject restore destinations inside or above Drive Cleanr backup-storage roots before asking for approval or writing restored data.
 - Create and verify a recovery backup by default when a reviewed generated plan runs with `-Force`; allow users to skip it explicitly with `-NoBackup`. Interactive backup prompts still default to no backup.
 - Skip and count scan paths with hidden formatting or terminal-control characters so cleanup targets cannot be visually spoofed in the terminal.

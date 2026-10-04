@@ -18,7 +18,7 @@ Choose **Scan a drive or folder**, then select WizTree or WinDirStat and enter t
 
 Scans can include individual files as well as folders so large files can be reviewed and selected on their own. The default timeout is 30 minutes; for a larger or slower drive, increase it with `--timeout 3600`. Progress shows elapsed time and how much of the scan file has been saved. A scan is ready only after the scanner exits and Drive Cleanr verifies the results file. WinDirStat uses its saved filters, so check those before scanning a whole drive.
 
-Scans retain earlier exports and review plans. Run `python scan.py --cleanup --keep-latest 1` only when you intend to remove older CSVs; increase `--keep-latest` to preserve more exports. Cleanup removes a default `.clean.ps1` plan only when its matching scan CSV is pruned. It leaves custom plan paths and unrelated PowerShell files alone.
+Scans retain earlier exports and review plans. Run `python scan.py --cleanup --keep-latest 1` only when you intend to remove older Drive Cleanr scan exports; increase `--keep-latest` to preserve more exports. Cleanup removes a default `.clean.ps1` plan only when its exact matching scan export is pruned. Unrelated CSV files and user-authored PowerShell files are left alone.
 
 ## 2. Review the scan
 

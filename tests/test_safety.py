@@ -5003,14 +5003,14 @@ class ScanSafetyTests(unittest.TestCase):
             scan.DATA_DIR = str(Path(temp_dir) / "data")
             data = Path(scan.DATA_DIR)
             data.mkdir()
-            old_export = data / "scan_older.csv"
-            new_export = data / "scan_newer.csv"
-            old_export.write_text("old")
-            new_export.write_text("new")
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
             os.utime(old_export, (1, 1))
             os.utime(new_export, (2, 2))
-            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
-            new_plan = Path(temp_dir) / "scan_newer.clean.ps1"
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            new_plan = Path(temp_dir) / f"{new_export.stem}.clean.ps1"
             unrelated_plan = Path(temp_dir) / "clean_reviewed.ps1"
             custom_plan = Path(temp_dir) / "manual-review.ps1"
             for script in (old_plan, new_plan, unrelated_plan, custom_plan):
@@ -5022,7 +5022,7 @@ class ScanSafetyTests(unittest.TestCase):
                 # The default helper call does not delete plans. Restore its
                 # old CSV fixture to model the explicit CLI cleanup action,
                 # which prunes the export and its paired plan together.
-                old_export.write_text("old")
+                old_export.write_text("File Name,Size\n", encoding="utf-8")
                 os.utime(old_export, (1, 1))
                 scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
                 self.assertFalse(old_export.exists())
@@ -5034,19 +5034,77 @@ class ScanSafetyTests(unittest.TestCase):
             finally:
                 scan.DATA_DIR = old_data_dir
 
+    def test_scan_cleanup_preserves_unrelated_csv_and_its_matching_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            data = Path(scan.DATA_DIR)
+            data.mkdir()
+            old_export = data / "scan_windirstat_20260927120000000000.csv"
+            new_export = data / "scan_windirstat_20260928120000000000.csv"
+            unrelated_csv = data / "user-review.csv"
+            invalid_export = data / "scan_wiztree_fast_20260929120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            unrelated_csv.write_text("File Name,Size\n", encoding="utf-8")
+            invalid_export.write_text("not a scan export\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (3, 3))
+            os.utime(unrelated_csv, (2, 2))
+            os.utime(invalid_export, (4, 4))
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            unrelated_plan = Path(temp_dir) / "user-review.clean.ps1"
+            invalid_plan = Path(temp_dir) / f"{invalid_export.stem}.clean.ps1"
+            old_plan.write_text("generated plan", encoding="utf-8")
+            unrelated_plan.write_text("user plan", encoding="utf-8")
+            invalid_plan.write_text("user plan", encoding="utf-8")
+            try:
+                scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
+                self.assertFalse(old_export.exists())
+                self.assertFalse(old_plan.exists())
+                self.assertTrue(new_export.exists())
+                self.assertTrue(unrelated_csv.exists())
+                self.assertTrue(unrelated_plan.exists())
+                self.assertTrue(invalid_export.exists())
+                self.assertTrue(invalid_plan.exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_latest_scan_ignores_unrelated_and_invalid_csv_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            older_scan = data / "scan_wiztree_standard_20260927120000000000.csv"
+            newest_scan = data / "scan_windirstat_20260928120000000000.csv"
+            unrelated_csv = data / "user-review.csv"
+            invalid_scan = data / "scan_wiztree_fast_20260929120000000000.csv"
+            for path in (older_scan, newest_scan, unrelated_csv):
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            invalid_scan.write_text("not a scan export\n", encoding="utf-8")
+            os.utime(older_scan, (1, 1))
+            os.utime(newest_scan, (2, 2))
+            os.utime(unrelated_csv, (3, 3))
+            os.utime(invalid_scan, (4, 4))
+            try:
+                with mock.patch.object(scan, "DATA_DIR", str(data)):
+                    self.assertEqual(scan.get_latest_scan(), str(newest_scan))
+            finally:
+                scan.DATA_DIR = old_data_dir
+
     def test_scan_cleanup_keeps_plan_when_its_export_cannot_be_pruned(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
             scan.DATA_DIR = str(Path(temp_dir) / "data")
             data = Path(scan.DATA_DIR)
             data.mkdir()
-            old_export = data / "scan_older.csv"
-            new_export = data / "scan_newer.csv"
-            old_export.write_text("old")
-            new_export.write_text("new")
+            old_export = data / "scan_wiztree_fast_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_fast_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
             os.utime(old_export, (1, 1))
             os.utime(new_export, (2, 2))
-            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
             old_plan.write_text("reviewed")
             original_unlink = Path.unlink
 
@@ -5079,6 +5137,7 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan.subprocess, "Popen") as launch, \
                      mock.patch("builtins.print"):
                     self.assertIsNone(scan.scan("D:", app="windirstat"))
+                    self.assertIsNone(scan.get_latest_scan())
                     self.assertEqual(scan.cleanup_old_scans(keep_latest=1), 0)
                 launch.assert_not_called()
                 self.assertTrue(older.exists())
