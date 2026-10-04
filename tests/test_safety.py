@@ -2527,14 +2527,23 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target.mkdir()
             eligible_file = target / "payload.bin"
             eligible_file.write_bytes(b"eligible cache")
+            nested_folder = target / "child"
+            nested_folder.mkdir()
+            nested_file = nested_folder / "nested.bin"
+            nested_file.write_bytes(b"n" * (2 * 1024 * 1024))
             protected_file = target / "Downloads" / "keep.bin"
             protected_file.parent.mkdir()
             protected_file.write_bytes(b"preserve this data")
+            eligible_file_bytes = eligible_file.stat().st_size
+            nested_file_bytes = nested_file.stat().st_size
+            protected_file_bytes = protected_file.stat().st_size
+            eligible_total_bytes = eligible_file_bytes + nested_file_bytes
+            scan_total_bytes = eligible_total_bytes + protected_file_bytes
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target) + "\\",
                 "name": "npm cache",
-                "size": eligible_file.stat().st_size + protected_file.stat().st_size,
-                "size_formatted": "32 B",
+                "size": scan_total_bytes,
+                "size_formatted": analyze.format_size(scan_total_bytes),
                 "kind": "Folder",
             }]}}}
             script_path = Path(plan_temp) / "preview-folder.ps1"
@@ -2562,11 +2571,26 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(eligible_file.exists())
+            self.assertTrue(nested_file.exists())
             self.assertEqual(protected_file.read_bytes(), b"preserve this data")
             self.assertIn(f"Would remove | File | {eligible_file}", result.stdout)
+            self.assertIn(
+                f"Would remove | Folder | {nested_folder} | 2.00 MB ({nested_file_bytes} bytes) of eligible file data below (includes nested folders)",
+                result.stdout,
+            )
             self.assertNotIn(str(protected_file), result.stdout)
-            self.assertIn("Keep selected folder | Protected data will remain inside it.", result.stdout)
-            self.assertIn("Preview complete: 1 file and 0 folders would be removed", result.stdout)
+            self.assertIn(
+                f"Keep selected folder | Protected data will remain inside it | 2.00 MB ({eligible_total_bytes} bytes) of eligible file data below",
+                result.stdout,
+            )
+            self.assertIn(
+                "Folder sizes include eligible files in nested folders, so folder rows overlap. The total counts each eligible file once.",
+                result.stdout,
+            )
+            self.assertIn(
+                f"Preview complete: 2 files and 1 folder would be removed ({eligible_total_bytes} bytes of file data)",
+                result.stdout,
+            )
             self.assertIn("nothing was removed", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")

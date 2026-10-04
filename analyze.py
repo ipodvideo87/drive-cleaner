@@ -2002,6 +2002,31 @@ if ($CreateBackup -and $SkipBackup) {{
     throw "Choose either -Backup or -NoBackup, not both."
 }}
 
+function Format-PreviewFileDataSize([decimal]$Bytes) {{
+    $exactBytes = $Bytes.ToString("0", [System.Globalization.CultureInfo]::InvariantCulture)
+    if ($Bytes -lt 1024) {{ return "$exactBytes bytes" }}
+    $units = @("KB", "MB", "GB", "TB", "PB", "EB")
+    $value = [double]$Bytes
+    $unitIndex = -1
+    do {{
+        $value /= 1024
+        $unitIndex++
+    }} while ($value -ge 1024 -and $unitIndex -lt ($units.Count - 1))
+    $formattedValue = $value.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+    return "$formattedValue $($units[$unitIndex]) ($exactBytes bytes)"
+}}
+
+function Write-PreviewFolderSizeProgress([long]$Current, [long]$Total) {{
+    if ($Total -le 0 -or
+        ($Current -ne 1 -and ($Current % 1000) -ne 0 -and $Current -ne $Total)) {{
+        return
+    }}
+    $status = "$Current of $Total folder-size entries checked."
+    $percentComplete = [int](100.0 * $Current / $Total)
+    Write-Progress -Activity "Summarizing eligible folder sizes" -Status $status -PercentComplete $percentComplete
+    Write-Host "  Folder size summary: $status" -ForegroundColor Gray
+}}
+
 __NATIVE_CLEANUP_GUARD__
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -2577,6 +2602,49 @@ foreach ($target in $cleanTargets) {{
                 }}
             }}
             if ($fileHashTotal -gt 0) {{ Write-Progress -Activity "Checking selected file contents" -Completed }}
+            $previewFolderDataBytes = $null
+            if ($PreviewOnly) {{
+                $previewDirectorySeparators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+                $previewTargetPath = [System.IO.Path]::GetFullPath($target.Path).TrimEnd($previewDirectorySeparators)
+                $previewFolderDataBytes = [System.Collections.Generic.Dictionary[string, decimal]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $previewFolderDataBytes[$previewTargetPath] = [decimal]0
+                $previewDirectories = @($entries | Where-Object {{ $_.PSIsContainer }} | Sort-Object {{ $_.FullName.Length }} -Descending)
+                $previewSizeWorkTotal = [long]$entries.Count + [long]$deletable.Count + [long]$previewDirectories.Count
+                $previewSizeWorkIndex = 0
+                foreach ($entry in $entries) {{
+                    if ($entry.PSIsContainer) {{
+                        $previewDirectoryPath = [System.IO.Path]::GetFullPath($entry.FullName).TrimEnd($previewDirectorySeparators)
+                        $previewFolderDataBytes[$previewDirectoryPath] = [decimal]0
+                    }}
+                    $previewSizeWorkIndex++
+                    Write-PreviewFolderSizeProgress $previewSizeWorkIndex $previewSizeWorkTotal
+                }}
+                foreach ($entry in $deletable) {{
+                    if (-not $entry.PSIsContainer) {{
+                        $previewFilePath = [System.IO.Path]::GetFullPath($entry.FullName)
+                        $previewFileParent = [System.IO.Directory]::GetParent($previewFilePath)
+                        if (-not $previewFileParent -or -not $previewFolderDataBytes.ContainsKey($previewFileParent.FullName)) {{
+                            throw "Could not safely total eligible file data for this folder preview."
+                        }}
+                        $previewFolderDataBytes[$previewFileParent.FullName] += [decimal]$entry.CleanupLength
+                    }}
+                    $previewSizeWorkIndex++
+                    Write-PreviewFolderSizeProgress $previewSizeWorkIndex $previewSizeWorkTotal
+                }}
+                foreach ($entry in $previewDirectories) {{
+                    $previewDirectoryPath = [System.IO.Path]::GetFullPath($entry.FullName).TrimEnd($previewDirectorySeparators)
+                    $previewDirectoryParent = [System.IO.Directory]::GetParent($previewDirectoryPath)
+                    if (-not $previewDirectoryParent -or -not $previewFolderDataBytes.ContainsKey($previewDirectoryParent.FullName)) {{
+                        throw "Could not safely total eligible file data for this folder preview."
+                    }}
+                    $previewFolderDataBytes[$previewDirectoryParent.FullName] += [decimal]$previewFolderDataBytes[$previewDirectoryPath]
+                    $previewSizeWorkIndex++
+                    Write-PreviewFolderSizeProgress $previewSizeWorkIndex $previewSizeWorkTotal
+                }}
+                if ($previewSizeWorkTotal -gt 0) {{
+                    Write-Progress -Activity "Summarizing eligible folder sizes" -Completed
+                }}
+            }}
             if ($backupEnabled) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
@@ -2645,7 +2713,9 @@ foreach ($target in $cleanTargets) {{
                     if (-not $previewPathsSeen.Add($previewPath)) {{ continue }}
                     if ($entry.PSIsContainer) {{
                         $previewFolderCount++
-                        Write-Host "  Would remove | Folder | $previewPath"
+                        $previewFolderKey = $previewPath.TrimEnd($previewDirectorySeparators)
+                        $folderDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewFolderKey]
+                        Write-Host "  Would remove | Folder | $previewPath | $folderDataSize of eligible file data below (includes nested folders)"
                     }} else {{
                         $previewLength = [long]$entry.CleanupLength
                         $previewFileCount++
@@ -2657,10 +2727,12 @@ foreach ($target in $cleanTargets) {{
                     $previewRoot = [System.IO.Path]::GetFullPath($target.Path)
                     if ($previewPathsSeen.Add($previewRoot)) {{
                         $previewFolderCount++
-                        Write-Host "  Would remove | Folder | $previewRoot (after its eligible contents)"
+                        $rootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
+                        Write-Host "  Would remove | Folder | $previewRoot | $rootDataSize of eligible file data below (includes nested folders)"
                     }}
                 }} else {{
-                    Write-Host "  Keep selected folder | Protected data will remain inside it."
+                    $keptRootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
+                    Write-Host "  Keep selected folder | Protected data will remain inside it | $keptRootDataSize of eligible file data below"
                 }}
                 continue
             }}
@@ -2843,6 +2915,7 @@ if ($PreviewOnly) {{
     $previewFilesLabel = if ($previewFileCount -eq 1) {{ "file" }} else {{ "files" }}
     $previewFoldersLabel = if ($previewFolderCount -eq 1) {{ "folder" }} else {{ "folders" }}
     Write-Host "Preview complete: $previewFileCount $previewFilesLabel and $previewFolderCount $previewFoldersLabel would be removed ($previewBytesDisplay bytes of file data)." -ForegroundColor Green
+    Write-Host "Folder sizes include eligible files in nested folders, so folder rows overlap. The total counts each eligible file once." -ForegroundColor Gray
     Write-Host "This is the total size of eligible files, not a guarantee of space reclaimed; hard links and filesystem behavior can change the amount." -ForegroundColor Gray
     Write-Host "No recovery backup was created and nothing was removed. The cleanup plan will repeat its safety checks if you run it later." -ForegroundColor Yellow
     Write-Host "========================================" -ForegroundColor Cyan

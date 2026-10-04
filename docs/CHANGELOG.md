@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Include each folder's eligible descendant file-data size in cleanup-plan previews, and distinguish overlapping folder-row totals from the deduplicated overall total.
 - List retained scans newest first in the guided review picker, including recognized legacy scan folders, with numeric selection and pagination.
 - Limit scan retention cleanup to validated Drive Cleanr-generated scan exports and their exact paired plans; preserve unrelated CSV files and user-authored scripts.
 - Reject restore destinations inside or above Drive Cleanr backup-storage roots before asking for approval or writing restored data.
