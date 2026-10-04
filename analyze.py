@@ -8,7 +8,6 @@ import hashlib
 import ntpath
 import os
 import shutil
-import subprocess
 import sys
 import json
 import re
@@ -18,6 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import scan
+from cleanup_runner import offer_to_preview_cleanup_script, offer_to_run_cleanup_script
 from error_messages import describe_error
 
 _CLEANUP_NATIVE_GUARD_SOURCE = r"""
@@ -3925,45 +3925,6 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
     return selected_paths, expanded_candidates
 
 
-def offer_to_run_cleanup_script(script_path):
-    """Offer to launch a new plan when this window is already running as Administrator."""
-    if not scan.check_admin():
-        return False
-
-    print("This window is running as Administrator.")
-    print("The plan will show these entries again so you can choose which to clean and confirm.")
-    try:
-        while True:
-            answer = input("Run the new cleanup plan now? [y/N]: ").strip().casefold()
-            if answer in {"", "n", "no"}:
-                print("Cleanup plan saved for later; nothing has been removed.")
-                return False
-            if answer in {"y", "yes"}:
-                break
-            print("Enter Y or N.")
-    except (EOFError, KeyboardInterrupt):
-        print("Launch cancelled; the cleanup plan is saved and nothing has been removed.")
-        return False
-
-    powershell = shutil.which("pwsh") or shutil.which("powershell")
-    if not powershell:
-        print("PowerShell was not found. The cleanup plan is saved and can be run later.")
-        return False
-
-    print("Starting the cleanup plan in this administrator session.")
-    try:
-        result = subprocess.run(
-            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"Could not start the cleanup plan: {describe_error(exc)}")
-        return False
-    if result.returncode != 0:
-        print(f"The cleanup plan exited with status {result.returncode}.")
-    return True
-
-
 SCAN_PICKER_PAGE_SIZE = 10
 
 
@@ -4157,7 +4118,11 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                         plan_results, output_path, priority, selected_paths=selected_paths
                     )
                     print(f"Cleanup plan saved to: {output_path}")
-                    offer_to_run_cleanup_script(output_path)
+                    preview_completed = offer_to_preview_cleanup_script(output_path)
+                    if preview_completed is False:
+                        print("The preview did not finish; the plan remains saved and this menu will not start cleanup.")
+                    else:
+                        offer_to_run_cleanup_script(output_path)
                 except (ValueError, OSError) as exc:
                     print(f"Could not save the cleanup plan: {describe_error(exc)}")
                 input("Press Enter to continue...")
@@ -4189,7 +4154,11 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                         manual_review_confirmed=True,
                     )
                     print(f"Manual-review plan saved to: {output_path}")
-                    offer_to_run_cleanup_script(output_path)
+                    preview_completed = offer_to_preview_cleanup_script(output_path)
+                    if preview_completed is False:
+                        print("The preview did not finish; the plan remains saved and this menu will not start cleanup.")
+                    else:
+                        offer_to_run_cleanup_script(output_path)
                 except (ValueError, OSError) as exc:
                     print(f"Could not save the manual-review plan: {describe_error(exc)}")
                 input("Press Enter to continue...")

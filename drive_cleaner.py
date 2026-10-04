@@ -278,11 +278,11 @@ def _print_welcome():
       '-----------------------------'
           FIND SPACE. KEEP CONTROL.
 
-    Scan -> Review -> Choose files/folders -> Optional backup -> Confirm -> Clean
+    Scan -> Review -> Choose files/folders -> Optional full preview -> Optional backup -> Confirm -> Clean
     Scanning and review never remove anything.
     Choose individual files, folders, or both from the review list.
     Protected and project data are always kept. Higher-risk candidates inside a folder are kept unless you explicitly select their listed entries too.
-    The preview shows up to 12 direct items; other contents may also be removed.
+    A full read-only preview can list every eligible file and folder before cleanup.
     The saved plan lets you choose the final items again before cleanup.
     Without a backup, removed items cannot be restored by Drive Cleanr.
     Choose 1 to scan now or 2 to review a saved scan.

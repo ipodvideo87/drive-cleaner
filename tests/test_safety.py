@@ -19,6 +19,7 @@ from unittest import mock
 
 import analyze
 import backup
+import cleanup_runner
 import scan
 import drive_cleaner
 from error_messages import describe_error, safe_terminal_text
@@ -416,16 +417,50 @@ class AnalyzeSafetyTests(unittest.TestCase):
                      "3", "high", "1", "", str(plan_path), "", "0",
                  ]), \
                  mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=None) as preview, \
                  mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
                  redirect_stdout(output):
                 analyze.run_tui(initial_csv=str(csv_path))
             generate.assert_called_once_with(
                 results, str(plan_path), "high", selected_paths=[selected_path]
             )
+            preview.assert_called_once_with(str(plan_path))
             offer.assert_called_once_with(str(plan_path))
             self.assertIn("Minimum item size shown: 50 MB", output.getvalue())
             self.assertIn("3) Choose individual files, folders, or both for a cleanup plan", output.getvalue())
             self.assertIn("| Folder |", output.getvalue())
+
+    def test_guided_menu_does_not_offer_cleanup_after_failed_preview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            plan_path = root / "reviewed.ps1"
+            selected_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": []},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            output = io.StringIO()
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch.object(analyze, "select_cleanup_candidates", return_value=([selected_path], [])), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=False) as preview, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script") as run_cleanup, \
+                 mock.patch("builtins.input", side_effect=["3", "high", str(plan_path), "", "0"]), \
+                 redirect_stdout(output):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            generate.assert_called_once()
+            preview.assert_called_once_with(str(plan_path))
+            run_cleanup.assert_not_called()
+            self.assertIn("the plan remains saved and this menu will not start cleanup", output.getvalue())
 
     def test_review_menu_creates_manual_review_plan_only_after_exact_acknowledgement(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -458,6 +493,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  ]), \
                  mock.patch.object(analyze, "select_manual_review_files", return_value=[manual_file]), \
                  mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=None) as preview, \
                  mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
                  redirect_stdout(io.StringIO()):
                 analyze.run_tui(initial_csv=str(csv_path))
@@ -466,6 +502,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 results, str(plan_path), "manual", selected_paths=[manual_file["path"]],
                 manual_review_confirmed=True,
             )
+            preview.assert_called_once_with(str(plan_path))
             offer.assert_called_once_with(str(plan_path))
 
     def test_review_menu_browses_folder_and_generates_plan_for_exact_file(self):
@@ -502,6 +539,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                      "3", "high", "D", "1", "1", "D", "", str(plan_path), "", "0",
                  ]), \
                  mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script"), \
                  mock.patch.object(analyze, "offer_to_run_cleanup_script"), \
                  redirect_stdout(output):
                 analyze.run_tui(initial_csv=str(csv_path))
@@ -515,26 +553,26 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("C:\\Users\\A\\AppData\\Local\\npm-cache\\content.bin", output.getvalue())
 
     def test_cleanup_script_run_offer_is_hidden_without_admin_token(self):
-        with mock.patch.object(analyze.scan, "check_admin", return_value=False), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=False), \
              mock.patch("builtins.input") as prompt, \
-             mock.patch.object(analyze.subprocess, "run") as run_script:
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script:
             self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
         prompt.assert_not_called()
         run_script.assert_not_called()
 
     def test_admin_cleanup_script_run_offer_defaults_to_saved_plan(self):
-        with mock.patch.object(analyze.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
              mock.patch("builtins.input", return_value=""), \
-             mock.patch.object(analyze.subprocess, "run") as run_script:
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script:
             self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
         run_script.assert_not_called()
 
     def test_admin_cleanup_script_run_offer_launches_power_shell_without_force(self):
         completed = SimpleNamespace(returncode=0)
-        with mock.patch.object(analyze.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
              mock.patch("builtins.input", return_value="y"), \
-             mock.patch.object(analyze.shutil, "which", side_effect=["pwsh.exe"]), \
-             mock.patch.object(analyze.subprocess, "run", return_value=completed) as run_script:
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=["pwsh.exe"]), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script:
             self.assertTrue(analyze.offer_to_run_cleanup_script("C:\\Reviewed Plan.ps1"))
         run_script.assert_called_once_with(
             ["pwsh.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Reviewed Plan.ps1"],
@@ -543,12 +581,69 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_admin_cleanup_script_run_offer_uses_powershell_fallback(self):
         completed = SimpleNamespace(returncode=0)
-        with mock.patch.object(analyze.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
              mock.patch("builtins.input", return_value="yes"), \
-             mock.patch.object(analyze.shutil, "which", side_effect=[None, "powershell.exe"]), \
-             mock.patch.object(analyze.subprocess, "run", return_value=completed) as run_script:
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=[None, "powershell.exe"]), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script:
             self.assertTrue(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
         self.assertEqual(run_script.call_args.args[0][0], "powershell.exe")
+
+    def test_guided_plan_preview_runs_read_only_by_default(self):
+        completed = SimpleNamespace(returncode=0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "reviewed plan.ps1"
+            plan_path.write_text("reviewed plan", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch("builtins.input", return_value=""), \
+                 mock.patch.object(cleanup_runner.shutil, "which", side_effect=["pwsh.exe"]), \
+                 mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_preview, \
+                 redirect_stdout(output):
+                self.assertTrue(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            run_preview.assert_called_once_with(
+                ["pwsh.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(plan_path), "-PreviewOnly"],
+                check=False,
+            )
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "reviewed plan")
+            self.assertIn("read-only preview", output.getvalue())
+            self.assertIn("creates no backup and removes nothing", output.getvalue())
+
+    def test_declining_guided_plan_preview_does_not_launch_or_change_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "reviewed.ps1"
+            plan_path.write_text("reviewed plan", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch("builtins.input", return_value="n"), \
+                 mock.patch.object(cleanup_runner.shutil, "which") as find_powershell, \
+                 mock.patch.object(cleanup_runner.subprocess, "run") as run_preview, \
+                 redirect_stdout(output):
+                self.assertIsNone(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            find_powershell.assert_not_called()
+            run_preview.assert_not_called()
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "reviewed plan")
+            self.assertIn("Preview skipped", output.getvalue())
+
+    def test_guided_plan_preview_reports_failure_without_claiming_cleanup(self):
+        failed = SimpleNamespace(returncode=1)
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="yes"), \
+             mock.patch.object(cleanup_runner.shutil, "which", return_value="pwsh.exe"), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=failed), \
+             redirect_stdout(output):
+            self.assertFalse(cleanup_runner.offer_to_preview_cleanup_script("reviewed.ps1"))
+        self.assertIn("preview stopped with status 1", output.getvalue())
+        self.assertIn("No files were removed", output.getvalue())
+
+    def test_guided_plan_preview_handles_missing_powershell(self):
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="y"), \
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=[None, None]), \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_preview, \
+             redirect_stdout(output):
+            self.assertFalse(cleanup_runner.offer_to_preview_cleanup_script("reviewed.ps1"))
+        run_preview.assert_not_called()
+        self.assertIn("PowerShell was not found", output.getvalue())
 
     def test_review_menu_blank_selection_creates_no_plan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3801,8 +3896,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 self.assertNotEqual(Path(csv_path).parent.name, ".incomplete")
 
                 with mock.patch("builtins.input", side_effect=[
-                        "3", "", "1", "", str(plan_path), "", "0"]):
+                        "3", "", "1", "", str(plan_path), "", "0"]), \
+                     mock.patch.object(analyze, "offer_to_preview_cleanup_script") as preview:
                     analyze.run_tui(initial_csv=csv_path, min_size_mb=0)
+                preview.assert_called_once_with(str(plan_path))
 
             self.assertTrue(plan_path.is_file(), output.getvalue())
             self.assertIn(str(target), plan_path.read_text(encoding="utf-8-sig"))
@@ -5516,11 +5613,11 @@ class ScanSafetyTests(unittest.TestCase):
         welcome = output.getvalue()
         self.assertIn("FIND SPACE. KEEP CONTROL.", welcome)
         self.assertNotRegex(welcome, r"[\u3400-\u9fff]")
-        self.assertIn("Scan -> Review -> Choose files/folders -> Optional backup -> Confirm -> Clean", welcome)
+        self.assertIn("Scan -> Review -> Choose files/folders -> Optional full preview -> Optional backup -> Confirm -> Clean", welcome)
         self.assertIn("Scanning and review never remove anything.", welcome)
         self.assertIn("Choose individual files, folders, or both from the review list.", welcome)
         self.assertIn("Higher-risk candidates inside a folder are kept unless you explicitly select their listed entries too.", welcome)
-        self.assertIn("The preview shows up to 12 direct items; other contents may also be removed.", welcome)
+        self.assertIn("A full read-only preview can list every eligible file and folder before cleanup.", welcome)
         self.assertIn("The saved plan lets you choose the final items again before cleanup.", welcome)
         self.assertIn("Without a backup, removed items cannot be restored by Drive Cleanr.", welcome)
         self.assertLess(welcome.index("FIND SPACE."), welcome.index("1) Scan a drive"))

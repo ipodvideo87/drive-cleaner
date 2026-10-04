@@ -32,6 +32,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Start the main command with a compact branded welcome and a short guide to the available tasks. Keep the workflow inside that command with guided choices whenever possible, including after a scan; do not leave users thinking they must copy a follow-up command to continue.
 - If localization is implemented, detect the Windows display language and use a complete, reviewed translation shipped with the project. Fall back to English for unsupported languages; do not rely on live machine translation for cleanup, backup, restore, or confirmation prompts.
 - Explain what each choice controls. Label each selection as an individual file or a folder, say whether a folder choice includes eligible descendants, and explain when protected contents will be preserved.
+- After a guided cleanup plan is saved, offer a full read-only preview in the running menu; default to showing it, explain that large selections can take time, and state that it creates no backup and removes nothing. If the preview fails, keep the plan saved and do not offer immediate cleanup in that menu; skipping the preview remains the user's choice.
 - Keep instructions brief and actionable. Prefer guided menu choices over follow-up command examples when the user can continue inside the running program.
 - Cleanup scripts are standalone snapshots. When cleanup safety or workflow behavior changes, tell users in the README and guide to regenerate and review a fresh plan before running it.
 - Use consistent everyday terms, explain necessary technical terms at the point of use, and check English-language output for accidental untranslated or garbled text.
@@ -52,6 +53,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 ## Main entry points
 
 - `drive_cleaner.py`: guided command-line menu for scan, analysis, and backup tasks.
+- `cleanup_runner.py`: run full read-only previews of saved plans and offer to start reviewed plans in PowerShell.
 - `scan.py`: invoke WizTree and manage scan exports.
 - `analyze.py`: analyze WizTree CSV, show reports, export candidate lists, and generate reviewed PowerShell plans.
 - `backup.py`: create, list, inspect, restore, and delete backups.
