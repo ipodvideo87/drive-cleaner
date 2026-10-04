@@ -6592,6 +6592,21 @@ class BackupSafetyTests(unittest.TestCase):
                         backup._extract_zip_backup(str(archive_path), str(destination))
                     self.assertFalse(destination.exists())
 
+    def test_zip_restore_rejects_windows_invalid_characters_before_writing(self):
+        invalid_names = ("bad<name.txt", "bad>name.txt", 'bad"name.txt', "bad|name.txt")
+        for index, invalid_name in enumerate(invalid_names):
+            with self.subTest(name=invalid_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                archive_path = root / "invalid-name.zip"
+                destination = root / "restore"
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("first.txt", "must not be partially restored")
+                    archive.writestr(invalid_name, "invalid Windows filename")
+
+                with self.assertRaisesRegex(RuntimeError, "Unsafe path"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+                self.assertFalse(destination.exists())
+
     def test_restore_manifest_rejects_traversal_before_restoring_anything(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -6689,7 +6704,9 @@ class BackupSafetyTests(unittest.TestCase):
         for path in (
             "C:\\", r"\\server\share\file.bin", r"\??\C:\file.bin",
             r"C:\Users\..\Windows\file.bin", r"C:\Users\file.bin:stream",
-            r"C:\Users\*.bin", r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
+            r"C:\Users\*.bin", r"C:\Users\bad<name.bin", r"C:\Users\bad>name.bin",
+            'C:\\Users\\bad"name.bin', r"C:\Users\bad|name.bin",
+            r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
             "C:\\Users\\LPT³.log", "C:\\Users\\trailing. ",
         ):
             with self.subTest(path=path):

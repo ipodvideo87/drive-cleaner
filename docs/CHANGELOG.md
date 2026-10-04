@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Reject Windows-invalid filename characters in restore destinations and ZIP entries before presenting or writing restored data.
 - Validate guided restore destinations before prompting; reject incomplete, malformed, or overlapping paths and escape terminal controls in displayed paths.
 - Make `D` and `B` distinct in the nested file/folder picker: `D` keeps picks from the current browse, while `B` returns without adding them and preserves earlier main-list selections.
 - Browse scan entries hidden beneath a summarized folder to select exact files or subfolders. Paginate and filter large result sets, respect the chosen review levels, and explain when stale, project, or linked candidates were left off the list.

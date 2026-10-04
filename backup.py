@@ -39,6 +39,7 @@ BACKUP_PROGRESS_ENTRY_INTERVAL = 100
 BACKUP_COPY_CHUNK_BYTES = 4 * 1024 * 1024
 ROBOCOPY_TIMEOUT_SECONDS = 300
 ROBOCOPY_PROGRESS_INTERVAL_SECONDS = 10
+WINDOWS_INVALID_NAME_CHARS = frozenset('<>:"|?*')
 WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{index}" for index in range(1, 10)),
@@ -213,7 +214,7 @@ def _valid_restore_target(path: str) -> bool:
     parts = tail.split("\\")
     if any(part in {".", ".."} for part in parts):
         return False
-    if (any(character in tail for character in "*?:") or
+    if (any(character in WINDOWS_INVALID_NAME_CHARS for part in parts for character in part) or
             any(part.endswith((".", " ")) or _is_windows_reserved_name(part) or
                 any(ord(character) < 32 for character in part) for part in parts if part)):
         return False
@@ -733,7 +734,9 @@ def _extract_zip_backup(
             parts = member.split("/")
             safe_parts = [part for part in parts if part]
             if (member.startswith("/") or any(part in {".", ".."} for part in parts) or
-                    not safe_parts or any(":" in part for part in safe_parts) or
+                    not safe_parts or
+                    any(any(character in WINDOWS_INVALID_NAME_CHARS for character in part)
+                        for part in safe_parts) or
                     any(part.endswith((".", " ")) for part in safe_parts) or
                     any(_is_windows_reserved_name(part) or
                         any(ord(character) < 32 for character in part)
