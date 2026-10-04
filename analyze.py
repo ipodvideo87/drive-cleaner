@@ -3028,6 +3028,14 @@ def prompt_existing_csv(initial_csv=None):
 
 
 def run_tui(initial_csv=None, min_size_mb=50):
+    """Run the review menu and handle terminal cancellation cleanly."""
+    try:
+        _run_tui(initial_csv, min_size_mb)
+    except (EOFError, KeyboardInterrupt):
+        print("\nReview cancelled.")
+
+
+def _run_tui(initial_csv=None, min_size_mb=50):
     """Run the interactive terminal interface."""
     csv_file = prompt_existing_csv(initial_csv)
     if not csv_file:

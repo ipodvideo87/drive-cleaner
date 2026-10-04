@@ -815,6 +815,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.main()
             self.assertIn("Review cancelled.", output.getvalue())
 
+    def test_guided_review_cancels_cleanly_on_keyboard_interrupt_or_eof(self):
+        for interruption in (KeyboardInterrupt, EOFError):
+            with self.subTest(interruption=interruption), \
+                 mock.patch.object(analyze, "prompt_existing_csv", side_effect=interruption), \
+                 redirect_stdout(io.StringIO()) as output:
+                analyze.run_tui()
+            self.assertIn("Review cancelled.", output.getvalue())
+
     def test_only_absolute_local_non_root_paths_become_candidates(self):
         results = self.analyze_rows([
             {"File Name": "C:\\", "Size": "1000", "DRIVECAPACITY": "1000", "FREESPACE": "200", "USEDSPACE": "800"},
