@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Ignore a shared `.gitignore` at the user-profile root when detecting project roots, while continuing to protect nested projects and roots containing `.git`.
 - Show byte and percentage progress during the final locked content check immediately before deletion, and while checking large named data streams.
 - Escape nonprinting manifest and archive-derived error text; reject hidden-format restore paths and malformed byte counts before verification or writing.
 - Index cleanup-rule matching by path components and cache configured temporary roots so large scan exports avoid checking every rule against every row.

@@ -1190,7 +1190,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_shared_tool_metadata_at_profile_root_does_not_hide_other_cleanup_locations(self):
         entries = []
         for name in (
-                "package.json", "package-lock.json", "bun.lock", ".editorconfig", ".vscode",
+                "package.json", "package-lock.json", "bun.lock", ".gitignore",
+                ".editorconfig", ".vscode",
                 "Work.code-workspace", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md",
                 "GEMINI.md", "SKILL.md", ".cursorrules", "copilot-instructions.md",
                 ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf"):
@@ -2343,7 +2344,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 ".windsurf", "copilot-instructions.md"):
             self.assertIn(f"'{marker}'", script)
         self.assertIn(r"\.code\-workspace", script)
-        self.assertIn("$profileRootIgnoredMarkers = @('.editorconfig', '.vscode'", script)
+        self.assertIn("$profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode'", script)
+        self.assertIn("'.gitignore'", script[script.index("$profileRootIgnoredMarkers"):])
         self.assertIn("'agents.md'", script[script.index("$profileRootIgnoredMarkers"):])
         self.assertIn("$entryName -like '*.code-workspace'", script)
         self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)

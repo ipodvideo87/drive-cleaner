@@ -868,7 +868,7 @@ PROJECT_MARKER_SUFFIXES = (
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
 _PROFILE_ROOT_IGNORED_MARKERS = frozenset({
-    ".editorconfig", ".vscode",
+    ".gitignore", ".editorconfig", ".vscode",
     ".cursorrules", ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf",
     "agents.md", "agents.override.md", "claude.md", "gemini.md",
     "copilot-instructions.md", "skill.md",
@@ -2356,7 +2356,7 @@ $projectMarkers = @(
 {project_markers}
 )
 $projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
-$profileRootIgnoredMarkers = @('.editorconfig', '.vscode', '.cursorrules', '.claude', '.cursor', '.gemini', '.github', '.opencode', '.windsurf', 'agents.md', 'agents.override.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', 'skill.md', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
+$profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode', '.cursorrules', '.claude', '.cursor', '.gemini', '.github', '.opencode', '.windsurf', 'agents.md', 'agents.override.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', 'skill.md', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
 
 function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress = $false) {{
     try {{
