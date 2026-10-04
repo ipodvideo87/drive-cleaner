@@ -34,7 +34,7 @@ Use WizTree or WinDirStat scans and a conservative review to help the user choos
 ### Stage 2: Analyze the scan data
 
 ```bash
-python "<skill directory>/analyze.py" "<csv_file>" --min-size 50
+python "<project directory>/analyze.py" "<csv_file>" --min-size 50
 ```
 
 **Two-layer analysis is required:**
@@ -63,11 +63,11 @@ Create and verify a backup only when the user chooses one.
 
 1. If the user chooses a backup, check backup drives. The utility automatically chooses an eligible local drive that is different from every selected source drive, has the most free space, and has at least 5 GB available:
    ```bash
-   python "<skill directory>/backup.py" drive
+   python "<project directory>/backup.py" drive
    ```
 2. If the agent itself will perform cleanup and the user chose a backup, create it. Use a direct copy for targets under 1 GB and compression for targets 1 GB or larger. Generate `manifest.json`:
    ```bash
-   python "<skill directory>/backup.py" create --paths "path1" "path2" --priority high
+   python "<project directory>/backup.py" create --paths "path1" "path2" --priority high
    ```
    Note: robocopy backups preserve hidden and system attributes. Use `Get-ChildItem -Force` when checking the backup directory.
 3. If backup fails, stop cleanup and ask the user to fix the issue.
@@ -95,15 +95,15 @@ Cleanup is complete. Please check whether the system is working normally.
 
 Keep the verified backup through the observation period. If the system has problems, offer to restore it. If no backup was created, explain that Drive Cleanr cannot restore removed items.
 
-- Restore: `python "<skill directory>/backup.py" restore --id <backup_id>`
-- Delete after the observation period: `python "<skill directory>/backup.py" delete --id <backup_id>`
+- Restore: `python "<project directory>/backup.py" restore --id <backup_id>`
+- Delete after the observation period: `python "<project directory>/backup.py" delete --id <backup_id>`
 
 ### Stage 7: Clean temporary files
 
 After cleanup finishes, ask whether to delete the scan data and generated scripts:
 
 ```bash
-python "<skill directory>/scan.py" --cleanup
+python "<project directory>/scan.py" --cleanup
 ```
 
 This removes older scan CSVs while keeping the newest scan by default. It removes a default `.clean.ps1` plan only when its matching scan CSV is pruned; custom output paths and unrelated PowerShell files are kept. Use `--keep-latest` to keep more scan exports.

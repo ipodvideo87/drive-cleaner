@@ -71,6 +71,29 @@ class KnowledgeBaseConsistencyTests(unittest.TestCase):
                 self.assertIn(phrase, knowledge)
 
 
+class SkillDocumentationTests(unittest.TestCase):
+    def test_skill_frontmatter_description_is_a_valid_quoted_scalar(self):
+        skill_path = Path(__file__).resolve().parent.parent / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+        frontmatter = skill.split("---", 2)
+        self.assertEqual(len(frontmatter), 3)
+        description_lines = [
+            line.partition(":")[2].strip()
+            for line in frontmatter[1].splitlines()
+            if line.startswith("description:")
+        ]
+        self.assertEqual(len(description_lines), 1)
+        self.assertIsInstance(json.loads(description_lines[0]), str)
+
+    def test_skill_script_examples_use_the_project_directory(self):
+        skill_path = Path(__file__).resolve().parent.parent / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+        self.assertNotIn("<skill directory>", skill)
+        for script in ("drive_cleaner.py", "scan.py", "analyze.py", "backup.py"):
+            with self.subTest(script=script):
+                self.assertIn(f'"<project directory>/{script}"', skill)
+
+
 class AnalyzeSafetyTests(unittest.TestCase):
     @staticmethod
     def _install_complete_mock_backup(plan_dir):
