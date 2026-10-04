@@ -1958,6 +1958,53 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(entry_count, sum(1 for _ in target.iterdir()))
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_reports_byte_progress_while_hashing_a_large_file(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            tempfile.TemporaryDirectory(dir=Path.home()) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "large-cache.bin"
+            with target.open("wb") as stream:
+                stream.truncate(128 * 1024 * 1024)
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": "128.00 MB",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_text = script_text.replace(
+                profile_scan_prefix,
+                "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                1,
+            )
+            script_path.write_text(script_text, encoding="utf-8-sig")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+
+        self.assertIn("File 1 of 1: 64.0 MB of 128.0 MB checked (50%).", result.stdout)
+        self.assertIn("File 1 of 1: 128.0 MB of 128.0 MB checked (100%).", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_cleanup_modes_still_reject_stale_and_project_targets(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:

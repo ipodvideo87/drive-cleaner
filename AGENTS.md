@@ -21,6 +21,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Keep instructions brief and actionable. Prefer guided menu choices over follow-up command examples when the user can continue inside the running program.
 - Use consistent everyday terms, explain necessary technical terms at the point of use, and check English-language output for accidental untranslated or garbled text.
 - For long operations, say what is being checked and show periodic progress so users can tell the program is still working.
+- During long file-content checks, show progress within the current large file (bytes checked and percentage) as well as the overall file or folder count.
 
 ## Development
 

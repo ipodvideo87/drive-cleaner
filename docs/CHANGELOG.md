@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Show byte counts and per-file percentages while hashing large selected files, so long content checks remain visibly active.
 - Rescan the selected folder for newly appeared project markers, protected paths, and reparse points after backup verification but before the first removal; stop cleanup if the review scope changed.
 - Copy named NTFS streams explicitly during individual-file backup and staged restore so Python 3.10 does not produce incomplete recovery data.
 - Recognize common AI-assistant project guidance files and editor settings folders as project markers, protect candidates beneath them during analysis and cleanup, and ignore shared settings at the user-profile root.

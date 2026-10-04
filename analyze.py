@@ -331,11 +331,15 @@ public static class __CLASS_NAME__
         string path, FileStream defaultStream, List<FileStream> heldStreamLocks,
         out List<NamedStreamSnapshot> streamSnapshot)
     {
+        return FileContentHash(path, defaultStream, heldStreamLocks, out streamSnapshot, null);
+    }
+
+    private static string FileContentHash(
+        string path, FileStream defaultStream, List<FileStream> heldStreamLocks,
+        out List<NamedStreamSnapshot> streamSnapshot, Action<long, long> progressCallback)
+    {
         FileInformation information = Information(defaultStream.SafeFileHandle);
-        defaultStream.Position = 0;
-        string defaultHash;
-        using (SHA256 sha256 = SHA256.Create())
-            defaultHash = BitConverter.ToString(sha256.ComputeHash(defaultStream)).Replace("-", "");
+        string defaultHash = HashFileStream(defaultStream, progressCallback);
 
         string streamsHash = HashNamedStreams(path, heldStreamLocks, out streamSnapshot);
         if (streamSnapshot.Count == 0) return defaultHash;
@@ -344,6 +348,35 @@ public static class __CLASS_NAME__
             ":" + defaultHash + ":" + streamsHash;
         using (SHA256 sha256 = SHA256.Create())
             return BitConverter.ToString(sha256.ComputeHash(Encoding.UTF8.GetBytes(material))).Replace("-", "");
+    }
+
+    private static string HashFileStream(FileStream stream, Action<long, long> progressCallback)
+    {
+        stream.Position = 0;
+        long totalBytes = stream.Length;
+        long processedBytes = 0;
+        long lastReportedBytes = 0;
+        System.Diagnostics.Stopwatch progressTimer = System.Diagnostics.Stopwatch.StartNew();
+        byte[] buffer = new byte[1024 * 1024];
+        using (SHA256 sha256 = SHA256.Create())
+        {
+            int bytesRead;
+            while ((bytesRead = stream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                sha256.TransformBlock(buffer, 0, bytesRead, buffer, 0);
+                processedBytes += bytesRead;
+                if (progressCallback != null &&
+                    (processedBytes - lastReportedBytes >= 64L * 1024L * 1024L ||
+                     progressTimer.ElapsedMilliseconds >= 10000 || processedBytes == totalBytes))
+                {
+                    progressCallback(processedBytes, totalBytes);
+                    lastReportedBytes = processedBytes;
+                    progressTimer.Restart();
+                }
+            }
+            sha256.TransformFinalBlock(new byte[0], 0, 0);
+            return BitConverter.ToString(sha256.Hash).Replace("-", "");
+        }
     }
 
     private static long LastWriteFileTime(FileInformation information)
@@ -515,6 +548,11 @@ public static class __CLASS_NAME__
 
     public static string GetFileIdentityAndHash(string path)
     {
+        return GetFileIdentityAndHash(path, null);
+    }
+
+    public static string GetFileIdentityAndHash(string path, Action<long, long> progressCallback)
+    {
         using (SafeFileHandle handle = Open(path, GenericRead | ReadAttributes))
         {
             FileInformation information = Information(handle);
@@ -523,7 +561,7 @@ public static class __CLASS_NAME__
             using (stream)
             {
                 List<NamedStreamSnapshot> streams;
-                string hash = FileContentHash(path, stream, null, out streams);
+                string hash = FileContentHash(path, stream, null, out streams, progressCallback);
                 return Identity(information) + "|" + hash;
             }
         }
@@ -2072,6 +2110,21 @@ function Get-CleanupProtectedRoot([string]$FullName, [string]$Name, [bool]$IsDir
     return $protectedRoot
 }}
 
+function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal) {{
+    $progressScript = {{
+        param([long]$BytesProcessed, [long]$FileBytesTotal)
+        if ($FileBytesTotal -le 0 -or $FileTotal -le 0) {{ return }}
+        $filePercent = [int][Math]::Min(100, (100.0 * $BytesProcessed / $FileBytesTotal))
+        $overallPercent = [int](100.0 * (($FileIndex - 1) + ($BytesProcessed / $FileBytesTotal)) / $FileTotal)
+        $processedMB = [math]::Round($BytesProcessed / 1MB, 1)
+        $totalMB = [math]::Round($FileBytesTotal / 1MB, 1)
+        $progressStatus = "Checking file $FileIndex of $FileTotal; $filePercent% checked ($processedMB of $totalMB MB). This check does not remove files."
+        Write-Progress -Activity "Checking selected file contents" -Status $progressStatus -PercentComplete $overallPercent
+        Write-Host ("  File {{0}} of {{1}}: {{2:N1}} MB of {{3:N1}} MB checked ({{4}}%)." -f $FileIndex, $FileTotal, $processedMB, $totalMB, $filePercent) -ForegroundColor Gray
+    }}.GetNewClosure()
+    return [System.Action[long, long]]$progressScript
+}}
+
 function Assert-CleanupEntryPathWithinSelection([object]$Target, [object]$Entry) {{
     # Keep only the lexical containment check here. The native removal routine
     # validates type, reparse-point status, identity, size, and last-write time
@@ -2427,7 +2480,8 @@ foreach ($target in $cleanTargets) {{
                     $entry.Refresh()
                     Add-Member -InputObject $entry -NotePropertyName CleanupLength -NotePropertyValue ([long]$entry.Length) -Force
                     Add-Member -InputObject $entry -NotePropertyName CleanupLastWriteTimeUtcFileTime -NotePropertyValue ([long]$entry.LastWriteTimeUtc.ToFileTimeUtc()) -Force
-                    $entrySnapshot = [{native_class_name}]::GetFileIdentityAndHash($entry.FullName)
+                    $hashProgressAction = New-CleanupHashProgressAction $fileHashIndex $fileHashTotal
+                    $entrySnapshot = [{native_class_name}]::GetFileIdentityAndHash($entry.FullName, $hashProgressAction)
                     $snapshotParts = $entrySnapshot -split '\\|', 2
                     if ($snapshotParts.Count -ne 2) {{
                         throw "Could not verify a selected file's identity and contents: $($entry.FullName)"
@@ -2558,7 +2612,8 @@ foreach ($target in $cleanTargets) {{
             Write-Progress -Activity "Checking selected file contents" -Status "Comparing file contents" -PercentComplete 50
             $cleanupLength = [long]$item.Length
             $cleanupLastWriteTimeUtcFileTime = [long]$item.LastWriteTimeUtc.ToFileTimeUtc()
-            $fileSnapshot = [{native_class_name}]::GetFileIdentityAndHash($target.Path)
+            $hashProgressAction = New-CleanupHashProgressAction 1 1
+            $fileSnapshot = [{native_class_name}]::GetFileIdentityAndHash($target.Path, $hashProgressAction)
             $snapshotParts = $fileSnapshot -split '\\|', 2
             if ($snapshotParts.Count -ne 2 -or $snapshotParts[0] -ne $target.CleanupIdentity) {{
                 throw "The selected file was replaced while its contents were checked; refusing cleanup: $($target.Path)"
