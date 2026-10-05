@@ -4010,7 +4010,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 mock.patch.object(analyze.shutil, "disk_usage", return_value=SimpleNamespace(
                     total=10**9, used=5 * 10**8, free=5 * 10**8,
                 )),
-                mock.patch.object(scan, "check_admin", return_value=False),
+                mock.patch.object(scan, "check_admin_status", return_value=False),
                 mock.patch.object(analyze, "clear_screen"),
                 redirect_stdout(output),
             ):
