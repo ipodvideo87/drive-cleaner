@@ -53,7 +53,9 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 | Known temporary folders | `C:\Windows\Temp`, `C:\Windows\SystemTemp`, `%TEMP%`, `%TMP%` | Check for installers or builds in progress. Preserve every `claude*` item and subtree under `%TEMP%`. Folders under `Downloads` remain protected because they may be project inputs. Other folders merely named `Temp` or `Tmp` stay in the caution tier. |
 | Recycle Bin contents | Use the Windows Recycle Bin interface | Manual only; Drive Cleanr does not create cleanup candidates for the Recycle Bin. Confirm the user does not need to recover anything first. |
 | Driver or downloader leftovers | `MyDrivers\update\*.td`, `KDubaSoftDownloads` | Manual-review examples only; Drive Cleanr does not classify these paths automatically because they may be incomplete installer downloads. |
-| Known package caches | npm, pip, Yarn, Puppeteer, and Electron caches | Drive Cleanr only suggests its recognized cache locations. Prefer each package manager or app's own cleanup command and check that no install or download is using them. |
+| Known package caches | npm, pip, Yarn Classic, Puppeteer, and Electron download caches | Drive Cleanr only gives these a lower-risk label at recognized Windows defaults. Prefer each package manager or app's own cleanup command and check that no install or download is using them. |
+
+Automatic lower-risk recognition is limited to `%LOCALAPPDATA%\npm-cache` (and legacy `%APPDATA%\npm-cache`), `%LOCALAPPDATA%\pip\Cache`, `%LOCALAPPDATA%\Yarn\Cache`, `%USERPROFILE%\.cache\puppeteer`, and `%LOCALAPPDATA%\electron\Cache`. These are default locations, not proof that the cache is unused; package managers and apps can change their cache paths. A custom path named `Cache`, `.cache`, or `npm-cache` stays in the caution tier, and Drive Cleanr does not infer custom cache locations with other names. Check the app's configured path and prefer its own cache-management command. See the [npm cache settings](https://docs.npmjs.com/cli/v7/commands/npm-cache/), [pip cache defaults](https://pip.pypa.io/en/latest/topics/caching/), [Yarn Classic cache command](https://classic.yarnpkg.com/en/docs/cli/cache) and [its Windows default path in the v1 source](https://github.com/yarnpkg/yarn/blob/v1.22.22/src/util/user-dirs.js#L22-L47), [Puppeteer cache settings](https://pptr.dev/api/puppeteer.configuration), and [Electron download cache settings](https://packages.electronjs.org/get/v4.0.0/interfaces/ElectronPlatformArtifactDetailsWithDefaults.html).
 
 ## Tier 1: Review the side effects
 
@@ -87,8 +89,8 @@ See the [user guide](../docs/GUIDE.md) and [project overview](../README.md) for 
 
 Only entries matching the rules in `analyze.py` appear as automatic cleanup suggestions. The tiers currently cover:
 
-- **High:** contents of recognized Windows or user temporary folders, plus known pip, Puppeteer, Electron, npm, and Yarn cache locations.
-- **Medium:** Windows crash dumps; Cargo install output and Chocolatey staging; Chrome's on-device model; recognized VS Code caches; generic cache, log, GPU, shader, and code-cache folders; and `Temp`/`Tmp` folders outside recognized temporary locations.
+- **High:** contents of recognized Windows or user temporary folders, plus the default Windows cache locations for npm, pip, Yarn Classic, Puppeteer, and Electron downloads listed above.
+- **Medium:** Windows crash dumps; Cargo install output and Chocolatey staging; Chrome's on-device model; recognized VS Code caches; generic cache, log, GPU, shader, and code-cache paths (including cautious `Cache`, `.cache`, and `npm-cache` names); and `Temp`/`Tmp` folders outside recognized temporary locations.
 - **Low:** Gradle, Cargo registry, NuGet, and Go module caches; Scoop downloaded installers; NVIDIA App update artifacts; Playwright browser runtimes; and Chrome/Edge profile IndexedDB data.
 
 Other examples in this guide, including the Recycle Bin, DISM component cleanup, `MyDrivers` leftovers, Maven `.m2`, GoogleUpdater `crx_cache`, and WER reports, are manual guidance rather than automatic Drive Cleanr cleanup candidates. Review the exact listed paths and labels before selecting anything.

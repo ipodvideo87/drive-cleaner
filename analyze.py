@@ -723,11 +723,12 @@ CLEANABLE_PATTERNS = {
     "high": {
         "name": "High Priority (Lower Risk)",
         "patterns": [
-            {"pattern": "\\pip\\cache", "name": "pip cache", "safe": True},
-            {"pattern": "\\.cache\\puppeteer", "name": "Puppeteer cache", "safe": True},
-            {"pattern": "\\electron\\cache", "name": "Electron cache", "safe": True},
-            {"pattern": "\\npm-cache", "name": "npm cache", "safe": True},
-            {"pattern": "\\yarn\\cache", "name": "Yarn cache", "safe": True},
+            {"pattern": "\\appdata\\local\\pip\\cache", "default_cache": "pip", "name": "pip cache", "safe": True},
+            {"pattern": "\\.cache\\puppeteer", "default_cache": "puppeteer", "name": "Puppeteer browser cache", "safe": True},
+            {"pattern": "\\appdata\\local\\electron\\cache", "default_cache": "electron", "name": "Electron download cache", "safe": True},
+            {"pattern": "\\appdata\\local\\npm-cache", "default_cache": "npm", "name": "npm cache", "safe": True},
+            {"pattern": "\\appdata\\roaming\\npm-cache", "default_cache": "npm", "name": "npm cache", "safe": True},
+            {"pattern": "\\appdata\\local\\yarn\\cache", "default_cache": "yarn", "name": "Yarn Classic cache", "safe": True},
             {"pattern": "temp", "known_temp_location": True, "name": "Temporary files (check for installers or builds in progress)", "safe": True},
             {"pattern": "tmp", "known_temp_location": True, "name": "Temporary files (check for installers or builds in progress)", "safe": True},
         ]
@@ -747,6 +748,8 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (close Chrome first; it may be downloaded again; consider disabling optimization-guide-on-device-model in chrome://flags)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
+            {"pattern": ".cache", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
+            {"pattern": "npm-cache", "name": "Package cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\appdata\\roaming\\code\\cachedextensionvsixs", "name": "VS Code cached extensions (close VS Code first; may be useful for offline reinstalls)", "safe": False},
             {"pattern": "\\appdata\\roaming\\code\\cacheddata", "name": "VS Code cache (close VS Code first; review exact contents)", "safe": False},
             {"pattern": "\\appdata\\roaming\\code\\cache", "name": "VS Code cache (close VS Code first; review exact contents)", "safe": False},
@@ -773,6 +776,30 @@ CLEANABLE_PATTERNS = {
             {"pattern": "indexeddb", "browser_profile": True, "name": "Chrome/Edge profile IndexedDB data (offline web-app data or login state; deleting it can sign you out or lose data)", "safe": False},
         ]
     }
+}
+
+# Windows defaults documented by the package managers and applications.
+# Custom cache locations are not promoted to the lower-risk tier merely
+# because their names contain a familiar cache component.
+_DEFAULT_CACHE_PROFILE_SUFFIXES = {
+    "npm": (
+        ("appdata", "local", "npm-cache"),
+        ("appdata", "roaming", "npm-cache"),
+    ),
+    "pip": (("appdata", "local", "pip", "cache"),),
+    "puppeteer": ((".cache", "puppeteer"),),
+    "electron": (("appdata", "local", "electron", "cache"),),
+    "yarn": (("appdata", "local", "yarn", "cache"),),
+}
+_DEFAULT_CACHE_ENVIRONMENT_SUFFIXES = {
+    "npm": (
+        ("LOCALAPPDATA", ("npm-cache",)),
+        ("APPDATA", ("npm-cache",)),
+    ),
+    "pip": (("LOCALAPPDATA", ("pip", "Cache")),),
+    "puppeteer": (("USERPROFILE", (".cache", "puppeteer")),),
+    "electron": (("LOCALAPPDATA", ("electron", "Cache")),),
+    "yarn": (("LOCALAPPDATA", ("Yarn", "Cache")),),
 }
 
 # Safety exclusions: never recommend these paths for cleanup.
@@ -1196,6 +1223,9 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
             return False
     elif not component_match:
         return False
+    if (pattern_info.get("default_cache") and
+            not _is_default_package_cache_location(path, pattern_info["default_cache"])):
+        return False
     if pattern_info.get("browser_profile"):
         indexeddb_index = components.index("indexeddb")
         prefix = components[:indexeddb_index]
@@ -1236,6 +1266,44 @@ def _is_known_temp_root(path, components=None):
         return False
     parent = ntpath.dirname(str(path).rstrip("\\/"))
     return bool(parent and not _is_known_temp_location(parent, _path_components(parent)))
+
+
+def _path_is_at_or_below(path, root):
+    """Return whether a Windows path equals or is nested beneath a root."""
+    path_key = _path_key(str(path))
+    root_key = _path_key(str(root)).rstrip("\\")
+    return path_key == root_key or path_key.startswith(root_key + "\\")
+
+
+def _is_default_package_cache_location(path, cache_name):
+    """Recognize a package cache only at its documented Windows default path."""
+    profile_suffixes = _DEFAULT_CACHE_PROFILE_SUFFIXES.get(cache_name)
+    if not profile_suffixes:
+        return False
+
+    for environment_name, suffix in _DEFAULT_CACHE_ENVIRONMENT_SUFFIXES[cache_name]:
+        environment_root = os.environ.get(environment_name)
+        if environment_root:
+            expected_root = ntpath.join(environment_root, *suffix)
+            if _path_is_at_or_below(path, expected_root):
+                return True
+
+    normalized = str(path).replace("/", "\\")
+    drive, tail = ntpath.splitdrive(normalized)
+    if not drive or not tail.startswith("\\"):
+        return False
+    components = _path_components(normalized)
+    if len(components) < 2 or components[0] not in {"users", "documents and settings"}:
+        return False
+
+    # Recognize standard per-user profile roots even when analysis runs under
+    # a different account. Require the cache suffix directly below the profile
+    # root, so similarly named folders in projects and archives do not match.
+    profile_root = ntpath.join(drive + "\\", *components[:2])
+    return any(
+        _path_is_at_or_below(path, ntpath.join(profile_root, *suffix))
+        for suffix in profile_suffixes
+    )
 
 
 def _matches_cleanup_rule(path, priorities, name):

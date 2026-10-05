@@ -1187,12 +1187,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
             imported_results = {
                 "categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
             }
-            imported_results["categories"]["high"]["items"] = [{
+            imported_results["categories"]["medium"]["items"] = [{
                 "path": str(cache) + "\\", "size": 100, "size_formatted": "100 B",
-                "name": "pip cache", "kind": "Directory",
+                "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+                "kind": "Directory",
             }]
             with self.assertRaisesRegex(ValueError, "project folder"):
-                analyze.generate_clean_script(imported_results, str(Path(temp_dir) / "project-cache.ps1"))
+                analyze.generate_clean_script(
+                    imported_results, str(Path(temp_dir) / "project-cache.ps1"), priority="medium"
+                )
         self.assertEqual(results["project_candidate_count"], 1)
         self.assertEqual(results["project_roots"], [{"path": str(project), "marker": ".git"}])
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
@@ -1852,6 +1855,84 @@ class AnalyzeSafetyTests(unittest.TestCase):
             ("medium",),
             "Application cache",
         ))
+
+    def test_package_cache_defaults_are_limited_to_standard_profile_locations(self):
+        default_paths = {
+            r"C:\Users\A\AppData\Local\npm-cache" + "\\",
+            r"C:\Users\A\AppData\Roaming\npm-cache" + "\\",
+            r"C:\Users\A\AppData\Local\pip\Cache" + "\\",
+            r"C:\Users\A\.cache\puppeteer" + "\\",
+            r"C:\Users\A\AppData\Local\electron\Cache" + "\\",
+            r"C:\Users\A\AppData\Local\Yarn\Cache" + "\\",
+        }
+        custom_paths = {
+            r"C:\Users\A\Archive\npm-cache" + "\\",
+            r"C:\Users\A\Projects\Unmarked\pip\cache" + "\\",
+            r"D:\Shared\electron\cache" + "\\",
+            r"C:\Users\A\Archive\yarn\cache" + "\\",
+            r"C:\Users\A\Archive\.cache\puppeteer" + "\\",
+        }
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "104857600"}
+            for path in default_paths | custom_paths
+        ])
+        expected_high_paths = {path.rstrip("\\") for path in default_paths}
+        expected_custom_paths = {path.rstrip("\\") for path in custom_paths}
+        high_by_path = {
+            item["path"].rstrip("\\") for item in results["categories"]["high"]["items"]
+        }
+        medium_by_path = {
+            item["path"].rstrip("\\"): item
+            for item in results["categories"]["medium"]["items"]
+        }
+        self.assertEqual(high_by_path, expected_high_paths)
+        self.assertTrue(expected_custom_paths.isdisjoint(high_by_path))
+        self.assertTrue(
+            expected_custom_paths.issubset(medium_by_path),
+            f"custom cache paths missing from the caution tier: {expected_custom_paths - medium_by_path.keys()}",
+        )
+        self.assertTrue(all(not medium_by_path[path]["safe"] for path in expected_custom_paths))
+        self.assertEqual(
+            medium_by_path[r"C:\Users\A\Archive\npm-cache"]["name"],
+            "Package cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+        )
+
+        imported_plan = {"categories": {
+            "high": {"name": "High", "items": [{
+                "path": r"C:\Users\A\Archive\npm-cache" + "\\",
+                "name": "npm cache", "size": 104857600,
+                "size_formatted": "100 MB", "kind": "Directory",
+            }]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+             mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_inside_project_tree", return_value=False):
+            with self.assertRaisesRegex(ValueError, "does not match its priority and cleanup label"):
+                analyze.generate_clean_script(
+                    imported_plan, str(Path(temp_dir) / "unverified-cache.ps1"), priority="high"
+                )
+
+    def test_package_cache_defaults_follow_nonstandard_active_profile_roots(self):
+        configured_roots = {
+            "LOCALAPPDATA": r"D:\Profiles\A\AppData\Local",
+            "APPDATA": r"D:\Profiles\A\AppData\Roaming",
+            "USERPROFILE": r"D:\Profiles\A",
+        }
+        recognized_paths = (
+            (r"D:\Profiles\A\AppData\Local\npm-cache", "npm cache"),
+            (r"D:\Profiles\A\AppData\Roaming\npm-cache", "npm cache"),
+            (r"D:\Profiles\A\AppData\Local\pip\Cache", "pip cache"),
+            (r"D:\Profiles\A\.cache\puppeteer\chrome", "Puppeteer browser cache"),
+            (r"D:\Profiles\A\AppData\Local\electron\Cache", "Electron download cache"),
+            (r"D:\Profiles\A\AppData\Local\Yarn\Cache", "Yarn Classic cache"),
+        )
+        with mock.patch.dict(os.environ, configured_roots):
+            for path, label in recognized_paths:
+                with self.subTest(path=path):
+                    self.assertTrue(analyze._matches_cleanup_rule(path, ("high",), label))
 
     def test_cargo_install_build_outputs_inside_temp_are_caution_candidates(self):
         path = r"C:\Users\A\AppData\Local\Temp\cargo-installABC\debug\example.exe"
@@ -3055,12 +3136,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
             tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
             tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
         ):
-            target = Path(target_temp) / "npm-cache" / "payload.bin"
+            target = Path(target_temp) / "selected-folder" / "payload.bin"
             target.parent.mkdir()
             target.write_bytes(b"preview only")
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target),
-                "name": "npm cache",
+                "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
                 "scan_logical_size": target.stat().st_size,
                 "size_formatted": "12 B",
@@ -3158,7 +3239,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
             tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
         ):
-            target = Path(target_temp) / "npm-cache"
+            target = Path(target_temp) / "selected-folder"
             target.mkdir()
             eligible_file = target / "payload.bin"
             eligible_file.write_bytes(b"eligible cache")
@@ -3176,7 +3257,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             scan_total_bytes = eligible_total_bytes + protected_file_bytes
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target) + "\\",
-                "name": "npm cache",
+                "name": "Temporary files (check for installers or builds in progress)",
                 "size": scan_total_bytes,
                 "size_formatted": analyze.format_size(scan_total_bytes),
                 "kind": "Folder",
