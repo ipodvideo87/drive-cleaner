@@ -5699,6 +5699,33 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertNotIn("python scan.py", output.getvalue())
         self.assertNotIn("python analyze.py", output.getvalue())
 
+    def test_guided_scan_retries_invalid_post_scan_review_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
+             mock.patch.object(analyze, "run_tui") as run_review, \
+             mock.patch("builtins.input", side_effect=["", "D:", "", "maybe", "n"]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+
+        run_review.assert_not_called()
+        self.assertIn("Enter Y or N, or Q to cancel.", output.getvalue())
+        self.assertIn("Choose Review a previous scan from the main menu", output.getvalue())
+
+    def test_guided_scan_can_cancel_post_scan_review_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
+             mock.patch.object(analyze, "run_tui") as run_review, \
+             mock.patch("builtins.input", side_effect=["", "D:", "", "q"]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+
+        run_review.assert_not_called()
+        self.assertIn("Review cancelled. The scan is saved for later.", output.getvalue())
+
     def test_guided_scan_can_locate_a_portable_scanner_when_discovery_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"

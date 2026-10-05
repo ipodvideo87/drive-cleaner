@@ -42,7 +42,7 @@ The guided menu walks you through these steps:
 4. Choose whether to create and verify a recovery backup.
 5. Review the plan and confirm before cleanup starts.
 
-Scanning and review never remove anything. The main menu also lets you review a saved scan or manage recovery backups. Scans started directly with `scan.py` are available under **Review a previous scan** in that menu.
+Scanning and review never remove anything. After a scan, press Enter to open its review, enter `N` to return to the menu and review it later, or `Q` to leave the review prompt; the scan stays saved either way. Invalid answers are retried. The main menu also lets you review a saved scan or manage recovery backups. Scans started directly with `scan.py` are available under **Review a previous scan** in that menu.
 
 The scan picker lists saved scans newest first, including recognized scans saved in older Drive Cleanr folder layouts. Choose a scan by number; enter `N` or `P` to browse older or newer pages. To open another supported scan CSV, enter `M` and provide its file path. The picker accepts files, not folders. If a scan is missing or cannot be read, Drive Cleanr explains the problem and lets you choose another scan. Press Ctrl+C or close terminal input to cancel the review; no cleanup starts.
 

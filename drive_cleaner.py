@@ -170,11 +170,19 @@ def _scan_flow():
         _pause()
         return
     try:
-        choice = input("Review this scan now? [Y/n]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        review_now = _prompt_yes_no("Review this scan now?", default=True)
+    except EOFError:
+        print("Review cancelled. The scan is saved for later.")
         return
-    if choice not in {"n", "no"}:
+    except KeyboardInterrupt:
+        print("\nReview cancelled. The scan is saved for later.")
+        return
+    if review_now is None:
+        print("Review cancelled. The scan is saved for later.")
+    elif review_now:
         analyze.run_tui(initial_csv=csv_path)
+    else:
+        print("Scan saved. Choose Review a previous scan from the main menu when you are ready.")
 
 
 def _backup_menu():
