@@ -2202,9 +2202,11 @@ def generate_clean_script(results, output_path, priority="high", selected_paths=
                 raise ValueError("Manual-review plans accept only current, unprotected files not matched by cleanup rules")
         elif not _matches_cleanup_rule(path, (candidate_priority,), item["name"]):
             raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
-        if (not is_directory and scan_logical_size is not None and
-                not _live_file_size_matches_scan(path.rstrip("\\/"), scan_logical_size)):
-            raise ValueError("Cleanup plan file size changed since the scan; rescan before cleanup")
+        if not is_directory:
+            if scan_logical_size is None:
+                raise ValueError("Cleanup plan is missing the scanned file size; rescan before cleanup")
+            if not _live_file_size_matches_scan(path.rstrip("\\/"), scan_logical_size):
+                raise ValueError("Cleanup plan file size changed since the scan; rescan before cleanup")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
         return is_directory

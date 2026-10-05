@@ -917,6 +917,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "name": analyze.MANUAL_REVIEW_LABEL,
             "kind": "File",
             "manual_review": True,
+            "scan_logical_size": 900000000,
         }
         results = {
             "scan_file_time": "now",
@@ -941,7 +942,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  mock.patch.object(analyze.os.path, "isfile", return_value=True), \
                  mock.patch.object(analyze.os.path, "isdir", return_value=False), \
                  mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
-                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 analyze.generate_clean_script(
                     results, str(plan_path), "manual", selected_paths=[path],
                     manual_review_confirmed=True,
@@ -961,6 +963,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         item = {
             "path": path, "size": 900000000, "size_formatted": "858.31 MB",
             "name": analyze.MANUAL_REVIEW_LABEL, "kind": "File", "manual_review": True,
+            "scan_logical_size": 900000000,
         }
         results = {
             "manual_review_files": [item],
@@ -973,7 +976,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  mock.patch.object(analyze.os.path, "isfile", return_value=True), \
                  mock.patch.object(analyze.os.path, "isdir", return_value=False), \
                  mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
-                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True):
                     with self.assertRaisesRegex(ValueError, "crosses a junction or symbolic link"):
                         analyze.generate_clean_script(
@@ -1015,6 +1019,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "name": analyze.MANUAL_REVIEW_LABEL,
                 "kind": "File",
                 "manual_review": True,
+                "scan_logical_size": selected_file.stat().st_size,
             }
             results = {
                 "manual_review_files": [item],
@@ -1110,10 +1115,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     "path": r"C:\Users\A\AppData\Local\Temp\cache.bin",
                     "name": "Temporary files (check for installers or builds in progress)",
                     "size": 100, "size_formatted": "100 B", "kind": "File",
+                    "scan_logical_size": 100,
                 }]}, "medium": {"name": "Medium", "items": []}, "low": {"name": "Low", "items": []}},
             }
             output_path = Path(temp_dir) / "clean.ps1"
-            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 analyze.generate_clean_script(result, str(output_path))
             script = output_path.read_text(encoding="utf-8-sig")
         self.assertIn("# Source scan last modified: Unknown", script)
@@ -2794,6 +2801,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             backup_calls = self._install_complete_mock_backup(plan_temp)
@@ -3183,6 +3191,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": "128.00 MB",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             self._install_complete_mock_backup(plan_temp)
@@ -3650,6 +3659,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -3732,6 +3742,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             sentinel = Path(plan_temp) / "backup_called.txt"
@@ -3777,6 +3788,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             call_log = Path(plan_temp) / "backup_calls.txt"
@@ -4216,6 +4228,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(selected),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "17 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -4258,6 +4271,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(selected),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "14 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -4644,6 +4658,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(changed_file),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": len(original), "size_formatted": f"{len(original)} B", "kind": "File",
+                "scan_logical_size": len(original),
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -4715,6 +4730,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -4795,6 +4811,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -5231,6 +5248,30 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "file size changed since the scan"):
                 analyze.generate_clean_script(
                     results, str(Path(temp_dir) / "stale.clean.ps1"),
+                    priority="high", selected_paths=[str(candidate)],
+                )
+
+    def test_cleanup_plan_generation_rejects_file_without_scanned_logical_size(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate = Path(temp_dir) / "candidate.tmp"
+            candidate.write_bytes(b"current file contents")
+            item = {
+                "path": str(candidate),
+                "size": candidate.stat().st_size,
+                "size_formatted": f"{candidate.stat().st_size} B",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "safe": True,
+                "kind": "File",
+            }
+            results = {"categories": {
+                "high": {"name": "High priority", "items": [item]},
+                "medium": {"name": "Medium priority", "items": []},
+                "low": {"name": "Low priority", "items": []},
+            }}
+
+            with self.assertRaisesRegex(ValueError, "missing the scanned file size"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "missing-scan-size.clean.ps1"),
                     priority="high", selected_paths=[str(candidate)],
                 )
 

@@ -28,7 +28,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - In the guided picker, `D` opens a listed folder to browse scan entries grouped beneath it. The nested browser must preserve the review level chosen earlier; tell users to choose All review levels to include nested entries assigned to more cautious levels. `A` selects suggestions in the main list only, not hidden nested entries. In the nested browser, `D` finishes and keeps picks from that browse session; `B` returns without adding those picks. Both actions must preserve selections already made in the main list.
 - Do not include local scan exports, backup contents, generated scripts, or personal paths in source control.
 - Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
-- Treat scan exports as evidence, not authority: compare each file's scanned logical size with its current length during analysis, plan creation, and cleanup-plan startup. Omit or refuse files whose size changed or could not be checked, and tell users to rescan.
+- Treat scan exports as evidence, not authority: every file cleanup plan must carry an exact scanned logical size; never infer it from allocated size or the current file. Compare it with the current length during analysis, plan creation, and cleanup-plan startup. Omit or refuse files whose size changed or could not be checked, and tell users to rescan.
 - Prefer leaving uncertain files untouched. Avoid overstating reclaimable size: folder totals can overlap and hard links can inflate apparent savings.
 
 ## User-facing wording
