@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Clarify that the scanner has exited while Drive Cleanr waits for the export to finish saving, and show a five-second heartbeat if the file is missing, empty, or temporarily unreadable.
 - Make the post-scan review prompt retry invalid answers and honor `Q` cancellation, while keeping the completed scan available from the main menu.
 - Recognize common Python requirements-list variants such as `requirements-dev.txt`, `requirements-test.in`, and `dev-requirements.in` as project markers, while ignoring shared requirement lists at the user-profile root so they do not shield the whole profile.
 - Show progress while checking saved backups for reparse points and a periodic heartbeat during long backup deletion; warn that a failed or interrupted removal may have left a partial backup, and stop bulk deletion when interrupted.

@@ -6397,8 +6397,9 @@ class ScanSafetyTests(unittest.TestCase):
 
             self.assertRegex(
                 output.getvalue(),
-                r"Saved so far: [0-9.]+ MB\nScan complete! Results file size:",
+                r"Saving results\.\.\. [0-9]+s \| Saved so far: [0-9.]+ MB\nScan complete! Results file size:",
             )
+            self.assertNotIn("Scanning...", output.getvalue())
 
     def test_wait_for_file_timeout_uses_monotonic_clock(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6416,6 +6417,76 @@ class ScanSafetyTests(unittest.TestCase):
                 self.assertFalse(scan.wait_for_file(str(missing_export), timeout=3))
 
             self.assertIn("did not finish within 3 seconds", output.getvalue())
+
+    def test_wait_for_file_reports_periodic_progress_while_export_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_export = Path(temp_dir) / "not-created.csv"
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_file(str(missing_export), timeout=12))
+
+            rendered = output.getvalue()
+            self.assertIn("Waiting for scan results to finish saving", rendered)
+            self.assertIn("Checking scan results... 0s | Waiting for results file", rendered)
+            self.assertIn("Checking scan results... 5s | Waiting for results file", rendered)
+            self.assertIn("Checking scan results... 10s | Waiting for results file", rendered)
+            self.assertNotIn("Waiting for the scan to finish", rendered)
+
+    def test_wait_for_file_reports_empty_export_until_data_arrives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.touch()
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+                if clock[0] == 7:
+                    export_path.write_text("File Name,Size\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_file(str(export_path), timeout=12, stable_time=2))
+
+            rendered = output.getvalue()
+            self.assertIn("Results file is still empty", rendered)
+            self.assertIn("Saved so far:", rendered)
+            self.assertIn("Scan complete! Results file size:", rendered)
+
+    def test_wait_for_file_restarts_stability_check_after_temporary_access_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            clock = [0.0]
+            sizes = iter([14, 14, PermissionError(13, "sharing violation"), 14, 14, 14])
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            def getsize_with_transient_failure(_path):
+                result = next(sizes)
+                if isinstance(result, OSError):
+                    raise result
+                return result
+
+            output = io.StringIO()
+            with mock.patch.object(scan.os.path, "getsize", side_effect=getsize_with_transient_failure) as getsize, \
+                 mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_file(str(export_path), timeout=10, stable_time=2))
+
+            self.assertEqual(getsize.call_count, 6)
+            self.assertIn("Checking results file access", output.getvalue())
+            self.assertIn("Scan complete! Results file size:", output.getvalue())
 
     def test_scan_export_validation_accepts_supported_headers_and_wiztree_note(self):
         localized_windirstat_header = ",".join((

@@ -248,34 +248,48 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
     Returns:
         bool: whether the file is ready
     """
-    print("Waiting for the scan to finish...")
+    print("Waiting for scan results to finish saving...", flush=True)
     start = time.monotonic()
     last_size = -1
     stable_count = 0
+    last_wait_report = -5
 
     while time.monotonic() - start < timeout:
         if _path_has_reparse_component(filepath):
             print("Scan results path changed to a reparse point or junction; refusing to read it.")
             return False
-        if os.path.exists(filepath):
-            try:
-                size = os.path.getsize(filepath)
-                if size > 0:
-                    if size == last_size:
-                        stable_count += 1
-                        if stable_count >= stable_time:
-                            # File size is stable; scan is complete
-                            print(f"\nScan complete! Results file size: {size / 1024 / 1024:.2f} MB")
-                            return True
-                    else:
-                        stable_count = 0
-                    last_size = size
+        try:
+            size = os.path.getsize(filepath)
+        except FileNotFoundError:
+            size = None
+            wait_reason = "Waiting for results file"
+        except OSError:
+            size = None
+            wait_reason = "Checking results file access"
+        if size is not None and size > 0:
+            if size == last_size:
+                stable_count += 1
+                if stable_count >= stable_time:
+                    # File size is stable; scan is complete.
+                    print(f"\nScan complete! Results file size: {size / 1024 / 1024:.2f} MB")
+                    return True
+            else:
+                stable_count = 0
+            last_size = size
 
-                    # Show progress
-                    elapsed = int(time.monotonic() - start)
-                    print(f"\rScanning... {elapsed}s | Saved so far: {size / 1024 / 1024:.2f} MB", end="", flush=True)
-            except OSError:
-                pass
+            elapsed = int(time.monotonic() - start)
+            print(f"\rSaving results... {elapsed}s | Saved so far: {size / 1024 / 1024:.2f} MB", end="", flush=True)
+        else:
+            # A missing, empty, or unreadable interval breaks the consecutive
+            # stable-size samples required before an export is accepted.
+            stable_count = 0
+            last_size = -1
+            if size == 0:
+                wait_reason = "Results file is still empty"
+            elapsed = int(time.monotonic() - start)
+            if elapsed - last_wait_report >= 5:
+                print(f"\rChecking scan results... {elapsed}s | {wait_reason}", end="", flush=True)
+                last_wait_report = elapsed
 
         time.sleep(1)
 
