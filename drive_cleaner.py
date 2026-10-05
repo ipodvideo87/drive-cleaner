@@ -261,7 +261,11 @@ def _backup_menu():
                 except (EOFError, KeyboardInterrupt):
                     return
                 if confirm == "DELETE":
-                    print("Backup deleted." if backup.delete_backup(backup_id) else "Backup deletion failed.")
+                    delete_result = backup.delete_backup(backup_id)
+                    if delete_result is None:
+                        print("Backup deletion stopped.")
+                    else:
+                        print("Backup deleted." if delete_result else "Backup deletion failed.")
                 else:
                     print("Backup deletion cancelled.")
             _pause()

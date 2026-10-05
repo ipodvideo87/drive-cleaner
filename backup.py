@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 import zipfile
@@ -37,6 +38,7 @@ SIZE_THRESHOLD = 1 * 1024 * 1024 * 1024  # Compress directories at or above 1 GB
 BACKUP_PROGRESS_BYTES_INTERVAL = 64 * 1024 * 1024
 BACKUP_PROGRESS_TIME_INTERVAL_SECONDS = 10
 BACKUP_PROGRESS_ENTRY_INTERVAL = 100
+BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS = 10
 BACKUP_COPY_CHUNK_BYTES = 4 * 1024 * 1024
 ROBOCOPY_TIMEOUT_SECONDS = 300
 ROBOCOPY_PROGRESS_INTERVAL_SECONDS = 10
@@ -71,7 +73,7 @@ def format_size(size_bytes: int) -> str:
 
 
 class _BackupProgress:
-    """Print throttled English progress for backup, verification, and restore work."""
+    """Print throttled English progress for backup, verification, restore, and deletion work."""
 
     def __init__(self, phase: str, stream=None):
         self.phase = phase
@@ -171,7 +173,9 @@ def _path_has_reparse_component(path: str) -> bool:
     return False
 
 
-def _tree_has_reparse_point(path: str) -> bool:
+def _tree_has_reparse_point(
+    path: str, progress_callback: Optional[Callable[[str], None]] = None,
+) -> bool:
     """Check an existing destination tree without following directory links."""
     if not os.path.lexists(path):
         return False
@@ -183,9 +187,41 @@ def _tree_has_reparse_point(path: str) -> bool:
         for entry in entries:
             if _is_reparse_point(entry.path):
                 return True
-            if entry.is_dir(follow_symlinks=False) and _tree_has_reparse_point(entry.path):
+            if progress_callback is not None:
+                progress_callback(entry.path)
+            if entry.is_dir(follow_symlinks=False) and _tree_has_reparse_point(
+                entry.path, progress_callback,
+            ):
                 return True
     return False
+
+
+def _rmtree_with_progress(path: str) -> None:
+    """Keep users informed while shutil removes a large saved backup."""
+    finished = threading.Event()
+    started_at = time.monotonic()
+    progress = _BackupProgress("Backup deletion")
+    interval = max(0.1, float(BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS))
+
+    def report_heartbeat() -> None:
+        while not finished.wait(interval):
+            try:
+                progress.heartbeat(time.monotonic() - started_at)
+            except (OSError, ValueError):
+                return
+
+    heartbeat_thread = threading.Thread(
+        target=report_heartbeat,
+        name="drive-cleanr-backup-delete-progress",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        shutil.rmtree(path)
+    finally:
+        finished.set()
+        heartbeat_thread.join()
+    progress.finish()
 
 
 def _valid_restore_target(path: str) -> bool:
@@ -1777,7 +1813,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     return success_count == len(manifest["items"]) and conflict_count == 0
 
 
-def delete_backup(backup_id: str) -> bool:
+def delete_backup(backup_id: str) -> Optional[bool]:
     """
     Delete a specific backup.
 
@@ -1785,7 +1821,7 @@ def delete_backup(backup_id: str) -> bool:
         backup_id: Backup identifier.
 
     Returns:
-        bool: Whether deletion succeeded.
+        True when deletion succeeds, False on failure, or None when interrupted.
     """
     if not _valid_backup_id(backup_id):
         print(f"Invalid backup ID: {_safe_terminal_text(backup_id)}")
@@ -1796,20 +1832,52 @@ def delete_backup(backup_id: str) -> bool:
         print(f"Backup not found: {_safe_terminal_text(backup_id)}")
         return False
 
+    print("Checking saved backup contents for linked files and folders before deletion.", flush=True)
+    checked_entries = 0
+    last_progress = time.monotonic()
+
+    def report_checked_entry(path: str) -> None:
+        nonlocal checked_entries, last_progress
+        checked_entries += 1
+        now = time.monotonic()
+        if (checked_entries == 1 or
+                checked_entries % BACKUP_PROGRESS_ENTRY_INTERVAL == 0 or
+                now - last_progress >= BACKUP_PROGRESS_TIME_INTERVAL_SECONDS):
+            name = _safe_terminal_text(os.path.basename(path.rstrip("\\/")) or "backup item", "item")
+            entry_label = "entry" if checked_entries == 1 else "entries"
+            print(
+                f"Checking backup contents: {checked_entries:,} {entry_label} examined. "
+                f"Current item: {name}",
+                flush=True,
+            )
+            last_progress = now
+
     try:
-        if _tree_has_reparse_point(backup_dir):
+        if _tree_has_reparse_point(backup_dir, report_checked_entry):
             print("Refusing to delete a backup containing a reparse point or junction")
             return False
+    except KeyboardInterrupt:
+        print("Backup deletion cancelled while checking its contents; nothing was removed.")
+        return None
     except OSError as exc:
         print(f"Could not safely inspect backup before deletion: {describe_error(exc)}")
         return False
 
+    print(f"Backup contents check complete: {checked_entries:,} entries examined.", flush=True)
+    print("Deleting the saved backup now. This cannot be undone.", flush=True)
+
     try:
-        shutil.rmtree(backup_dir)
+        _rmtree_with_progress(backup_dir)
         print(f"Deleted backup: {backup_id}")
         return True
+    except KeyboardInterrupt:
+        print("Backup deletion interrupted; the saved backup may be incomplete.")
+        return None
     except Exception as e:
-        print(f"Backup deletion failed: {describe_error(e)}")
+        print(
+            "Backup deletion failed; the saved backup may be incomplete: "
+            f"{describe_error(e)}"
+        )
         return False
 
 
@@ -1825,7 +1893,11 @@ def cleanup_all_backups(backups: Optional[List[Dict]] = None) -> int:
     deleted = 0
 
     for backup in backups:
-        if delete_backup(backup["id"]):
+        result = delete_backup(backup["id"])
+        if result is None:
+            print("Backup cleanup stopped; no additional backups will be deleted.")
+            break
+        if result:
             deleted += 1
 
     return deleted

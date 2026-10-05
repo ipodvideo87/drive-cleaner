@@ -5922,6 +5922,22 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertIn("Unknown", output.getvalue())
         self.assertIn("Backup deleted.", output.getvalue())
 
+    def test_backup_menu_reports_cancelled_backup_deletion(self):
+        backup_id = "backup_20261004_123456_000005"
+        manifests = [{"id": backup_id, "status": "completed", "items": []}]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", backup_id, "DELETE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "delete_backup", return_value=None) as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(backup_id)
+        self.assertIn("Backup deletion stopped.", output.getvalue())
+        self.assertNotIn("Backup deletion failed.", output.getvalue())
+
     def test_backup_menu_rejects_malformed_or_terminal_control_restore_paths(self):
         backup_id = "backup_20261004_123456_000001"
         invalid_cases = (
@@ -6882,6 +6898,108 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertFalse(backup.delete_backup("backup_20260928_123456_123456"))
         remove_tree.assert_not_called()
         self.assertIn("containing a reparse point or junction", output.getvalue())
+
+    def test_delete_backup_can_be_cancelled_during_safety_check(self):
+        output = io.StringIO()
+        backup_id = "backup_20260928_123456_123456"
+        with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\" + backup_id), \
+             mock.patch.object(backup, "_tree_has_reparse_point", side_effect=KeyboardInterrupt), \
+             mock.patch.object(backup.shutil, "rmtree") as remove_tree, \
+             redirect_stdout(output):
+            self.assertIsNone(backup.delete_backup(backup_id))
+
+        remove_tree.assert_not_called()
+        self.assertIn("cancelled while checking its contents; nothing was removed", output.getvalue())
+
+    def test_delete_backup_reports_interruption_during_removal(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            removed_before_interrupt = backup_dir / "first.bin"
+            remaining_after_interrupt = backup_dir / "second.bin"
+            removed_before_interrupt.write_bytes(b"removed fixture")
+            remaining_after_interrupt.write_bytes(b"remaining fixture")
+
+            def interrupt_after_one_removal(path):
+                (Path(path) / "first.bin").unlink()
+                raise KeyboardInterrupt
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup.shutil, "rmtree", side_effect=interrupt_after_one_removal), \
+                 redirect_stdout(output):
+                self.assertIsNone(backup.delete_backup(backup_id))
+
+            self.assertFalse(removed_before_interrupt.exists())
+            self.assertTrue(remaining_after_interrupt.is_file())
+            self.assertIn("Backup deletion interrupted; the saved backup may be incomplete", output.getvalue())
+
+    def test_delete_backup_reports_possible_partial_removal_on_failure(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            removed_before_failure = backup_dir / "first.bin"
+            remaining_after_failure = backup_dir / "second.bin"
+            removed_before_failure.write_bytes(b"removed fixture")
+            remaining_after_failure.write_bytes(b"remaining fixture")
+
+            def fail_after_one_removal(path):
+                (Path(path) / "first.bin").unlink()
+                raise OSError("mock deletion failure")
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup.shutil, "rmtree", side_effect=fail_after_one_removal), \
+                 redirect_stdout(output):
+                self.assertFalse(backup.delete_backup(backup_id))
+
+            self.assertFalse(removed_before_failure.exists())
+            self.assertTrue(remaining_after_failure.is_file())
+            self.assertIn("Backup deletion failed; the saved backup may be incomplete", output.getvalue())
+
+    def test_delete_backup_reports_tree_check_progress_and_deletion_heartbeat(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            for index in range(101):
+                (backup_dir / f"payload-{index:03}.bin").write_bytes(b"fixture")
+
+            real_rmtree = backup.shutil.rmtree
+
+            def delayed_rmtree(path):
+                time.sleep(0.2)
+                real_rmtree(path)
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS", 0.1), \
+                 mock.patch.object(backup.shutil, "rmtree", side_effect=delayed_rmtree), \
+                 redirect_stdout(output):
+                self.assertTrue(backup.delete_backup(backup_id))
+
+            rendered = output.getvalue()
+            self.assertIn("Checking saved backup contents for linked files and folders", rendered)
+            self.assertIn("Checking backup contents: 1 entry examined", rendered)
+            self.assertIn("Checking backup contents: 100 entries examined", rendered)
+            self.assertIn("Backup contents check complete: 101 entries examined", rendered)
+            self.assertIn("Deleting the saved backup now. This cannot be undone.", rendered)
+            self.assertIn("Still working after", rendered)
+            self.assertIn("Backup deletion complete.", rendered)
+            self.assertFalse(backup_dir.exists())
+
+    def test_bulk_backup_cleanup_stops_after_deletion_cancellation(self):
+        backups = [{"id": "first"}, {"id": "second"}, {"id": "third"}]
+        output = io.StringIO()
+        with mock.patch.object(backup, "delete_backup", side_effect=[True, None, True]) as delete, \
+             redirect_stdout(output):
+            deleted = backup.cleanup_all_backups(backups)
+
+        self.assertEqual(1, deleted)
+        self.assertEqual([mock.call("first"), mock.call("second")], delete.call_args_list)
+        self.assertIn("Backup cleanup stopped; no additional backups will be deleted", output.getvalue())
 
     def test_reparse_point_lookup_fails_closed_but_allows_missing_paths(self):
         with mock.patch.object(backup.os, "lstat", side_effect=PermissionError("access denied")):
