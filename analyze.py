@@ -2877,14 +2877,16 @@ foreach ($target in $cleanTargets) {{
             }}
             Write-Progress -Activity "Reviewing selected folder contents" -Completed
             Write-Host "Folder review complete; $($entries.Count) files and folders found." -ForegroundColor Gray
-            $reparseEntry = $entries | Where-Object {{ ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }} | Select-Object -First 1
-            if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $(Get-CleanupProgressPath $reparseEntry.FullName)" }}
-            Write-Host "Checking folder contents for project files and protected data; this check does not remove files." -ForegroundColor Gray
+            Write-Host "Checking this folder for links and project files; this check does not remove files." -ForegroundColor Gray
             $projectContentCheckIndex = 0
             $projectContentCheckWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastProjectContentNoticeSeconds = 0
             foreach ($entry in $entries) {{
                 $projectContentCheckIndex++
+                if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
+                    $reparseProgressPath = Get-CleanupEntryProgressPath $entry.FullName $protectedRoots
+                    throw "Refusing to clean a directory tree containing a reparse point: $reparseProgressPath"
+                }}
                 $protectedRoot = Get-CleanupProtectedRoot $entry.FullName $entry.Name ([bool]$entry.PSIsContainer)
                 if ($protectedRoot) {{
                     # Keep only the outermost protected root to avoid a large
@@ -2929,14 +2931,14 @@ foreach ($target in $cleanTargets) {{
                     $projectContentCheckIndex -eq $entries.Count -or
                     ($elapsedProjectContentSeconds - $lastProjectContentNoticeSeconds) -ge 10) {{
                     $projectContentProgressPath = Get-CleanupEntryProgressPath $entry.FullName $protectedRoots
-                    $projectContentStatus = "$projectContentCheckIndex of $($entries.Count) items checked for project files; current item: $projectContentProgressPath. This check does not remove files."
-                    Write-Progress -Activity "Checking for project files in this folder" -Status $projectContentStatus -PercentComplete ([int](100 * $projectContentCheckIndex / $entries.Count))
-                    Write-Host "  Project file check: $projectContentStatus" -ForegroundColor Gray
+                    $projectContentStatus = "$projectContentCheckIndex of $($entries.Count) items checked for links and project files; current item: $projectContentProgressPath. This check does not remove files."
+                    Write-Progress -Activity "Checking for links and project files in this folder" -Status $projectContentStatus -PercentComplete ([int](100 * $projectContentCheckIndex / $entries.Count))
+                    Write-Host "  Folder safety check: $projectContentStatus" -ForegroundColor Gray
                     $lastProjectContentNoticeSeconds = $elapsedProjectContentSeconds
                 }}
             }}
-            Write-Progress -Activity "Checking for project files in this folder" -Completed
-            Write-Host "Project file check complete; $projectContentCheckIndex items reviewed." -ForegroundColor Gray
+            Write-Progress -Activity "Checking for links and project files in this folder" -Completed
+            Write-Host "Folder safety check complete; $projectContentCheckIndex items reviewed." -ForegroundColor Gray
             if ($hiddenFormattingPathCount -eq 1) {{
                 Write-Host "Skipped one item with hidden formatting in its path; that item will be kept." -ForegroundColor Yellow
             }} elseif ($hiddenFormattingPathCount -gt 1) {{
