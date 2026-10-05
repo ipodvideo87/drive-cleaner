@@ -4,6 +4,7 @@
 
 ## Unreleased
 - Show progress while checking saved backups for reparse points and a periodic heartbeat during long backup deletion; warn that a failed or interrupted removal may have left a partial backup, and stop bulk deletion when interrupted.
+- Show a sanitized current path with the running count during folder inventory and project/protected-data checks, hide protected paths and names in those updates, and label per-item rechecks separately from completed removals.
 - Skip file candidates whose current logical length differs from the scan; require that scanned length in generated file plans, carry it into scripts, and recheck it before cleanup. Never substitute allocated or current size when scan evidence is missing.
 - Offer a full read-only cleanup preview from the guided review menu immediately after saving a plan, with the preview enabled by default and no follow-up command required; if it fails, leave the plan saved and do not offer immediate cleanup.
 - Normalize scanner discovery through the same executable-path validation as guided selection, including environment-variable values wrapped in quotes.

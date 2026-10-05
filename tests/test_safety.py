@@ -2580,6 +2580,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("only the permissions needed for the selected paths", script)
         self.assertIn("$cleanupItemIndex = 0", script)
         self.assertIn("function Get-CleanupProgressPath", script)
+        self.assertIn("function Get-CleanupEntryProgressPath", script)
+        self.assertIn("$pathRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd", script)
+        self.assertIn("[string]::Equals($parentPath, $current, [System.StringComparison]::OrdinalIgnoreCase)", script)
+        self.assertIn('[string]$PhaseLabel = "Checking"', script)
+        self.assertIn('Write-Progress -Activity "$PhaseLabel selected $ItemLabel contents"', script)
+        self.assertIn('Write-Progress -Activity "Rechecking selected file contents" -Status "Comparing file contents"', script)
         self.assertIn("$hiddenFormattingPattern = [regex]::new('[\\p{Cc}\\p{Cf}]'", script)
         self.assertIn("$safePath = $hiddenFormattingPattern.Replace($Path, '?')", script)
         self.assertIn("$hiddenFormattingPattern.IsMatch($pathPart)", script)
@@ -2601,11 +2607,17 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("Checking this item and its parent folders for project files.", script)
         self.assertIn("[System.IO.Directory]::EnumerateFileSystemEntries($Directory)", script)
         self.assertIn("Folder review complete", script)
+        self.assertIn("$inventoryCurrentPath = Get-CleanupEntryProgressPath $_.FullName $protectedRoots", script)
+        self.assertIn("current item: $inventoryCurrentPath", script)
+        self.assertIn("current item: $projectContentProgressPath", script)
+        self.assertIn("current item: $protectedContentProgressPath", script)
+        self.assertIn("current item: $freshProjectProgressPath", script)
         self.assertIn('Write-Host "  Project check: $projectCheckStatus"', script)
         self.assertIn('Write-Host "  Folder review: $inventoryStatus"', script)
         self.assertIn('Write-Host "  Checked $fileHashIndex of $fileHashTotal selected files; this check does not remove files."', script)
-        self.assertIn("Initial checks passed. Now checking and removing selected files one at a time; earlier files may already be removed if a later check fails.", script)
-        self.assertIn('Write-Progress -Activity "Removing selected files" -Status "Processing file $fileRecheckIndex of $fileRecheckTotal; earlier files may already be removed"', script)
+        self.assertIn("Initial checks passed. Each selected file will be rechecked immediately before removal; earlier files from this item may already be removed if a later check fails.", script)
+        self.assertIn('Write-Progress -Activity "Rechecking selected files" -Status "Checking file $fileRecheckIndex of $fileRecheckTotal before removal; current item: $fileRemovalProgressPath. Earlier files may already be removed."', script)
+        self.assertIn('New-CleanupHashProgressAction $fileRecheckIndex $fileRecheckTotal "file" $entry.FullName "Rechecking"', script)
         self.assertIn("Removed $targetFilesRemoved of $fileRecheckTotal selected files from this item.", script)
         self.assertIn("FileStream(handle, FileAccess.Read, 131072, false)", script)
         self.assertNotIn("Run with administrator privileges", script)
@@ -2715,9 +2727,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertGreaterEqual(
-                result.stdout.count(f"Folder 1 of 1: 2.0 MB of 2.0 MB checked (100%). Current item: {target}"), 2,
-                "Large folder data streams should report progress during checks.",
+            expected_stream_progress = "selected folder 1 of 1: 2.0 MB of 2.0 MB checked (100%). Current item: "
+            self.assertIn(
+                f"Checking {expected_stream_progress}{target}", result.stdout,
+                "The initial folder stream check should show byte progress.",
+            )
+            self.assertIn(
+                f"Rechecking {expected_stream_progress}{target}", result.stdout,
+                "The final locked folder stream check should be labeled as a recheck.",
             )
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
@@ -3000,12 +3017,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertIn("Project check: First entry checked for project files.", result.stdout)
             self.assertIn("Project check: 100 entries checked for project files.", result.stdout)
             self.assertIn("Project marker check complete; 3809 entries checked in this folder.", result.stdout)
-            self.assertIn("Folder review: First item listed; this review does not remove files.", result.stdout)
-            self.assertIn("Folder review: 3800 files and folders listed; this review does not remove files.", result.stdout)
+            self.assertIn("Folder review: First item listed; current item:", result.stdout)
+            self.assertIn("Folder review: 3800 files and folders listed; current item:", result.stdout)
             self.assertIn("Folder review complete; 3809 files and folders found.", result.stdout)
-            self.assertIn("Project file check: 3800 of 3809 items checked for project files; this check does not remove files.", result.stdout)
+            self.assertIn("Project file check: 3800 of 3809 items checked for project files; current item:", result.stdout)
             self.assertIn("Project file check complete; 3809 items reviewed.", result.stdout)
-            self.assertIn("Protected-data check: 3800 of 3809 items checked for protected data; this check does not remove files.", result.stdout)
+            self.assertIn("Protected-data check: 3800 of 3809 items checked for protected data; current item:", result.stdout)
             self.assertIn("Protected-data check complete; 3809 items reviewed.", result.stdout)
             self.assertNotIn("Checking the contents of", result.stdout)
             self.assertTrue(target.is_dir(), result.stdout + result.stderr)
@@ -3182,6 +3199,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 result.stdout,
             )
             self.assertNotIn(str(protected_file), result.stdout)
+            self.assertIn("current item: (protected item; path hidden)", result.stdout)
             self.assertIn(
                 f"Keep selected folder | Protected data will remain inside it | 2.00 MB ({eligible_total_bytes} bytes) of eligible file data below",
                 result.stdout,
@@ -3250,13 +3268,13 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse(target.exists(), result.stdout + result.stderr)
 
         expected_progress_path = f"Current item: {target}"
-        self.assertIn(f"File 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}", result.stdout)
-        self.assertIn(f"File 1 of 1: 128.0 MB of 128.0 MB checked (100%). {expected_progress_path}", result.stdout)
+        self.assertIn(f"Rechecking selected file 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}", result.stdout)
+        self.assertIn(f"Rechecking selected file 1 of 1: 128.0 MB of 128.0 MB checked (100%). {expected_progress_path}", result.stdout)
         self.assertGreaterEqual(
-            result.stdout.count(f"File 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}"), 2,
+            result.stdout.count(f"Rechecking selected file 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}"), 2,
             "The locked check immediately before deletion must also report byte progress.",
         )
-        self.assertIn(f"File 1 of 1: 2.0 MB of 2.0 MB checked (100%). {expected_progress_path}", result.stdout)
+        self.assertIn(f"Rechecking selected file 1 of 1: 2.0 MB of 2.0 MB checked (100%). {expected_progress_path}", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_cleanup_modes_still_reject_stale_and_project_targets(self):
@@ -3560,7 +3578,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             self.assertIn("Checked 100 of 101 selected files; this check does not remove files.", result.stdout)
             self.assertIn("Checked 101 of 101 selected files; this check does not remove files.", result.stdout)
-            self.assertIn("Initial checks passed. Now checking and removing selected files one at a time; earlier files may already be removed if a later check fails.", result.stdout)
+            self.assertIn("Initial checks passed. Each selected file will be rechecked immediately before removal; earlier files from this item may already be removed if a later check fails.", result.stdout)
             self.assertIn("Removed 100 of 101 selected files from this item.", result.stdout)
             self.assertIn("Removed 101 of 101 selected files from this item.", result.stdout)
 

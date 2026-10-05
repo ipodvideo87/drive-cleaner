@@ -2517,7 +2517,23 @@ function Get-CleanupProgressPath([string]$Path) {{
     return $safePath
 }}
 
-function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal, [string]$ItemLabel = "file", [string]$ItemPath = "") {{
+function Get-CleanupEntryProgressPath([string]$Path, [System.Collections.Generic.HashSet[string]]$ProtectedRoots) {{
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $pathRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd('\\')
+    $current = $fullPath.TrimEnd('\\')
+    while (-not [string]::IsNullOrEmpty($current)) {{
+        if ([string]::Equals($current, $pathRoot, [System.StringComparison]::OrdinalIgnoreCase)) {{ break }}
+        if ($ProtectedRoots -and $ProtectedRoots.Contains($current)) {{ return "(protected item; path hidden)" }}
+        $parent = [System.IO.Directory]::GetParent($current)
+        if (-not $parent) {{ break }}
+        $parentPath = $parent.FullName.TrimEnd('\\')
+        if ([string]::Equals($parentPath, $current, [System.StringComparison]::OrdinalIgnoreCase)) {{ break }}
+        $current = $parentPath
+    }}
+    return Get-CleanupProgressPath $Path
+}}
+
+function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal, [string]$ItemLabel = "file", [string]$ItemPath = "", [string]$PhaseLabel = "Checking") {{
     $progressPath = Get-CleanupProgressPath $ItemPath
     $progressWatch = [System.Diagnostics.Stopwatch]::StartNew()
     $progressScript = {{
@@ -2530,9 +2546,9 @@ function New-CleanupHashProgressAction([long]$FileIndex, [long]$FileTotal, [stri
         $processedMB = [math]::Round($BytesProcessed / 1MB, 1)
         $totalMB = [math]::Round($FileBytesTotal / 1MB, 1)
         $itemTitle = $ItemLabel.Substring(0, 1).ToUpperInvariant() + $ItemLabel.Substring(1)
-        $progressStatus = "Checking $ItemLabel $FileIndex of $FileTotal; $filePercent% checked ($processedMB of $totalMB MB). Current item: $progressPath. This check does not remove files."
-        Write-Progress -Activity "Checking selected $ItemLabel contents" -Status $progressStatus -PercentComplete $overallPercent
-        Write-Host ("  {{0}} {{1}} of {{2}}: {{3:N1}} MB of {{4:N1}} MB checked ({{5}}%). Current item: {{6}}" -f $itemTitle, $FileIndex, $FileTotal, $processedMB, $totalMB, $filePercent, $progressPath) -ForegroundColor Gray
+        $progressStatus = "$PhaseLabel selected $ItemLabel $FileIndex of $FileTotal; $filePercent% checked ($processedMB of $totalMB MB). Current item: $progressPath. This check does not remove files."
+        Write-Progress -Activity "$PhaseLabel selected $ItemLabel contents" -Status $progressStatus -PercentComplete $overallPercent
+        Write-Host ("  {{0}} selected {{1}} {{2}} of {{3}}: {{4:N1}} MB of {{5:N1}} MB checked ({{6}}%). Current item: {{7}}" -f $PhaseLabel, $itemTitle.ToLowerInvariant(), $FileIndex, $FileTotal, $processedMB, $totalMB, $filePercent, $progressPath) -ForegroundColor Gray
     }}.GetNewClosure()
     return [System.Action[long, long]]$progressScript
 }}
@@ -2825,31 +2841,10 @@ foreach ($target in $cleanTargets) {{
                 $currentTargetSnapshotParts[1] -ne $target.CleanupStreamsSha256) {{
                 throw "The selected folder was replaced after review; refusing cleanup: $($target.Path)"
             }}
-            Write-Host "Reviewing files and folders inside this selection; large folders can take a while. This review does not remove files." -ForegroundColor Gray
-            $entries = [System.Collections.Generic.List[System.IO.FileSystemInfo]]::new()
-            $folderReviewWatch = [System.Diagnostics.Stopwatch]::StartNew()
-            $lastFolderReviewNoticeSeconds = 0
-            Get-ChildItem -LiteralPath $target.Path -Recurse -Force -EA Stop | ForEach-Object {{
-                [void]$entries.Add($_)
-                $elapsedFolderReviewSeconds = [int]$folderReviewWatch.Elapsed.TotalSeconds
-                if ($entries.Count -eq 1 -or ($entries.Count % 100) -eq 0 -or
-                    ($elapsedFolderReviewSeconds - $lastFolderReviewNoticeSeconds) -ge 10) {{
-                    $inventoryStatus = if ($entries.Count -eq 1) {{
-                        "First item listed; this review does not remove files."
-                    }} else {{
-                        "$($entries.Count) files and folders listed; this review does not remove files."
-                    }}
-                    Write-Progress -Activity "Reviewing selected folder contents" -Status $inventoryStatus
-                    Write-Host "  Folder review: $inventoryStatus" -ForegroundColor Gray
-                    $lastFolderReviewNoticeSeconds = $elapsedFolderReviewSeconds
-                }}
-            }}
-            Write-Progress -Activity "Reviewing selected folder contents" -Completed
-            Write-Host "Folder review complete; $($entries.Count) files and folders found." -ForegroundColor Gray
-            $reparseEntry = $entries | Where-Object {{ ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }} | Select-Object -First 1
-            if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $(Get-CleanupProgressPath $reparseEntry.FullName)" }}
             # Preserve excluded paths and nested projects even when the user
             # selected a parent folder that contains them.
+            # Set known preservation roots before inventory so progress can
+            # avoid printing names of protected descendants.
             $targetRoot = [System.IO.Path]::GetFullPath($target.Path).TrimEnd('\\') + '\\'
             $targetRootPath = $targetRoot.TrimEnd('\\')
             $protectedRoots = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -2860,8 +2855,34 @@ foreach ($target in $cleanTargets) {{
                     [void]$protectedRoots.Add($normalizedPreservePath.TrimEnd('\\'))
                 }}
             }}
+            Write-Host "Reviewing files and folders inside this selection; large folders can take a while. This review does not remove files." -ForegroundColor Gray
+            $entries = [System.Collections.Generic.List[System.IO.FileSystemInfo]]::new()
+            $folderReviewWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastFolderReviewNoticeSeconds = 0
+            Get-ChildItem -LiteralPath $target.Path -Recurse -Force -EA Stop | ForEach-Object {{
+                [void]$entries.Add($_)
+                $elapsedFolderReviewSeconds = [int]$folderReviewWatch.Elapsed.TotalSeconds
+                if ($entries.Count -eq 1 -or ($entries.Count % 100) -eq 0 -or
+                    ($elapsedFolderReviewSeconds - $lastFolderReviewNoticeSeconds) -ge 10) {{
+                    $inventoryCurrentPath = Get-CleanupEntryProgressPath $_.FullName $protectedRoots
+                    $inventoryStatus = if ($entries.Count -eq 1) {{
+                        "First item listed; current item: $inventoryCurrentPath. This review does not remove files."
+                    }} else {{
+                        "$($entries.Count) files and folders listed; current item: $inventoryCurrentPath. This review does not remove files."
+                    }}
+                    Write-Progress -Activity "Reviewing selected folder contents" -Status $inventoryStatus
+                    Write-Host "  Folder review: $inventoryStatus" -ForegroundColor Gray
+                    $lastFolderReviewNoticeSeconds = $elapsedFolderReviewSeconds
+                }}
+            }}
+            Write-Progress -Activity "Reviewing selected folder contents" -Completed
+            Write-Host "Folder review complete; $($entries.Count) files and folders found." -ForegroundColor Gray
+            $reparseEntry = $entries | Where-Object {{ ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }} | Select-Object -First 1
+            if ($reparseEntry) {{ throw "Refusing to clean a directory tree containing a reparse point: $(Get-CleanupProgressPath $reparseEntry.FullName)" }}
             Write-Host "Checking folder contents for project files and protected data; this check does not remove files." -ForegroundColor Gray
             $projectContentCheckIndex = 0
+            $projectContentCheckWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastProjectContentNoticeSeconds = 0
             foreach ($entry in $entries) {{
                 $projectContentCheckIndex++
                 $protectedRoot = Get-CleanupProtectedRoot $entry.FullName $entry.Name ([bool]$entry.PSIsContainer)
@@ -2903,11 +2924,15 @@ foreach ($target in $cleanTargets) {{
                         [void]$protectedRoots.Add($unsafeDisplayRoot.TrimEnd('\\'))
                     }}
                 }}
+                $elapsedProjectContentSeconds = [int]$projectContentCheckWatch.Elapsed.TotalSeconds
                 if ($projectContentCheckIndex -eq 1 -or ($projectContentCheckIndex % 100) -eq 0 -or
-                    $projectContentCheckIndex -eq $entries.Count) {{
-                    $projectContentStatus = "$projectContentCheckIndex of $($entries.Count) items checked for project files; this check does not remove files."
+                    $projectContentCheckIndex -eq $entries.Count -or
+                    ($elapsedProjectContentSeconds - $lastProjectContentNoticeSeconds) -ge 10) {{
+                    $projectContentProgressPath = Get-CleanupEntryProgressPath $entry.FullName $protectedRoots
+                    $projectContentStatus = "$projectContentCheckIndex of $($entries.Count) items checked for project files; current item: $projectContentProgressPath. This check does not remove files."
                     Write-Progress -Activity "Checking for project files in this folder" -Status $projectContentStatus -PercentComplete ([int](100 * $projectContentCheckIndex / $entries.Count))
                     Write-Host "  Project file check: $projectContentStatus" -ForegroundColor Gray
+                    $lastProjectContentNoticeSeconds = $elapsedProjectContentSeconds
                 }}
             }}
             Write-Progress -Activity "Checking for project files in this folder" -Completed
@@ -2919,6 +2944,8 @@ foreach ($target in $cleanTargets) {{
             }}
             $preservePaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
             $protectedContentCheckIndex = 0
+            $protectedContentCheckWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            $lastProtectedContentNoticeSeconds = 0
             foreach ($entry in $entries) {{
                 $protectedContentCheckIndex++
                 $ancestor = $entry.FullName
@@ -2939,11 +2966,15 @@ foreach ($target in $cleanTargets) {{
                     }}
                     [void]$preservePaths.Add($targetRootPath)
                 }}
+                $elapsedProtectedContentSeconds = [int]$protectedContentCheckWatch.Elapsed.TotalSeconds
                 if ($protectedContentCheckIndex -eq 1 -or ($protectedContentCheckIndex % 100) -eq 0 -or
-                    $protectedContentCheckIndex -eq $entries.Count) {{
-                    $protectedContentStatus = "$protectedContentCheckIndex of $($entries.Count) items checked for protected data; this check does not remove files."
+                    $protectedContentCheckIndex -eq $entries.Count -or
+                    ($elapsedProtectedContentSeconds - $lastProtectedContentNoticeSeconds) -ge 10) {{
+                    $protectedContentProgressPath = Get-CleanupEntryProgressPath $entry.FullName $protectedRoots
+                    $protectedContentStatus = "$protectedContentCheckIndex of $($entries.Count) items checked for protected data; current item: $protectedContentProgressPath. This check does not remove files."
                     Write-Progress -Activity "Checking for protected data in this folder" -Status $protectedContentStatus -PercentComplete ([int](100 * $protectedContentCheckIndex / $entries.Count))
                     Write-Host "  Protected-data check: $protectedContentStatus" -ForegroundColor Gray
+                    $lastProtectedContentNoticeSeconds = $elapsedProtectedContentSeconds
                 }}
             }}
             Write-Progress -Activity "Checking for protected data in this folder" -Completed
@@ -2971,7 +3002,8 @@ foreach ($target in $cleanTargets) {{
                     if ($folderHashIndex -eq 1 -or ($folderHashIndex % 100) -eq 0 -or
                         $folderHashIndex -eq $folderHashTotal -or
                         ($elapsedFolderHashSeconds - $lastFolderHashNoticeSeconds) -ge 10) {{
-                        $folderHashStatus = "Checking folder $folderHashIndex of $folderHashTotal; this check does not remove files."
+                        $folderHashProgressPath = Get-CleanupProgressPath $entry.FullName
+                        $folderHashStatus = "Checking folder $folderHashIndex of $folderHashTotal; current item: $folderHashProgressPath. This check does not remove files."
                         Write-Progress -Activity "Checking selected folder contents" -Status $folderHashStatus -PercentComplete ([int](100 * $folderHashIndex / $folderHashTotal))
                         Write-Host "  $folderHashStatus" -ForegroundColor Gray
                         $lastFolderHashNoticeSeconds = $elapsedFolderHashSeconds
@@ -3072,7 +3104,7 @@ foreach ($target in $cleanTargets) {{
             }}
             Assert-TargetMatchesScan $target $true
             Write-Host "Rechecking this folder's identity and extra Windows file data before cleanup; this check does not remove files." -ForegroundColor Gray
-            $verifiedTargetProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path
+            $verifiedTargetProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path "Rechecking"
             $verifiedTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $verifiedTargetProgressAction)
             $verifiedTargetSnapshotParts = $verifiedTargetSnapshot -split '\\|', 2
             if ($verifiedTargetSnapshotParts.Count -ne 2 -or
@@ -3117,7 +3149,8 @@ foreach ($target in $cleanTargets) {{
                     $elapsedFreshProjectSeconds = [int]$freshProjectCheckWatch.Elapsed.TotalSeconds
                     if ($freshProjectCheckIndex -eq 1 -or ($freshProjectCheckIndex % 100) -eq 0 -or
                         ($elapsedFreshProjectSeconds - $lastFreshProjectNoticeSeconds) -ge 10) {{
-                        $freshProjectStatus = "$freshProjectCheckIndex items rechecked for project files; this check does not remove files."
+                        $freshProjectProgressPath = Get-CleanupEntryProgressPath $entryPath $protectedRoots
+                        $freshProjectStatus = "$freshProjectCheckIndex items rechecked for project files; current item: $freshProjectProgressPath. This check does not remove files."
                         Write-Progress -Activity "Rechecking project and protected paths" -Status $freshProjectStatus
                         Write-Host "  Final project check: $freshProjectStatus" -ForegroundColor Gray
                         $lastFreshProjectNoticeSeconds = $elapsedFreshProjectSeconds
@@ -3168,33 +3201,35 @@ foreach ($target in $cleanTargets) {{
             $fileRemovalWatch = [System.Diagnostics.Stopwatch]::StartNew()
             $lastFileRemovalNoticeSeconds = 0
             if ($fileRecheckTotal -gt 0) {{
-                Write-Host "Initial checks passed. Now checking and removing selected files one at a time; earlier files may already be removed if a later check fails." -ForegroundColor Yellow
+                Write-Host "Initial checks passed. Each selected file will be rechecked immediately before removal; earlier files from this item may already be removed if a later check fails." -ForegroundColor Yellow
             }}
             foreach ($entry in $orderedDeletable) {{
                 if (-not $entry.PSIsContainer) {{
                     $fileRecheckIndex++
-                    Write-Progress -Activity "Removing selected files" -Status "Processing file $fileRecheckIndex of $fileRecheckTotal; earlier files may already be removed" -PercentComplete ([int](100 * ($fileRecheckIndex - 1) / $fileRecheckTotal))
+                    $fileRemovalProgressPath = Get-CleanupProgressPath $entry.FullName
+                    Write-Progress -Activity "Rechecking selected files" -Status "Checking file $fileRecheckIndex of $fileRecheckTotal before removal; current item: $fileRemovalProgressPath. Earlier files may already be removed." -PercentComplete ([int](100 * ($fileRecheckIndex - 1) / $fileRecheckTotal))
                 }} else {{
                     $folderRecheckIndex++
                     $elapsedFolderRemovalSeconds = [int]$folderRemovalWatch.Elapsed.TotalSeconds
                     if ($folderRecheckIndex -eq 1 -or ($folderRecheckIndex % 100) -eq 0 -or
                         $folderRecheckIndex -eq $folderRecheckTotal -or
                         ($elapsedFolderRemovalSeconds - $lastFolderRemovalNoticeSeconds) -ge 10) {{
-                        $folderRemovalStatus = "Checking folder $folderRecheckIndex of $folderRecheckTotal before removal; earlier files may already have been removed."
-                        Write-Progress -Activity "Removing selected folders" -Status $folderRemovalStatus -PercentComplete ([int](100 * $folderRecheckIndex / $folderRecheckTotal))
+                        $folderRemovalProgressPath = Get-CleanupProgressPath $entry.FullName
+                        $folderRemovalStatus = "Checking folder $folderRecheckIndex of $folderRecheckTotal before removal; current item: $folderRemovalProgressPath. Earlier files may already have been removed."
+                        Write-Progress -Activity "Checking selected folders before removal" -Status $folderRemovalStatus -PercentComplete ([int](100 * $folderRecheckIndex / $folderRecheckTotal))
                         Write-Host "  $folderRemovalStatus" -ForegroundColor Gray
                         $lastFolderRemovalNoticeSeconds = $elapsedFolderRemovalSeconds
                     }}
                 }}
                 Assert-CleanupEntryPathWithinSelection $target $entry
                 if ($entry.PSIsContainer) {{
-                    $folderRemovalProgressAction = New-CleanupHashProgressAction $folderRecheckIndex $folderRecheckTotal "folder" $entry.FullName
+                    $folderRemovalProgressAction = New-CleanupHashProgressAction $folderRecheckIndex $folderRecheckTotal "folder" $entry.FullName "Rechecking"
                     [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
                         $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupStreamsSha256,
                         $folderRemovalProgressAction)
                     $targetFoldersRemoved++
                 }} else {{
-                    $fileRemovalProgressAction = New-CleanupHashProgressAction $fileRecheckIndex $fileRecheckTotal "file" $entry.FullName
+                    $fileRemovalProgressAction = New-CleanupHashProgressAction $fileRecheckIndex $fileRecheckTotal "file" $entry.FullName "Rechecking"
                     [{native_class_name}]::DeleteFileIfUnchanged(
                         $entry.FullName, [string]$entry.CleanupIdentity, [string]$entry.CleanupSha256,
                         [long]$entry.CleanupLength, [long]$entry.CleanupLastWriteTimeUtcFileTime,
@@ -3210,8 +3245,14 @@ foreach ($target in $cleanTargets) {{
                     }}
                 }}
             }}
-            if ($fileRecheckTotal -gt 0) {{ Write-Progress -Activity "Removing selected files" -Completed }}
-            if ($folderRecheckTotal -gt 0) {{ Write-Progress -Activity "Removing selected folders" -Completed }}
+            if ($fileRecheckTotal -gt 0) {{
+                Write-Progress -Activity "Rechecking selected file contents" -Completed
+                Write-Progress -Activity "Rechecking selected files" -Completed
+            }}
+            if ($folderRecheckTotal -gt 0) {{
+                Write-Progress -Activity "Rechecking selected folder contents" -Completed
+                Write-Progress -Activity "Checking selected folders before removal" -Completed
+            }}
             if ($preservePaths.Count -gt 0) {{
                 Write-Host " [Partially cleaned; protected data was preserved]" -ForegroundColor Yellow
             }} else {{
@@ -3219,7 +3260,7 @@ foreach ($target in $cleanTargets) {{
                 # the earlier enumeration; recursive removal here could erase
                 # data that was never included in the reviewed cleanup snapshot.
                 Write-Host "Checking the selected folder's extra Windows file data before final removal; this check does not remove files." -ForegroundColor Gray
-                $rootRemovalProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path
+                $rootRemovalProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path "Rechecking"
                 [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
                     $target.Path, [string]$target.CleanupIdentity, [string]$target.CleanupStreamsSha256,
                     $rootRemovalProgressAction)
@@ -3228,17 +3269,17 @@ foreach ($target in $cleanTargets) {{
         }} else {{
             $targetFilesPlanned = 1
             Write-Host "Rechecking selected file contents before removal..." -ForegroundColor Gray
-            Write-Progress -Activity "Checking selected file contents" -Status "Comparing file contents" -PercentComplete 50
+            Write-Progress -Activity "Rechecking selected file contents" -Status "Comparing file contents" -PercentComplete 50
             $cleanupLength = [long]$item.Length
             $cleanupLastWriteTimeUtcFileTime = [long]$item.LastWriteTimeUtc.ToFileTimeUtc()
-            $hashProgressAction = New-CleanupHashProgressAction 1 1 "file" $target.Path
+            $hashProgressAction = New-CleanupHashProgressAction 1 1 "file" $target.Path "Rechecking"
             $fileSnapshot = [{native_class_name}]::GetFileIdentityAndHash($target.Path, $hashProgressAction)
             $snapshotParts = $fileSnapshot -split '\\|', 2
             if ($snapshotParts.Count -ne 2 -or $snapshotParts[0] -ne $target.CleanupIdentity) {{
                 throw "The selected file was replaced while its contents were checked; refusing cleanup: $($target.Path)"
             }}
             $cleanupHash = $snapshotParts[1]
-            Write-Progress -Activity "Checking selected file contents" -Completed
+            Write-Progress -Activity "Rechecking selected file contents" -Completed
             if ($backupEnabled) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
@@ -3256,15 +3297,15 @@ foreach ($target in $cleanTargets) {{
                 }}
                 continue
             }}
-            Write-Progress -Activity "Checking selected file contents" -Status "Confirming and removing the reviewed file" -PercentComplete 50
-            $fileRemovalProgressAction = New-CleanupHashProgressAction 1 1 "file" $target.Path
+            Write-Progress -Activity "Rechecking selected file contents" -Status "Confirming the reviewed file before removal" -PercentComplete 50
+            $fileRemovalProgressAction = New-CleanupHashProgressAction 1 1 "file" $target.Path "Rechecking"
             [{native_class_name}]::DeleteFileIfUnchanged(
                 $target.Path, [string]$target.CleanupIdentity, [string]$cleanupHash,
                 [long]$cleanupLength, [long]$cleanupLastWriteTimeUtcFileTime,
                 $fileRemovalProgressAction)
             $targetFilesRemoved++
             $targetBytesRemoved += [decimal]$item.Length
-            Write-Progress -Activity "Checking selected file contents" -Completed
+            Write-Progress -Activity "Rechecking selected file contents" -Completed
         }}
         $totalFilesRemoved += $targetFilesRemoved
         $totalFoldersRemoved += $targetFoldersRemoved
