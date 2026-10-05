@@ -5201,6 +5201,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["changed_candidate_count"], 1)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_live_file_size_check_fails_closed_when_stat_is_denied(self):
+        with mock.patch.object(analyze.os, "stat", side_effect=PermissionError("access denied")):
+            self.assertFalse(analyze._live_file_size_matches_scan(
+                r"C:\Users\A\AppData\Local\Temp\candidate.tmp", 20,
+            ))
+
     def test_cleanup_plan_generation_rejects_file_size_changed_after_analysis(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             work_dir = Path(temp_dir) / "work"
