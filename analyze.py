@@ -869,7 +869,10 @@ PROJECT_MARKERS = (
 )
 PROJECT_MARKER_SUFFIXES = (
     ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj",
-    ".uproject", ".uplugin", ".code-workspace", "-requirements.txt",
+    ".uproject", ".uplugin", ".code-workspace", "-requirements.txt", "-requirements.in",
+)
+PYTHON_REQUIREMENTS_MARKER_PATTERN = re.compile(
+    r"^requirements(?:[-_.][a-z0-9][a-z0-9_.-]*)?\.(?:txt|in)$"
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
 _PROFILE_ROOT_IGNORED_MARKERS = frozenset({
@@ -1333,14 +1336,17 @@ def _directory_has_project_marker(directory, marker_out=None):
                 # would hide every otherwise eligible cleanup location there.
                 if (is_profile_root and
                         (name in _PROFILE_ROOT_IGNORED_MARKERS or
-                         name.endswith(".code-workspace"))):
+                         name.endswith(".code-workspace") or
+                         name.endswith(("-requirements.txt", "-requirements.in")) or
+                         PYTHON_REQUIREMENTS_MARKER_PATTERN.fullmatch(name))):
                     continue
                 if name in _PROJECT_MARKER_NAMES:
                     if marker_out is not None:
                         marker_out.append(entry.name)
                     return True
                 if (entry.is_file(follow_symlinks=False) and
-                        name.endswith(PROJECT_MARKER_SUFFIXES)):
+                        (name.endswith(PROJECT_MARKER_SUFFIXES) or
+                         PYTHON_REQUIREMENTS_MARKER_PATTERN.fullmatch(name))):
                     if marker_out is not None:
                         marker_out.append(entry.name)
                     return True
@@ -2403,6 +2409,7 @@ $projectMarkers = @(
 {project_markers}
 )
 $projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$pythonRequirementsMarkerPattern = [regex]::new({python_requirements_marker_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
 $profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode', '.cursorrules', '.claude', '.cursor', '.gemini', '.github', '.opencode', '.windsurf', 'agents.md', 'agents.override.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', 'skill.md', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
 
 function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress = $false) {{
@@ -2433,9 +2440,13 @@ function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress 
                 Write-Host "  Project check: $projectCheckStatus" -ForegroundColor Gray
                 $lastProjectNoticeSeconds = $elapsedProjectSeconds
             }}
-            if ($isProfileRoot -and ($profileRootIgnoredMarkers -contains $entryName -or $entryName -like '*.code-workspace')) {{ continue }}
+            if ($isProfileRoot -and ($profileRootIgnoredMarkers -contains $entryName -or
+                $entryName -like '*.code-workspace' -or $entryName -like '*-requirements.txt' -or
+                $entryName -like '*-requirements.in' -or
+                $pythonRequirementsMarkerPattern.IsMatch($entryName))) {{ continue }}
             if ($projectMarkers -contains $entryName) {{ $hasProjectMarker = $true; break }}
-            if ($projectMarkerSuffixPattern.IsMatch($entryName) -and
+            if (($projectMarkerSuffixPattern.IsMatch($entryName) -or
+                $pythonRequirementsMarkerPattern.IsMatch($entryName)) -and
                 -not [System.IO.Directory]::Exists($entryPath)) {{ $hasProjectMarker = $true; break }}
         }}
         if ($ShowProgress) {{
@@ -2500,7 +2511,8 @@ function Get-CleanupProtectedRoot([string]$FullName, [string]$Name, [bool]$IsDir
     if ($projectMarkers -contains $Name) {{
         $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
     }}
-    if (-not $IsDirectory -and $projectMarkerSuffixPattern.IsMatch($Name)) {{
+    if (-not $IsDirectory -and ($projectMarkerSuffixPattern.IsMatch($Name) -or
+        $pythonRequirementsMarkerPattern.IsMatch($Name))) {{
         $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
     }}
     $normalizedPath = $FullName.TrimEnd('\\') + '\\'
@@ -3475,6 +3487,7 @@ Write-Host "========================================" -ForegroundColor Cyan
         protected_pattern=_ps_literal(protected_pattern),
         project_markers=project_markers_str,
         project_marker_suffix_pattern=_ps_literal(project_suffix_pattern),
+        python_requirements_marker_pattern=_ps_literal(PYTHON_REQUIREMENTS_MARKER_PATTERN.pattern),
         backup_script_literal=backup_script_literal,
         priority_arg=("manual" if priority == "manual" else priority if priority != "all" else "low")
     )

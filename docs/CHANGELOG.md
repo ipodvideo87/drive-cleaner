@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Recognize common Python requirements-list variants such as `requirements-dev.txt`, `requirements-test.in`, and `dev-requirements.in` as project markers, while ignoring shared requirement lists at the user-profile root so they do not shield the whole profile.
 - Show progress while checking saved backups for reparse points and a periodic heartbeat during long backup deletion; warn that a failed or interrupted removal may have left a partial backup, and stop bulk deletion when interrupted.
 - Show a sanitized current path with the running count during folder inventory and link/project/protected-data checks, fold reparse-point refusal into the counted safety pass instead of silently rescanning the full folder, hide protected paths and names in progress, and label per-item rechecks separately from completed removals.
 - Skip file candidates whose current logical length differs from the scan; require that scanned length in generated file plans, carry it into scripts, and recheck it before cleanup. Never substitute allocated or current size when scan evidence is missing.

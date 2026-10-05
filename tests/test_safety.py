@@ -1308,7 +1308,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_solution_project_and_requirements_files_protect_project_caches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             rows = []
-            markers = ("DriveCleanr.sln", "Worker.csproj", "dev-requirements.txt")
+            markers = (
+                "DriveCleanr.sln", "Worker.csproj", "dev-requirements.txt",
+                "dev-requirements.in", "requirements-dev.txt", "requirements-test.in",
+                "requirements_prod.txt",
+            )
             for index, marker in enumerate(markers):
                 project = Path(temp_dir) / f"project-{index}"
                 cache = project / "pip" / "cache"
@@ -1317,6 +1321,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
             results = self.analyze_rows(rows)
         self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
     def test_git_ide_and_agent_settings_markers_protect_project_caches(self):
@@ -1402,6 +1410,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         entries = []
         for name in (
                 "package.json", "package-lock.json", "bun.lock", ".gitignore",
+                "requirements.txt", "requirements-dev.txt", "requirements-test.in",
+                "dev-requirements.txt", "dev-requirements.in",
                 ".editorconfig", ".vscode",
                 "Work.code-workspace", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md",
                 "GEMINI.md", "SKILL.md", ".cursorrules", "copilot-instructions.md",
@@ -2560,6 +2570,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("$profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode'", script)
         self.assertIn("'.gitignore'", script[script.index("$profileRootIgnoredMarkers"):])
         self.assertIn("'agents.md'", script[script.index("$profileRootIgnoredMarkers"):])
+        self.assertIn("$pythonRequirementsMarkerPattern = [regex]::new", script)
+        self.assertIn("$pythonRequirementsMarkerPattern.IsMatch($entryName)", script)
         self.assertIn("$entryName -like '*.code-workspace'", script)
         self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)
         self.assertIn("$backupScript = Join-Path $PSScriptRoot 'backup.py'", script)
@@ -4173,6 +4185,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
             personal_music.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
+            requirements_project = selected / "nested" / "requirements-project"
+            requirements_project_cache = requirements_project / "pip" / "cache"
+            requirements_project_cache.mkdir(parents=True)
+            (requirements_project / "requirements-dev.txt").write_text("pytest", encoding="utf-8")
             vscode_project = selected / "nested" / "vscode-project"
             vscode_project_cache = vscode_project / "Cache"
             (vscode_project / ".vscode").mkdir(parents=True)
@@ -4196,6 +4212,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (personal_music / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
+            (requirements_project_cache / "keep.bin").write_bytes(b"keep")
             (vscode_project_cache / "keep.bin").write_bytes(b"keep")
             (workspace_project_cache / "keep.bin").write_bytes(b"keep")
             (visual_project_cache / "keep.bin").write_bytes(b"keep")
@@ -4235,6 +4252,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((personal_music / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((requirements_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((vscode_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((workspace_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((visual_project_cache / "keep.bin").read_bytes(), b"keep")
