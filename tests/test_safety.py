@@ -198,7 +198,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "kind": "Directory", "name": label, "safe": True,
         }
         file_item = {
-            "path": file_path, "size": 100, "size_formatted": "100 B",
+            "path": file_path, "size": 100, "scan_logical_size": 100,
+            "size_formatted": "100 B",
             "kind": "File", "name": label, "safe": True,
         }
         results = {"categories": {
@@ -227,6 +228,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "exact-file.ps1"
             with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True), \
                  mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
                  mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
                  mock.patch.object(analyze, "_matches_cleanup_rule", return_value=True), \
@@ -2617,6 +2619,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "high": {"name": "High", "items": [{
                     "path": str(target), "name": label,
                     "size": target.stat().st_size,
+                    "scan_logical_size": target.stat().st_size,
                     "size_formatted": f"{target.stat().st_size} B", "kind": "File",
                 }]},
                 "medium": {"name": "Medium", "items": []},
@@ -2714,6 +2717,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
             }]}}}
@@ -2998,6 +3002,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "npm cache",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": "12 B",
                 "kind": "File",
             }]}}}
@@ -3059,6 +3064,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": "21 B",
                 "kind": "File",
             }]}}}
@@ -3244,6 +3250,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         "path": str(target),
                         "name": "Temporary files (check for installers or builds in progress)",
                         "size": target.stat().st_size,
+                        "scan_logical_size": target.stat().st_size,
                         "size_formatted": f"{target.stat().st_size} B",
                         "kind": "File",
                     }]}}}
@@ -3286,6 +3293,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
             }]}}}
@@ -3323,6 +3331,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
             }]}}}
@@ -3367,6 +3376,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(target),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
             }]}}}
@@ -3396,7 +3406,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target = Path(target_temp) / "candidate.tmp"
             target.write_bytes(b"temporary fixture selected without backup")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B", "kind": "File",
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
@@ -3428,7 +3439,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target = Path(target_temp) / "candidate.tmp"
             target.write_bytes(b"temporary fixture selected with default backup")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B", "kind": "File",
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
@@ -3460,7 +3472,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target = Path(target_temp) / "candidate.tmp"
             target.write_bytes(b"temporary fixture selected without backup")
             results = {"categories": {"high": {"name": "High", "items": [{
-                "path": str(target), "name": "Temporary files (check for installers or builds in progress)", "size": target.stat().st_size,
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B", "kind": "File",
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
@@ -3704,6 +3717,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             label = "Temporary files (check for installers or builds in progress)"
             results = {"categories": {"high": {"name": "High", "items": [
                 {"path": str(target), "name": label, "size": target.stat().st_size,
+                 "scan_logical_size": target.stat().st_size,
                  "size_formatted": f"{target.stat().st_size} B", "kind": "File"}
                 for target in targets
             ]}}}
