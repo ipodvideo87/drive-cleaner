@@ -731,7 +731,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     side_effect=exists or (lambda _path: True)):
                 with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
-                        return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
+                        # These tests model filesystem type/existence for synthetic
+                        # Windows paths. Treat those modeled files as size-matched;
+                        # dedicated stale-size tests use real temporary files.
+                        with mock.patch.object(
+                                analyze, "_live_file_size_matches_scan", return_value=True):
+                            return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
 
     def test_reports_explain_and_preserve_non_english_scan_paths(self):
         non_english_path = r"C:\Users\A\AppData\Local\Temp\临时文件.tmp"
@@ -1125,7 +1130,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             with mock.patch("analyze.os.path.exists", return_value=True):
                 with mock.patch("analyze.os.path.isdir", return_value=False), \
-                     mock.patch("analyze.os.path.isfile", return_value=True):
+                     mock.patch("analyze.os.path.isfile", return_value=True), \
+                     mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                     results = analyze.analyze_csv(str(export_path), min_size_mb=0)
         self.assertEqual(len(results["categories"]["high"]["items"]), 1)
         self.assertTrue(results["categories"]["high"]["items"][0]["path"].endswith("large.tmp"))
@@ -2395,7 +2401,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 })
             with mock.patch("analyze.os.path.exists", return_value=True), \
                  mock.patch("analyze.os.path.isdir", return_value=False), \
-                 mock.patch("analyze.os.path.isfile", return_value=True):
+                 mock.patch("analyze.os.path.isfile", return_value=True), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         candidates = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in candidates], [r"C:\Users\A\AppData\Local\Temp\current-file"])
@@ -2465,7 +2472,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 })
             with mock.patch("analyze.os.path.exists", return_value=True):
                 with mock.patch("analyze.os.path.isdir", return_value=False), \
-                     mock.patch("analyze.os.path.isfile", return_value=True):
+                     mock.patch("analyze.os.path.isfile", return_value=True), \
+                     mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                     results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         items = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
@@ -5081,8 +5089,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "existing.ps1"
             output_path.write_text("keep this existing file", encoding="utf-8")
-            with self.assertRaises(FileExistsError):
-                analyze.generate_clean_script(results, str(output_path))
+            with mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
+                with self.assertRaises(FileExistsError):
+                    analyze.generate_clean_script(results, str(output_path))
             self.assertEqual(output_path.read_text(encoding="utf-8"), "keep this existing file")
             list_path = Path(temp_dir) / "existing.txt"
             list_path.write_text("keep this list", encoding="utf-8")
@@ -5174,6 +5183,84 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         self.assertEqual(results["stale_candidate_count"], 1)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_analyzer_skips_temp_file_whose_size_changed_since_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"current file contents")
+            csv_path = Path(temp_dir) / "scan.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["File Name", "Size"])
+                writer.writeheader()
+                writer.writerow({"File Name": str(candidate), "Size": str(candidate.stat().st_size + 1)})
+
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+        self.assertEqual(results["changed_candidate_count"], 1)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_cleanup_plan_generation_rejects_file_size_changed_after_analysis(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"changed after analysis")
+            item = {
+                "path": str(candidate),
+                "size": 10,
+                "scan_logical_size": 10,
+                "size_formatted": "10 B",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "safe": True,
+                "kind": "File",
+            }
+            results = {"categories": {
+                "high": {"name": "High priority", "items": [item]},
+                "medium": {"name": "Medium priority", "items": []},
+                "low": {"name": "Low priority", "items": []},
+            }}
+
+            with self.assertRaisesRegex(ValueError, "file size changed since the scan"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "stale.clean.ps1"),
+                    priority="high", selected_paths=[str(candidate)],
+                )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_plan_refuses_file_resized_after_plan_creation(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is required")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"original scanned contents")
+            csv_path = Path(temp_dir) / "scan.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["File Name", "Size"])
+                writer.writeheader()
+                writer.writerow({"File Name": str(candidate), "Size": str(candidate.stat().st_size)})
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            selected = results["categories"]["high"]["items"]
+            self.assertEqual(len(selected), 1)
+            plan_path = Path(temp_dir) / "stale.clean.ps1"
+            analyze.generate_clean_script(
+                results, str(plan_path), priority="high", selected_paths=[str(candidate)]
+            )
+            candidate.write_bytes(candidate.read_bytes() + b" changed")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(plan_path),
+                 "-Force", "-NoBackup"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("size changed since the scan", result.stdout + result.stderr)
+            self.assertEqual(candidate.read_bytes(), b"original scanned contents changed")
 
 
 class ScanSafetyTests(unittest.TestCase):

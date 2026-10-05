@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Skip file candidates whose current logical length differs from the scan; carry the scanned length into generated plans and recheck it before cleanup.
 - Offer a full read-only cleanup preview from the guided review menu immediately after saving a plan, with the preview enabled by default and no follow-up command required; if it fails, leave the plan saved and do not offer immediate cleanup.
 - Normalize scanner discovery through the same executable-path validation as guided selection, including environment-variable values wrapped in quotes.
 - Report accurately when a cancelled or failed scan's partial export remains because the scanner may still be running or Windows refused its removal; keep it outside saved-scan review.

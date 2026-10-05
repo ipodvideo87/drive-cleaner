@@ -28,6 +28,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - In the guided picker, `D` opens a listed folder to browse scan entries grouped beneath it. The nested browser must preserve the review level chosen earlier; tell users to choose All review levels to include nested entries assigned to more cautious levels. `A` selects suggestions in the main list only, not hidden nested entries. In the nested browser, `D` finishes and keeps picks from that browse session; `B` returns without adding those picks. Both actions must preserve selections already made in the main list.
 - Do not include local scan exports, backup contents, generated scripts, or personal paths in source control.
 - Keep `analyze.py` cleanup patterns and exclusions consistent with `references/knowledge.md`.
+- Treat scan exports as evidence, not authority: compare each file's scanned logical size with its current length during analysis, plan creation, and cleanup-plan startup. Omit or refuse files whose size changed or could not be checked, and tell users to rescan.
 - Prefer leaving uncertain files untouched. Avoid overstating reclaimable size: folder totals can overlap and hard links can inflate apparent savings.
 
 ## User-facing wording
@@ -52,6 +53,7 @@ Drive Cleanr analyzes WizTree and WinDirStat 2.x exports and proposes conservati
 - Keep WizTree optional for tests. Mock its process and use small synthetic CSV fixtures.
 - Run `python -m unittest discover -s tests -v` and `python -m py_compile analyze.py backup.py scan.py` after changes.
 - Any cleanup workflow changes need negative tests for protected paths, stale paths, and backup failure. Restore workflow changes also need negative tests for malformed or incomplete manifests, invalid or overlapping destinations, and confirmation that rejected backups write nothing.
+- Keep both backup choices covered: interactive Enter means no backup and requires the distinct no-backup confirmation; `-Force` creates and verifies a backup by default, while `-NoBackup` is an explicit opt-out that still requires the no-backup confirmation.
 - Manual-review file listing or planning changes need tests proving automatic candidates stay separate, protected/project/reparse-point files are omitted or rejected, folders and bulk selection are refused, and plans require an exact user selection and acknowledgement.
 - Update `README.md`, `current-status.md`, and relevant files under `docs/` when behavior or operator steps change.
 

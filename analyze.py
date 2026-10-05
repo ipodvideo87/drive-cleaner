@@ -905,6 +905,14 @@ def format_size(size_bytes):
     return f"{size_bytes} B"
 
 
+def _live_file_size_matches_scan(path, scan_logical_size):
+    """Fail closed if a scanned file's current logical length cannot be verified."""
+    try:
+        return os.stat(path, follow_symlinks=False).st_size == scan_logical_size
+    except OSError:
+        return False
+
+
 def _scan_mode_from_filename(csv_path):
     """Read scan-mode hints encoded by Drive Cleanr without altering scanner CSVs."""
     name = Path(csv_path).name.casefold()
@@ -1526,6 +1534,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         "used_space": 0,
         "space_source": None,
         "stale_candidate_count": 0,
+        "changed_candidate_count": 0,
         "project_candidate_count": 0,
         "project_roots": [],
         "temp_root_candidate_count": 0,
@@ -1799,6 +1808,14 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                             else:
                                 current_type = None
 
+                            if (current_type == 'file' and
+                                    not _live_file_size_matches_scan(current_path, logical_size)):
+                                # A row describes a different file length than
+                                # the one currently at this path. Do not let a
+                                # stale scan authorize cleanup of its replacement.
+                                results["changed_candidate_count"] += 1
+                                break
+
                             if current_type is None:
                                 results['unclassified_candidate_count'] += 1
                             elif scanner_type is not None and scanner_type != current_type:
@@ -1828,6 +1845,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                                     candidate_item = {
                                         "path": path,
                                         "size": size,
+                                        "scan_logical_size": logical_size,
                                         "size_formatted": format_size(size),
                                         "name": pattern_info["name"],
                                         "safe": pattern_info["safe"],
@@ -1887,12 +1905,15 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                                     not _inside_project_tree(
                                         path, False, project_path_cache,
                                         detected_projects=detected_projects)):
-                                manual_file_sequence += 1
-                                manual_file = (size, manual_file_sequence, path)
-                                if len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT:
-                                    heapq.heappush(manual_file_heap, manual_file)
+                                if _live_file_size_matches_scan(current_path, logical_size):
+                                    manual_file_sequence += 1
+                                    manual_file = (size, manual_file_sequence, path, logical_size)
+                                    if len(manual_file_heap) < MANUAL_REVIEW_HEAP_LIMIT:
+                                        heapq.heappush(manual_file_heap, manual_file)
+                                    else:
+                                        heapq.heapreplace(manual_file_heap, manual_file)
                                 else:
-                                    heapq.heapreplace(manual_file_heap, manual_file)
+                                    results["changed_candidate_count"] += 1
             except (ValueError, KeyError):
                 continue
 
@@ -1913,7 +1934,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
     manual_files_seen = set()
     final_manual_project_cache = {}
     final_manual_reparse_cache = {}
-    for size, _sequence, path in sorted(
+    for size, _sequence, path, logical_size in sorted(
             manual_file_heap, key=lambda entry: (-entry[0], entry[2].casefold())):
         path_key = _path_key(path)
         if path_key in manual_files_seen:
@@ -1924,6 +1945,9 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 _is_excluded_path(path) or _matches_any_cleanup_rule(path) or
                 not os.path.isfile(current_path) or os.path.isdir(current_path)):
             continue
+        if not _live_file_size_matches_scan(current_path, logical_size):
+            results["changed_candidate_count"] += 1
+            continue
         if _inside_project_tree(
                 path, False, final_manual_project_cache,
                 detected_projects=detected_projects):
@@ -1931,6 +1955,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         results["manual_review_files"].append({
             "path": path,
             "size": size,
+            "scan_logical_size": logical_size,
             "size_formatted": format_size(size),
             "name": MANUAL_REVIEW_LABEL,
             "kind": "File",
@@ -2060,6 +2085,11 @@ def print_report(results, show_all_items=False, item_limit=10):
     print("Lower-risk items are usually recreatable, but review every path before cleanup.")
     if results.get("stale_candidate_count", 0):
         print(f"Skipped {results['stale_candidate_count']} listed files or folders that no longer exist.")
+    if results.get("changed_candidate_count", 0):
+        print(
+            f"Skipped {results['changed_candidate_count']} files whose size changed since the scan "
+            "or could not be verified; rescan to refresh them."
+        )
     if results.get("unsafe_display_path_count", 0):
         print(
             f"Skipped {results['unsafe_display_path_count']} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
@@ -2149,6 +2179,11 @@ def generate_clean_script(results, output_path, priority="high", selected_paths=
                 not isinstance(item.get("size_formatted"), str) or
                 not isinstance(item.get("size"), int) or item["size"] < 0):
             raise ValueError("Cleanup plan contains a malformed target")
+        scan_logical_size = item.get("scan_logical_size")
+        if ("scan_logical_size" in item and
+                (type(scan_logical_size) is not int or
+                 scan_logical_size < 0 or scan_logical_size > 9223372036854775807)):
+            raise ValueError("Cleanup plan contains an invalid scanned file size")
         if not _is_local_drive_path(path):
             raise ValueError("Cleanup plan contains an unsafe path; only absolute non-root local paths are allowed")
         if scan._path_has_reparse_component(path.rstrip("\\/")):
@@ -2167,6 +2202,9 @@ def generate_clean_script(results, output_path, priority="high", selected_paths=
                 raise ValueError("Manual-review plans accept only current, unprotected files not matched by cleanup rules")
         elif not _matches_cleanup_rule(path, (candidate_priority,), item["name"]):
             raise ValueError("Cleanup plan target does not match its priority and cleanup label; rescan before cleanup")
+        if (not is_directory and scan_logical_size is not None and
+                not _live_file_size_matches_scan(path.rstrip("\\/"), scan_logical_size)):
+            raise ValueError("Cleanup plan file size changed since the scan; rescan before cleanup")
         if _inside_project_tree(path, is_directory, project_path_cache):
             raise ValueError("Cleanup plan contains a path inside a detected project folder")
         return is_directory
@@ -2431,7 +2469,7 @@ function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowPr
     return $false
 }}
 
-function Assert-TargetMatchesScan([object]$Target) {{
+function Assert-TargetMatchesScan([object]$Target, [bool]$CheckScanSize = $false) {{
     $current = [System.IO.Path]::GetFullPath($Target.Path)
     $isTarget = $true
     while ($current) {{
@@ -2441,6 +2479,11 @@ function Assert-TargetMatchesScan([object]$Target) {{
         }}
         if ($isTarget -and [bool]$item.PSIsContainer -ne [bool]$Target.IsDirectory) {{
             throw "The item type changed since the scan; rescan before cleanup: $($Target.Path)"
+        }}
+        if ($isTarget -and $CheckScanSize -and -not $item.PSIsContainer -and
+            $null -ne $Target.ScanLogicalSize -and
+            [long]$item.Length -ne [long]$Target.ScanLogicalSize) {{
+            throw "The selected file's size changed since the scan; rescan before cleanup: $($Target.Path)"
         }}
         $parent = [System.IO.Directory]::GetParent($current)
         if (-not $parent) {{ break }}
@@ -2583,7 +2626,7 @@ if ($Select.Count -gt 0) {{
 $targetSnapshotIndex = 0
 foreach ($target in $cleanTargets) {{
     $targetSnapshotIndex++
-    Assert-TargetMatchesScan $target
+    Assert-TargetMatchesScan $target $true
     if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory) $true) {{
         throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
     }}
@@ -2759,7 +2802,7 @@ foreach ($target in $cleanTargets) {{
     $targetBytesRemoved = [decimal]0
     $targetRemovalCountsAdded = $false
     try {{
-        Assert-TargetMatchesScan $target
+        Assert-TargetMatchesScan $target $true
         if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory) $true) {{
             throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
         }}
@@ -3025,7 +3068,7 @@ foreach ($target in $cleanTargets) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             }}
-            Assert-TargetMatchesScan $target
+            Assert-TargetMatchesScan $target $true
             Write-Host "Rechecking this folder's identity and extra Windows file data before cleanup; this check does not remove files." -ForegroundColor Gray
             $verifiedTargetProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path
             $verifiedTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $verifiedTargetProgressAction)
@@ -3198,7 +3241,7 @@ foreach ($target in $cleanTargets) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             }}
-            Assert-TargetMatchesScan $target
+            Assert-TargetMatchesScan $target $true
             if (Test-PathInsideProject $target.Path $false $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
@@ -3351,10 +3394,15 @@ Write-Host "========================================" -ForegroundColor Cyan
         selected_nested_paths_str = ", ".join(
             _ps_literal(value) for value in selected_nested_paths
         )
+        scan_logical_size = item.get("scan_logical_size")
+        scan_logical_size_literal = (
+            "$null" if scan_logical_size is None else str(scan_logical_size)
+        )
         targets_str += f'''    @{{
         Name = {_ps_literal(item['name'])}
         Path = {path}
         Size = {_ps_literal(item['size_formatted'])}
+        ScanLogicalSize = {scan_logical_size_literal}
         ItemType = {_ps_literal(item_type)}
         IsDirectory = ${str(is_directory).lower()}
         PreservePaths = @({preserve_paths_str})
@@ -3417,6 +3465,12 @@ def write_item_list_report(results, output_path):
     lines.append(f"Source scan last modified: {_safe_scan_timestamp(results)}")
     lines.append(PATH_LANGUAGE_NOTE)
     lines.append("")
+    if results.get("changed_candidate_count", 0):
+        lines.append(
+            f"Skipped {results['changed_candidate_count']} files whose size changed since the scan "
+            "or could not be verified; rescan to refresh them."
+        )
+        lines.append("")
     if results.get("reparse_candidate_count", 0):
         lines.append(f"Skipped {results['reparse_candidate_count']} paths that pass through a link or could not be checked.")
         lines.append("")
@@ -3530,6 +3584,12 @@ def _folder_browse_skip_lines(results):
     stale_count = results.get("stale_candidate_count", 0)
     if stale_count:
         lines.append(f"Skipped {stale_count} candidate entries that no longer exist. Rescan to refresh them.")
+    changed_count = results.get("changed_candidate_count", 0)
+    if changed_count:
+        lines.append(
+            f"Skipped {changed_count} files whose size changed since the scan or could not be verified. "
+            "Rescan to refresh them."
+        )
     lines.extend(_project_protection_lines(results))
     unclassified_count = results.get("unclassified_candidate_count", 0)
     if unclassified_count:
