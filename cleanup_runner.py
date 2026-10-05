@@ -50,7 +50,15 @@ def offer_to_preview_cleanup_script(script_path):
 
 def offer_to_run_cleanup_script(script_path):
     """Offer to launch a new plan when this window is already running as Administrator."""
-    if not scan.check_admin():
+    admin_status = scan.check_admin_status()
+    if admin_status is None:
+        print(
+            "Could not determine whether this window is running as Administrator. "
+            "The cleanup plan is saved; no files were changed."
+        )
+        return False
+    if not admin_status:
+        print("This window is not running as Administrator. The cleanup plan is saved; no files were changed.")
         return False
 
     print("This window is running as Administrator.")

@@ -64,7 +64,7 @@
 - Use File/Folder labels in the selection and final plan review, explain that only scan-listed entries can be chosen, call the size filter an item-size filter, and make nested-space estimates easier to understand.
 - Clarify that choosing a folder includes contents not listed as separate scan suggestions, while protected and project data are kept and higher-risk candidates stay unless explicitly selected too; warn that the 12-item preview is incomplete.
 - Ignore the full local `data/` tree and default `*.clean.ps1` plans so scan exports and generated cleanup plans stay out of commits by default.
-- After guided plan creation, detect an elevated administrator session and offer to run the saved plan there; declining leaves it saved, and the script's own cleanup confirmation remains required.
+- After guided plan creation, detect the Administrator status before offering to run the saved plan. Report non-elevated or unknown status and leave the plan saved; when elevated, ask before running and retain the script's cleanup confirmation.
 - Show detected project roots and the marker evidence that caused cleanup candidates beneath them to be withheld from console and exported review reports.
 - Show progress while sizing, copying, compressing, hashing, and verifying large backups, including periodic heartbeats during Robocopy; keep `--json` output parseable by sending progress to stderr.
 - Show CSV byte-read percentage while analyzing a scan export, with 100% reported after parsing finishes.

@@ -554,16 +554,44 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(results["categories"]["high"]["items"], [folder_item])
             self.assertIn("C:\\Users\\A\\AppData\\Local\\npm-cache\\content.bin", output.getvalue())
 
+    def test_admin_status_distinguishes_true_false_and_detection_failure(self):
+        for api_result, expected in ((1, True), (0, False)):
+            api = SimpleNamespace(IsUserAnAdmin=mock.Mock(return_value=api_result))
+            with self.subTest(api_result=api_result), \
+                 mock.patch.object(scan.ctypes, "windll", SimpleNamespace(shell32=api), create=True):
+                self.assertIs(scan.check_admin_status(), expected)
+                self.assertIs(scan.check_admin(), expected)
+
+        api = SimpleNamespace(IsUserAnAdmin=mock.Mock(side_effect=OSError("token query failed")))
+        with mock.patch.object(scan.ctypes, "windll", SimpleNamespace(shell32=api), create=True):
+            self.assertIsNone(scan.check_admin_status())
+            self.assertFalse(scan.check_admin())
+
     def test_cleanup_script_run_offer_is_hidden_without_admin_token(self):
-        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=False), \
+        output = io.StringIO()
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=False), \
              mock.patch("builtins.input") as prompt, \
-             mock.patch.object(cleanup_runner.subprocess, "run") as run_script:
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script, \
+             redirect_stdout(output):
             self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
         prompt.assert_not_called()
         run_script.assert_not_called()
+        self.assertIn("not running as Administrator", output.getvalue())
+
+    def test_cleanup_script_run_offer_explains_unknown_admin_status(self):
+        output = io.StringIO()
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=None), \
+             mock.patch("builtins.input") as prompt, \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script, \
+             redirect_stdout(output):
+            self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
+        prompt.assert_not_called()
+        run_script.assert_not_called()
+        self.assertIn("Could not determine whether this window is running as Administrator", output.getvalue())
+        self.assertIn("The cleanup plan is saved; no files were changed", output.getvalue())
 
     def test_admin_cleanup_script_run_offer_defaults_to_saved_plan(self):
-        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
              mock.patch("builtins.input", return_value=""), \
              mock.patch.object(cleanup_runner.subprocess, "run") as run_script:
             self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
@@ -571,7 +599,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_admin_cleanup_script_run_offer_launches_power_shell_without_force(self):
         completed = SimpleNamespace(returncode=0)
-        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
              mock.patch("builtins.input", return_value="y"), \
              mock.patch.object(cleanup_runner.shutil, "which", side_effect=["pwsh.exe"]), \
              mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script:
@@ -583,7 +611,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_admin_cleanup_script_run_offer_uses_powershell_fallback(self):
         completed = SimpleNamespace(returncode=0)
-        with mock.patch.object(cleanup_runner.scan, "check_admin", return_value=True), \
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
              mock.patch("builtins.input", return_value="yes"), \
              mock.patch.object(cleanup_runner.shutil, "which", side_effect=[None, "powershell.exe"]), \
              mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script:

@@ -223,13 +223,17 @@ def choose_wiztree_mode():
         print("Enter 1 for automatic, 2 for fast full-drive scanning, or 3 for standard scanning.")
 
 
-def check_admin():
-    """Check whether the current process has administrator privileges"""
+def check_admin_status() -> bool | None:
+    """Return the current Administrator status, or None when it cannot be checked."""
     try:
-        import ctypes
         return ctypes.windll.shell32.IsUserAnAdmin() != 0
     except Exception:
-        return False
+        return None
+
+
+def check_admin() -> bool:
+    """Return True only when the current process is confirmed elevated."""
+    return check_admin_status() is True
 
 
 def wait_for_file(filepath, timeout=30, stable_time=2):
