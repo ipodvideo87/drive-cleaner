@@ -2695,9 +2695,9 @@ foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target
 $backupEnabled = $false
 if (-not $PreviewOnly -and $SkipBackup) {{
     $backupEnabled = $false
-}} elseif (-not $PreviewOnly -and ($CreateBackup -or $Force)) {{
+}} elseif (-not $PreviewOnly -and $CreateBackup) {{
     $backupEnabled = $true
-}} elseif (-not $PreviewOnly) {{
+}} elseif (-not $PreviewOnly -and -not $Force) {{
     $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
         $backupEnabled = $true

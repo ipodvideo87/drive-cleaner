@@ -2570,7 +2570,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
         self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
         self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
-        self.assertIn("elseif (-not $PreviewOnly -and ($CreateBackup -or $Force)) {", script)
+        self.assertIn("elseif (-not $PreviewOnly -and $CreateBackup) {", script)
         self.assertIn("if (-not $PreviewOnly -and -not $Force) {", script)
         self.assertIn("Create a verified backup of these selected items first? [y/N]", script)
         self.assertIn("A verified recovery backup will be created before cleanup.", script)
@@ -3455,7 +3455,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
-    def test_noninteractive_cleanup_creates_verified_backup_by_default(self):
+    def test_noninteractive_cleanup_defaults_to_no_backup(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
@@ -3465,7 +3465,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
         ):
             target = Path(target_temp) / "candidate.tmp"
-            target.write_bytes(b"temporary fixture selected with default backup")
+            target.write_bytes(b"temporary fixture selected without default backup")
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
                 "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
@@ -3483,9 +3483,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(target.exists(), result.stdout + result.stderr)
-            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
-            self.assertIn("Backup created: mock-backup", result.stdout)
-            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+            self.assertIn("No backup will be created", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
+            self.assertNotIn("Creating backup before cleanup", result.stdout)
+            self.assertFalse(backup_calls.exists())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_noninteractive_cleanup_no_backup_switch_skips_backup(self):
@@ -3894,7 +3895,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with (
                 mock.patch.object(scan, "DATA_DIR", str(scan_data)),
                 mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"),
-                mock.patch.object(scan, "check_admin", return_value=False),
+                mock.patch.object(scan, "check_admin_status", return_value=False),
                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False),
                 mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_scan_export),
                 mock.patch.object(scan.time, "sleep", return_value=None),
@@ -5019,7 +5020,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                     result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                         capture_output=True, text=True, timeout=90,
                     )
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
