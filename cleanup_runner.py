@@ -13,17 +13,20 @@ def _find_powershell():
 
 def offer_to_preview_cleanup_script(script_path):
     """Run a guided preview; return True on success, False on failure, None if skipped."""
-    print("A read-only preview lists every eligible file and folder in this plan.")
+    print("A read-only preview shows every file and folder this plan could remove after its safety checks.")
     print("It repeats safety checks and may take time for large selections; it creates no backup and removes nothing.")
     try:
         while True:
-            answer = input("Show the full cleanup preview now? [Y/n]: ").strip().casefold()
+            answer = input(
+                "Show the full cleanup preview now? "
+                "[Y/n] (Enter or Y = preview every selected path; N = skip preview): "
+            ).strip().casefold()
             if answer in {"", "y", "yes"}:
                 break
             if answer in {"n", "no"}:
                 print("Preview skipped; the saved plan is unchanged and nothing was removed.")
                 return None
-            print("Enter Y or N.")
+            print("Enter Y to preview the selected paths or N to skip the preview.")
     except (EOFError, KeyboardInterrupt):
         print("Preview cancelled; the saved plan is unchanged and nothing was removed.")
         return None
@@ -62,16 +65,19 @@ def offer_to_run_cleanup_script(script_path):
         return False
 
     print("This window is running as Administrator.")
-    print("The plan will show these entries again so you can choose which to clean and confirm.")
+    print("The plan will show your saved selection again, then ask about a backup and final confirmation.")
     try:
         while True:
-            answer = input("Run the new cleanup plan now? [y/N]: ").strip().casefold()
+            answer = input(
+                "Run the saved cleanup plan now? "
+                "[y/N] (Y = open the plan and continue its confirmations; Enter or N = save for later): "
+            ).strip().casefold()
             if answer in {"", "n", "no"}:
                 print("Cleanup plan saved for later; nothing has been removed.")
                 return False
             if answer in {"y", "yes"}:
                 break
-            print("Enter Y or N.")
+            print("Enter Y to open the plan now or N to save it for later.")
     except (EOFError, KeyboardInterrupt):
         print("Launch cancelled; the cleanup plan is saved and nothing has been removed.")
         return False

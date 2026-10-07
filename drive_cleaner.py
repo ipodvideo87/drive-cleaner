@@ -3,6 +3,8 @@
 """Guided command-line entry point for Drive Cleanr."""
 
 import sys
+from datetime import datetime
+from pathlib import Path
 
 import analyze
 import backup
@@ -10,9 +12,13 @@ import scan
 from error_messages import safe_terminal_text
 
 
-def _prompt_yes_no(prompt, default=True):
-    """Read a yes/no answer; return None when the user cancels."""
-    suffix = " [Y/n]" if default else " [y/N]"
+def _prompt_yes_no(prompt, default=True, *, allow_cancel=True):
+    """Read a yes/no answer, optionally accepting Q to cancel."""
+    cancel_text = "; Q = cancel" if allow_cancel else ""
+    if default:
+        suffix = f" [Y/n] (Enter = Yes; N = No{cancel_text})"
+    else:
+        suffix = f" [y/N] (Y = Yes; Enter = No{cancel_text})"
     while True:
         answer = input(f"{prompt}{suffix}: ").strip().lower()
         if not answer:
@@ -21,15 +27,18 @@ def _prompt_yes_no(prompt, default=True):
             return True
         if answer in {"n", "no"}:
             return False
-        if answer in {"q", "quit", "cancel"}:
+        if allow_cancel and answer in {"q", "quit", "cancel"}:
             return None
-        print("Enter Y or N, or Q to cancel.")
+        if allow_cancel:
+            print("Enter Y for Yes, N for No, or Q to cancel.")
+        else:
+            print("Enter Y for Yes or N for No.")
 
 
 def _prompt_integer(prompt, default, minimum, invalid_message):
     """Read a bounded whole number; return None when the user cancels."""
     while True:
-        answer = input(f"{prompt} [{default}]: ").strip().lower()
+        answer = input(f"{prompt} [{default}] (Enter = {default}; Q = cancel): ").strip().lower()
         if not answer:
             return default
         if answer in {"q", "quit", "cancel"}:
@@ -62,7 +71,10 @@ def _prompt_scanner_executable_path(app):
         print(f"Found {scanner_name}: {shown_path}")
         while True:
             try:
-                answer = input("Use this scanner for this scan? [Y/n/q]: ").strip().lower()
+                answer = input(
+                    "Use this scanner for this scan? "
+                    "[Y/n/q] (Enter or Y = use it; N = choose another .exe; Q = cancel scan setup): "
+                ).strip().lower()
             except EOFError:
                 print("Scan setup cancelled.")
                 return None
@@ -70,16 +82,16 @@ def _prompt_scanner_executable_path(app):
                 print("\nScan setup cancelled.")
                 return None
             if answer in {"", "y", "yes"}:
-                return ""
+                return detected_executable
             if answer in {"n", "no"}:
                 break
             if answer in {"q", "quit", "cancel"}:
                 print("Scan setup cancelled.")
                 return None
-            print("Enter Y to use the found scanner, N to choose another .exe file, or Q to cancel.")
+            print("Enter Y to use this scanner, N to choose a different .exe file, or Q to cancel scan setup.")
     else:
         print(f"Drive Cleanr could not find {scanner_name} automatically.")
-    print("Enter the full path to its .exe file for this scan, or press Enter to cancel.")
+    print("Enter the full path to the scanner's .exe file. Press Enter to cancel scan setup.")
     while True:
         try:
             value = input(f"{scanner_name} executable path: ").strip()
@@ -89,13 +101,13 @@ def _prompt_scanner_executable_path(app):
         except KeyboardInterrupt:
             print("\nScan setup cancelled.")
             return None
-        if not value or value.casefold() in {"q", "quit", "cancel"}:
+        if not value:
             print("Scan setup cancelled.")
             return None
         normalized = scan.normalize_scanner_executable_path(value, app=app)
         if normalized:
             return normalized
-        print("That is not an existing .exe file at a full path. Try again, or press Enter to cancel.")
+        print("That is not an existing .exe file at a full path. Try again, or press Enter to cancel scan setup.")
 
 
 def _scan_flow():
@@ -106,13 +118,15 @@ def _scan_flow():
     if scanner_executable_path is None:
         return
     try:
-        target = input("Drive or folder to scan [C:]: ").strip() or "C:"
+        target = input("Drive or folder to scan [C:] (Enter = C:; Q = cancel): ").strip() or "C:"
         if target.lower() in {"q", "quit", "cancel"}:
             print("Scan cancelled.")
             return
         wiztree_mode = "auto"
         include_files = True
         max_depth = 0
+        if app == "windirstat":
+            print("WinDirStat uses its standard scan. Administrator access is optional and affects which files it can show.")
         if app == "wiztree":
             try:
                 normalized_target = scan._normalize_scan_target(target)
@@ -170,19 +184,123 @@ def _scan_flow():
         _pause()
         return
     try:
-        review_now = _prompt_yes_no("Review this scan now?", default=True)
+        review_now = _prompt_yes_no("Review this scan now?", default=True, allow_cancel=False)
     except EOFError:
         print("Review cancelled. The scan is saved for later.")
         return
     except KeyboardInterrupt:
         print("\nReview cancelled. The scan is saved for later.")
         return
-    if review_now is None:
-        print("Review cancelled. The scan is saved for later.")
-    elif review_now:
+    if review_now:
         analyze.run_tui(initial_csv=csv_path)
     else:
         print("Scan saved. Choose Review a previous scan from the main menu when you are ready.")
+
+
+def _saved_scans_menu():
+    """Let users review retained scan exports and remove older history safely."""
+    try:
+        saved_scans = scan.get_saved_scans()
+    except OSError as exc:
+        print(f"Could not read saved scan history: {safe_terminal_text(exc)}")
+        _pause()
+        return
+
+    print("\nManage saved scans")
+    print("Scan exports are Drive Cleanr's saved results, not files from the scanned drive.")
+    print("Removing an export does not remove any files or folders listed in that scan.")
+    print("A matching default cleanup plan may also be removed with its scan export.")
+    if not saved_scans:
+        print("No saved scan exports are available.")
+        _pause()
+        return
+
+    print("\nSaved scan export files, newest first:")
+    for index, scan_path in enumerate(saved_scans, start=1):
+        path = Path(scan_path)
+        try:
+            info = path.lstat()
+            size = analyze.format_size(info.st_size)
+            saved_at = datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, ValueError):
+            size = "unknown size"
+            saved_at = "unknown date"
+        print(
+            f"{index}) Scan export file | {size} | {saved_at} | "
+            f"{safe_terminal_text(str(path), fallback='saved scan')}"
+        )
+
+    while True:
+        try:
+            answer = input(
+                f"How many newest scan exports should stay saved? Enter a number from 1 to "
+                f"{len(saved_scans)} (Enter = cancel): "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nScan history was left unchanged.")
+            _pause()
+            return
+        if not answer:
+            print("Scan history was left unchanged.")
+            _pause()
+            return
+        try:
+            keep_latest = int(answer)
+        except ValueError:
+            print(f"Enter a whole number from 1 to {len(saved_scans)}, or press Enter to cancel.")
+            continue
+        if not 1 <= keep_latest <= len(saved_scans):
+            print(f"Enter a whole number from 1 to {len(saved_scans)}, or press Enter to cancel.")
+            continue
+        break
+
+    older_scans = saved_scans[keep_latest:]
+    if not older_scans:
+        print("No older scan exports need removal. Scan history was left unchanged.")
+        _pause()
+        return
+
+    print("\nThese older scan export files will be removed:")
+    print("A paired cleanup plan is listed only when its header verifies it was generated for that exact scan.")
+    print("Same-name files that cannot be verified are kept.")
+    for scan_path in older_scans:
+        print(f"  Scan export file | {safe_terminal_text(str(scan_path), fallback='saved scan')}")
+        plan_path = Path(scan.DATA_DIR).parent / f"{Path(scan_path).stem}.clean.ps1"
+        if scan._path_has_reparse_component(plan_path):
+            continue
+        try:
+            plan_path.lstat()
+        except OSError:
+            continue
+        if scan.is_paired_cleanup_plan(plan_path, scan_path):
+            print(
+                "  Paired Drive Cleanr cleanup plan | "
+                f"{safe_terminal_text(str(plan_path), fallback='cleanup plan')}"
+            )
+    print("Unrelated CSV files and unrelated PowerShell scripts are left alone.")
+    try:
+        confirmation = input(
+            "Type DELETE OLD SCANS to remove only this older scan history: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\nScan history was left unchanged.")
+        _pause()
+        return
+    if confirmation != "DELETE OLD SCANS":
+        print("Scan history removal cancelled.")
+        _pause()
+        return
+
+    removed_count = scan.cleanup_old_scans(
+        keep_latest=keep_latest,
+        include_scripts=True,
+        expected_scans=saved_scans,
+    )
+    if removed_count:
+        print(f"Removed {removed_count} saved scan file(s) or default cleanup plan(s).")
+    else:
+        print("No saved scan files or cleanup plans were removed.")
+    _pause()
 
 
 def _backup_menu():
@@ -195,10 +313,10 @@ def _backup_menu():
         print("4) Permanently delete a saved backup")
         print("0) Back to the main menu")
         try:
-            choice = input("Select an option [0-4]: ").strip().lower()
+            choice = input("Select an option [0-4] (0 = back to the main menu): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
-        if choice in {"0", "q", "back"}:
+        if choice == "0":
             return
         if choice == "1":
             backup.print_backups_table(backup.list_backups())
@@ -228,14 +346,16 @@ def _backup_menu():
             if choice == "3":
                 items = manifest.get("items")
                 restore_paths = []
+                manifest_version = backup._manifest_version(manifest)
                 valid_manifest = (
                     manifest.get("status") == "completed" and
+                    manifest_version is not None and
                     isinstance(items, list) and bool(items)
                 )
                 backup_roots = backup._existing_backup_roots() if valid_manifest else []
                 if valid_manifest:
                     for item in items:
-                        if not isinstance(item, dict):
+                        if not backup._restore_manifest_item_is_complete(item, manifest_version):
                             valid_manifest = False
                             break
                         restore_path = item.get("original_path")
@@ -247,7 +367,7 @@ def _backup_menu():
                             break
                         restore_paths.append(restore_path)
                 if not valid_manifest:
-                    print("This backup is incomplete or has invalid restore locations. It cannot be restored safely.")
+                    print("This backup is incomplete or contains invalid restore details. It cannot be restored safely.")
                     _pause()
                     continue
                 print("Original locations in this backup:")
@@ -293,11 +413,13 @@ def _print_welcome():
     Scan -> Review -> Choose files/folders -> Optional full preview -> Optional backup -> Confirm -> Clean
     Scanning and review never remove anything.
     Choose individual files, folders, or both from the review list.
-    Protected and project data are always kept. Higher-risk candidates inside a folder are kept unless you explicitly select their listed entries too.
-    A full read-only preview can list every eligible file and folder before cleanup.
-    The saved plan lets you choose the final items again before cleanup.
+    Choosing a folder includes files and subfolders, even if they are not listed separately.
+    Protected items and data in detected projects stay in place.
+    Higher-risk items inside a folder stay unless you select them too.
+    A full read-only preview can show every file and folder the plan could remove after its safety checks.
+    The saved plan shows your selected items again, then asks about an optional backup and final confirmation.
     Without a backup, removed items cannot be restored by Drive Cleanr.
-    Choose 1 to scan now or 2 to review a saved scan.
+    Choose 1 to scan, 2 to review a saved scan, 3 to manage saved scans, or 4 to manage recovery backups.
 """)
 
 
@@ -309,14 +431,15 @@ def main_menu():
         print("=" * 48)
         print("1) Scan a drive or folder (WizTree or WinDirStat)")
         print("2) Review a previous scan")
-        print("3) Manage recovery backups")
+        print("3) Manage saved scans")
+        print("4) Manage recovery backups")
         print("0) Exit")
         try:
-            choice = input("Select an option [0-3]: ").strip().lower()
+            choice = input("Select an option [0-4] (0 = exit): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye.")
             return
-        if choice in {"0", "q", "quit", "exit"}:
+        if choice == "0":
             print("Goodbye.")
             return
         if choice == "1":
@@ -324,9 +447,11 @@ def main_menu():
         elif choice == "2":
             analyze.run_tui()
         elif choice == "3":
+            _saved_scans_menu()
+        elif choice == "4":
             _backup_menu()
         else:
-            print("Enter 0, 1, 2, or 3.")
+            print("Choose 1, 2, 3, or 4, or enter 0 to exit.")
 
 
 def main():

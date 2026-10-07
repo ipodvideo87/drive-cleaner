@@ -746,6 +746,12 @@ CLEANABLE_PATTERNS = {
             {"pattern": "\\temp\\chocolatey", "known_temp_location": True, "component_match_required": True, "name": "Chocolatey package staging (confirm installs are complete and review contents)", "safe": False},
             {"pattern": "cargo-install", "component_prefix": True, "component_prefix_requires_suffix": True, "known_temp_location": True, "component_match_required": True, "name": "Cargo install build output (confirm the install completed and review its compiled files)", "safe": False},
             {"pattern": "\\chrome\\user data\\optguideondevicemodel", "name": "Chrome on-device AI model (close Chrome first; it may be downloaded again; consider disabling optimization-guide-on-device-model in chrome://flags)", "safe": False},
+            {"pattern": "\\.gradle\\caches", "name": "Gradle cache-named data (confirm it belongs to Gradle and no build is using it)", "safe": False},
+            {"pattern": "\\.cargo\\registry", "name": "Cargo registry-named data (confirm the owner and inspect its contents)", "safe": False},
+            {"pattern": "\\.nuget\\packages", "name": "NuGet package-folder data (confirm the owner and whether projects need it)", "safe": False},
+            {"pattern": "\\go\\pkg\\mod", "name": "Go module-folder data (confirm the owner and whether projects need it)", "safe": False},
+            {"pattern": "\\scoop\\cache", "name": "Scoop cache-named data (inspect its downloads; they may be useful offline)", "safe": False},
+            {"pattern": "\\ms-playwright", "name": "Playwright browser-folder data (confirm it contains Playwright browsers before cleanup)", "safe": False},
             {"pattern": "\\cache\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": "\\caches\\", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
             {"pattern": ".cache", "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)", "safe": False},
@@ -765,23 +771,23 @@ CLEANABLE_PATTERNS = {
     "low": {
         "name": "Low Priority (Confirm First)",
         "patterns": [
-            {"pattern": "\\.gradle\\caches", "name": "Gradle cache", "safe": False},
-            {"pattern": "\\.cargo\\registry", "name": "Cargo cache", "safe": False},
-            {"pattern": "\\.nuget\\packages", "name": "NuGet cache", "safe": False},
-            {"pattern": "\\go\\pkg\\mod", "name": "Go modules cache", "safe": False},
-            {"pattern": "\\scoop\\cache", "name": "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)", "safe": False},
+            {"pattern": "\\.gradle\\caches", "default_cache": "gradle", "configured_cache_root": True, "name": "Gradle cache", "safe": False},
+            {"pattern": "\\.cargo\\registry", "default_cache": "cargo", "configured_cache_root": True, "name": "Cargo cache", "safe": False},
+            {"pattern": "\\.nuget\\packages", "default_cache": "nuget", "configured_cache_root": True, "name": "NuGet cache", "safe": False},
+            {"pattern": "\\go\\pkg\\mod", "default_cache": "go_modules", "configured_cache_root": True, "name": "Go modules cache", "safe": False},
+            {"pattern": "\\scoop\\cache", "default_cache": "scoop", "configured_cache_root": True, "name": "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)", "safe": False},
             {"pattern": "\\programdata\\nvidia corporation\\nvidia app\\updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
             {"pattern": "\\programdata\\nvidia corporation\\nvapp-updateframework\\ota-artifacts", "name": "NVIDIA App driver-update files (confirm no download or installation is active; may be needed to retry an update)", "safe": False},
-            {"pattern": "\\ms-playwright", "name": "Playwright test browsers (can be reinstalled with `npx playwright install`)", "safe": False},
+            {"pattern": "\\ms-playwright", "default_cache": "playwright", "configured_cache_root": True, "name": "Playwright test browsers (can be reinstalled with `npx playwright install`)", "safe": False},
             {"pattern": "indexeddb", "browser_profile": True, "name": "Chrome/Edge profile IndexedDB data (offline web-app data or login state; deleting it can sign you out or lose data)", "safe": False},
         ]
     }
 }
 
 # Windows defaults documented by the package managers and applications.
-# Custom cache locations are not promoted to the lower-risk tier merely
-# because their names contain a familiar cache component.
-_DEFAULT_CACHE_PROFILE_SUFFIXES = {
+# Tool-specific labels are limited to these defaults or explicit environment
+# roots; custom and lookalike paths keep a caution-only label.
+_RECOGNIZED_CACHE_PROFILE_SUFFIXES = {
     "npm": (
         ("appdata", "local", "npm-cache"),
         ("appdata", "roaming", "npm-cache"),
@@ -790,8 +796,14 @@ _DEFAULT_CACHE_PROFILE_SUFFIXES = {
     "puppeteer": ((".cache", "puppeteer"),),
     "electron": (("appdata", "local", "electron", "cache"),),
     "yarn": (("appdata", "local", "yarn", "cache"),),
+    "gradle": ((".gradle", "caches"),),
+    "cargo": ((".cargo", "registry"),),
+    "nuget": ((".nuget", "packages"),),
+    "go_modules": (("go", "pkg", "mod"),),
+    "scoop": (("scoop", "cache"),),
+    "playwright": (("appdata", "local", "ms-playwright"),),
 }
-_DEFAULT_CACHE_ENVIRONMENT_SUFFIXES = {
+_RECOGNIZED_CACHE_ENVIRONMENT_SUFFIXES = {
     "npm": (
         ("LOCALAPPDATA", ("npm-cache",)),
         ("APPDATA", ("npm-cache",)),
@@ -800,6 +812,47 @@ _DEFAULT_CACHE_ENVIRONMENT_SUFFIXES = {
     "puppeteer": (("USERPROFILE", (".cache", "puppeteer")),),
     "electron": (("LOCALAPPDATA", ("electron", "Cache")),),
     "yarn": (("LOCALAPPDATA", ("Yarn", "Cache")),),
+    "gradle": (
+        ("GRADLE_USER_HOME", ("caches",)),
+        ("USERPROFILE", (".gradle", "caches")),
+    ),
+    "cargo": (
+        ("CARGO_HOME", ("registry",)),
+        ("USERPROFILE", (".cargo", "registry")),
+    ),
+    "nuget": (
+        ("NUGET_PACKAGES", ()),
+        ("USERPROFILE", (".nuget", "packages")),
+    ),
+    "go_modules": (
+        ("GOMODCACHE", ()),
+        ("GOPATH", ("pkg", "mod")),
+        ("USERPROFILE", ("go", "pkg", "mod")),
+    ),
+    "scoop": (
+        ("SCOOP_CACHE", ()),
+        ("SCOOP", ("cache",)),
+        ("USERPROFILE", ("scoop", "cache")),
+    ),
+    "playwright": (
+        ("LOCALAPPDATA", ("ms-playwright",)),
+        ("USERPROFILE", ("AppData", "Local", "ms-playwright")),
+        ("PLAYWRIGHT_BROWSERS_PATH", ()),
+    ),
+}
+_CONFIGURED_CACHE_ROOT_OVERRIDE_SUFFIXES = {
+    "gradle": (("GRADLE_USER_HOME", ("caches",)),),
+    "cargo": (("CARGO_HOME", ("registry",)),),
+    "nuget": (("NUGET_PACKAGES", ()),),
+    "go_modules": (
+        ("GOMODCACHE", ()),
+        ("GOPATH", ("pkg", "mod")),
+    ),
+    "scoop": (
+        ("SCOOP_CACHE", ()),
+        ("SCOOP", ("cache",)),
+    ),
+    "playwright": (("PLAYWRIGHT_BROWSERS_PATH", ()),),
 }
 
 # Safety exclusions: never recommend these paths for cleanup.
@@ -881,35 +934,47 @@ MANUAL_REVIEW_LABEL = "Large file (manual review required)"
 PROJECT_MARKERS = (
     ".drive-cleanr-protect", ".git", ".gitignore", ".gitattributes", ".editorconfig",
     ".hg", ".svn", ".idea", ".vscode", ".vs", ".cursorrules",
-    ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf",
+    ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf", ".devcontainer.json",
     "agents.md", "agents.override.md", "claude.md", "gemini.md",
     "copilot-instructions.md", "skill.md",
-    "pyproject.toml", "package.json", "cargo.toml",
-    "go.mod", "go.work", "cmakelists.txt", "cmakepresets.json", "makefile", "meson.build",
+    "pyproject.toml", "package.json", "cargo.toml", "package.swift", "podfile",
+    "podfile.lock", "workspace", "workspace.bazel", "module.bazel", "build.bazel",
+    "flake.nix", "flake.lock", "terragrunt.hcl", "build.zig", "build.zig.zon",
+    "cabal.project", "stack.yaml", "dune-project", "dune-workspace",
+    "global.json", "directory.build.props", "directory.build.targets",
+    "directory.solution.props", "directory.solution.targets", "deps.edn", "project.clj",
+    "go.mod", "go.work", "chart.yaml", "cmakelists.txt", "cmakepresets.json", "makefile", "meson.build",
     "build.ninja", "setup.py", "setup.cfg", "requirements.txt", "pipfile", "pipfile.lock",
     "poetry.lock", "uv.lock", "tox.ini", "pytest.ini", "environment.yml", "environment.yaml",
-    "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json",
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "deno.json",
     "deno.jsonc", "cargo.lock", "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle",
     "settings.gradle.kts", "gradlew", "gradlew.bat", "composer.json", "composer.lock", "gemfile",
     "gemfile.lock", "rakefile", "dockerfile", "containerfile", "docker-compose.yml",
     "docker-compose.yaml", "build.sbt", "mix.exs", "pubspec.yaml", "project.godot", "projectsettings",
+    "renv.lock", "description", "project.toml", "juliaproject.toml", "manifest.toml",
+    "juliamanifest.toml",
 )
 PROJECT_MARKER_SUFFIXES = (
-    ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj",
-    ".uproject", ".uplugin", ".code-workspace", "-requirements.txt", "-requirements.in",
+    ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj", ".rproj",
+    ".uproject", ".uplugin", ".code-workspace", ".tf", ".tf.json", ".tfvars",
+    ".tfvars.json", ".cabal", ".opam", ".wsb", "-requirements.txt", "-requirements.in",
 )
+PROJECT_MARKER_DIRECTORY_SUFFIXES = (".xcodeproj", ".xcworkspace", ".devcontainer")
 PYTHON_REQUIREMENTS_MARKER_PATTERN = re.compile(
     r"^requirements(?:[-_.][a-z0-9][a-z0-9_.-]*)?\.(?:txt|in)$"
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
-_PROFILE_ROOT_IGNORED_MARKERS = frozenset({
+_PROFILE_ROOT_IGNORED_MARKER_LIST = (
     ".gitignore", ".editorconfig", ".vscode",
     ".cursorrules", ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf",
     "agents.md", "agents.override.md", "claude.md", "gemini.md",
     "copilot-instructions.md", "skill.md",
     "package.json", "package-lock.json", "npm-shrinkwrap.json", "bun.lock",
     "bun.lockb", "pnpm-lock.yaml", "yarn.lock",
-})
+    "global.json", "directory.build.props", "directory.build.targets",
+    "directory.solution.props", "directory.solution.targets",
+)
+_PROFILE_ROOT_IGNORED_MARKERS = frozenset(_PROFILE_ROOT_IGNORED_MARKER_LIST)
 WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
     *(f"COM{index}" for index in range(1, 10)),
@@ -1089,7 +1154,10 @@ _CLEANABLE_RULES = tuple(sorted(
 _CLEANUP_RULES_BY_COMPONENT = {}
 _CLEANUP_RULES_BY_SEQUENCE = {}
 _CLEANUP_PREFIX_RULES = []
+_CLEANUP_CONFIGURED_ROOT_RULES = []
 for _rule_index, (_priority, _pattern_info, _pattern_components) in enumerate(_CLEANABLE_RULES):
+    if _pattern_info.get("configured_cache_root"):
+        _CLEANUP_CONFIGURED_ROOT_RULES.append((_rule_index, _pattern_info["default_cache"]))
     if _pattern_info.get("component_prefix"):
         _CLEANUP_PREFIX_RULES.append((
             _rule_index,
@@ -1109,6 +1177,7 @@ _CLEANUP_RULES_BY_SEQUENCE = {
     for sequence, indices in _CLEANUP_RULES_BY_SEQUENCE.items()
 }
 _CLEANUP_PREFIX_RULES = tuple(_CLEANUP_PREFIX_RULES)
+_CLEANUP_CONFIGURED_ROOT_RULES = tuple(_CLEANUP_CONFIGURED_ROOT_RULES)
 _CLEANUP_KNOWN_TEMP_CATCHALL_RULES = tuple(
     index for index, (_priority, info, _components) in enumerate(_CLEANABLE_RULES)
     if info.get("known_temp_location") and not info.get("component_match_required")
@@ -1141,7 +1210,8 @@ def _path_match_index(components):
 
 
 def _candidate_cleanup_rules(path, components, component_set, sequences,
-                             known_temp_location=None):
+                             known_temp_location=None,
+                             configured_cache_root_index=None):
     """Return only rules whose exact path components could match this path."""
     if known_temp_location is None:
         known_temp_location = _is_known_temp_location(path, components)
@@ -1157,6 +1227,13 @@ def _candidate_cleanup_rules(path, components, component_set, sequences,
                 (not requires_suffix or len(component) > len(prefix))
                 for component in components):
             candidate_indices.add(index)
+    if configured_cache_root_index is None:
+        configured_cache_root_index = _configured_cleanup_root_rule_index()
+    if configured_cache_root_index:
+        path_key = _path_key(path)
+        for index, _cache_name, root_key in configured_cache_root_index:
+            if path_key == root_key or path_key.startswith(root_key + "\\"):
+                candidate_indices.add(index)
     if known_temp_location:
         candidate_indices.update(_CLEANUP_KNOWN_TEMP_CATCHALL_RULES)
     return (_CLEANABLE_RULES[index] for index in sorted(candidate_indices))
@@ -1177,7 +1254,8 @@ def _is_excluded_path(path, components=None, component_set=None, sequences=None)
 
 
 def _cleanup_rule_matches(pattern_info, pattern_components, components, component_set,
-                          sequences, path=None, known_temp_location=None):
+                          sequences, path=None, known_temp_location=None,
+                          configured_cache_root_index=None):
     """Match a rule's component pattern and any required path-root prefix."""
     root = pattern_info.get("root")
     if root:
@@ -1197,6 +1275,10 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
         (len(pattern_components) > 1 and
          pattern_components in sequences.get(len(pattern_components), ()))
     )
+    if (not component_match and pattern_info.get("configured_cache_root") and path is not None and
+            _is_under_configured_tool_cache_root(
+                path, pattern_info["default_cache"], configured_cache_root_index)):
+        component_match = True
     if pattern_info.get("component_prefix"):
         prefix = pattern_components[-1]
         prefix_match = any(
@@ -1224,7 +1306,7 @@ def _cleanup_rule_matches(pattern_info, pattern_components, components, componen
     elif not component_match:
         return False
     if (pattern_info.get("default_cache") and
-            not _is_default_package_cache_location(path, pattern_info["default_cache"])):
+            not _is_recognized_tool_cache_location(path, pattern_info["default_cache"])):
         return False
     if pattern_info.get("browser_profile"):
         indexeddb_index = components.index("indexeddb")
@@ -1275,18 +1357,15 @@ def _path_is_at_or_below(path, root):
     return path_key == root_key or path_key.startswith(root_key + "\\")
 
 
-def _is_default_package_cache_location(path, cache_name):
-    """Recognize a package cache only at its documented Windows default path."""
-    profile_suffixes = _DEFAULT_CACHE_PROFILE_SUFFIXES.get(cache_name)
+def _is_recognized_tool_cache_location(path, cache_name):
+    """Recognize tool-managed cache paths only at known or configured roots."""
+    profile_suffixes = _RECOGNIZED_CACHE_PROFILE_SUFFIXES.get(cache_name)
     if not profile_suffixes:
         return False
 
-    for environment_name, suffix in _DEFAULT_CACHE_ENVIRONMENT_SUFFIXES[cache_name]:
-        environment_root = os.environ.get(environment_name)
-        if environment_root:
-            expected_root = ntpath.join(environment_root, *suffix)
-            if _path_is_at_or_below(path, expected_root):
-                return True
+    if any(_path_is_at_or_below(path, root) for root in _tool_cache_environment_roots(
+            cache_name, _RECOGNIZED_CACHE_ENVIRONMENT_SUFFIXES)):
+        return True
 
     normalized = str(path).replace("/", "\\")
     drive, tail = ntpath.splitdrive(normalized)
@@ -1306,14 +1385,61 @@ def _is_default_package_cache_location(path, cache_name):
     )
 
 
+def _tool_cache_environment_roots(cache_name, root_suffixes):
+    """Yield absolute cache roots configured by the current environment."""
+    for environment_name, suffix in root_suffixes.get(cache_name, ()):
+        environment_root = os.environ.get(environment_name)
+        if not environment_root:
+            continue
+        roots = [environment_root]
+        if environment_name == "GOPATH":
+            # Go uses the first GOPATH entry for its default module cache.
+            roots = [environment_root.split(ntpath.pathsep, 1)[0]]
+        for root in roots:
+            root = root.strip()
+            if root:
+                yield ntpath.join(root, *suffix)
+
+
+def _is_under_configured_tool_cache_root(path, cache_name, root_index=None):
+    """Match a path against configured cache roots, reusing an analysis snapshot when available."""
+    if root_index is None:
+        return any(
+            _path_is_at_or_below(path, root)
+            for root in _tool_cache_environment_roots(
+                cache_name, _CONFIGURED_CACHE_ROOT_OVERRIDE_SUFFIXES
+            )
+        )
+    path_key = _path_key(path)
+    return any(
+        indexed_cache_name == cache_name and
+        (path_key == root_key or path_key.startswith(root_key + "\\"))
+        for _index, indexed_cache_name, root_key in root_index
+    )
+
+
+def _configured_cleanup_root_rule_index():
+    """Snapshot configured cache roots for fast per-row path matching."""
+    root_rules = []
+    for index, cache_name in _CLEANUP_CONFIGURED_ROOT_RULES:
+        for root in _tool_cache_environment_roots(
+                cache_name, _CONFIGURED_CACHE_ROOT_OVERRIDE_SUFFIXES):
+            root_key = _path_key(root).rstrip("\\")
+            if root_key:
+                root_rules.append((index, cache_name, root_key))
+    return tuple(root_rules)
+
+
 def _matches_cleanup_rule(path, priorities, name):
     """Require the analyzer's most-specific cleanup rule, priority, and label."""
     components = _path_components(path)
     component_set, sequences = _path_match_index(components)
     known_temp_location = _is_known_temp_location(path, components)
     known_temp_root = None
+    configured_cache_root_index = _configured_cleanup_root_rule_index()
     for priority, pattern_info, pattern_components in _candidate_cleanup_rules(
-            path, components, component_set, sequences, known_temp_location):
+            path, components, component_set, sequences, known_temp_location,
+            configured_cache_root_index):
         if (pattern_info.get("known_temp_location") and
                 (known_temp_root if known_temp_root is not None else
                  _is_known_temp_root(path, components))):
@@ -1323,19 +1449,23 @@ def _matches_cleanup_rule(path, priorities, name):
             known_temp_root = False
         if _cleanup_rule_matches(
                 pattern_info, pattern_components, components, component_set,
-                sequences, path=path, known_temp_location=known_temp_location):
+                sequences, path=path, known_temp_location=known_temp_location,
+                configured_cache_root_index=configured_cache_root_index):
             return priority in priorities and pattern_info["name"] == name
     return False
 
 
-def _matches_any_cleanup_rule(path):
+def _matches_any_cleanup_rule(path, configured_cache_root_index=None):
     """Return whether a path is covered by any automatic cleanup rule."""
     components = _path_components(path)
     component_set, sequences = _path_match_index(components)
     known_temp_location = _is_known_temp_location(path, components)
     known_temp_root = None
+    if configured_cache_root_index is None:
+        configured_cache_root_index = _configured_cleanup_root_rule_index()
     for _priority, pattern_info, pattern_components in _candidate_cleanup_rules(
-            path, components, component_set, sequences, known_temp_location):
+            path, components, component_set, sequences, known_temp_location,
+            configured_cache_root_index):
         if (pattern_info.get("known_temp_location") and
                 (known_temp_root if known_temp_root is not None else
                  _is_known_temp_root(path, components))):
@@ -1345,7 +1475,8 @@ def _matches_any_cleanup_rule(path):
             known_temp_root = False
         if _cleanup_rule_matches(
                 pattern_info, pattern_components, components, component_set,
-                sequences, path=path, known_temp_location=known_temp_location):
+                sequences, path=path, known_temp_location=known_temp_location,
+                configured_cache_root_index=configured_cache_root_index):
             return True
     return False
 
@@ -1389,12 +1520,34 @@ def _inside_project_tree(path, directory, cache, detected_projects=None):
     return project_found
 
 
-def _directory_has_project_marker(directory, marker_out=None):
-    """Check common exact project markers and Windows project-file suffixes."""
+def _is_user_profile_root(directory):
+    """Recognize conventional profile roots and the active Windows profile path."""
+    normalized_directory = ntpath.normcase(
+        ntpath.normpath(str(directory).replace("/", "\\"))
+    )
+    profile_path = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    if profile_path and not profile_path.startswith("~"):
+        normalized_profile = ntpath.normcase(
+            ntpath.normpath(str(profile_path).replace("/", "\\"))
+        )
+        if normalized_directory == normalized_profile:
+            return True
+
     _, tail = ntpath.splitdrive(str(directory).replace("/", "\\"))
     parts = [part for part in tail.strip("\\").split("\\") if part]
-    is_profile_root = (len(parts) == 2 and
-                       parts[0].casefold() in {"users", "documents and settings"})
+    return (len(parts) == 2 and
+            parts[0].casefold() in {"users", "documents and settings"})
+
+
+def _directory_has_project_marker(directory, marker_out=None):
+    """Check project manifests, project-file suffixes, and bundle directories."""
+    directory_path = os.path.normpath(str(directory))
+    directory_name = os.path.basename(directory_path).casefold()
+    if directory_name.endswith(PROJECT_MARKER_DIRECTORY_SUFFIXES):
+        if marker_out is not None:
+            marker_out.append(os.path.basename(directory_path))
+        return True
+    is_profile_root = _is_user_profile_root(directory)
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
@@ -1405,6 +1558,7 @@ def _directory_has_project_marker(directory, marker_out=None):
                 if (is_profile_root and
                         (name in _PROFILE_ROOT_IGNORED_MARKERS or
                          name.endswith(".code-workspace") or
+                         name.endswith(".wsb") or
                          name.endswith(("-requirements.txt", "-requirements.in")) or
                          PYTHON_REQUIREMENTS_MARKER_PATTERN.fullmatch(name))):
                     continue
@@ -1412,9 +1566,23 @@ def _directory_has_project_marker(directory, marker_out=None):
                     if marker_out is not None:
                         marker_out.append(entry.name)
                     return True
+                if (entry.is_dir(follow_symlinks=False) and
+                        name.endswith(PROJECT_MARKER_DIRECTORY_SUFFIXES)):
+                    if marker_out is not None:
+                        marker_out.append(entry.name)
+                    return True
                 if (entry.is_file(follow_symlinks=False) and
                         (name.endswith(PROJECT_MARKER_SUFFIXES) or
                          PYTHON_REQUIREMENTS_MARKER_PATTERN.fullmatch(name))):
+                    if marker_out is not None:
+                        marker_out.append(entry.name)
+                    return True
+                if (entry.is_symlink() and not entry.is_dir() and
+                        (name.endswith(PROJECT_MARKER_SUFFIXES) or
+                         PYTHON_REQUIREMENTS_MARKER_PATTERN.fullmatch(name))):
+                    # Keep analyzer detection aligned with the generated plan:
+                    # a linked project manifest still signals project data,
+                    # even though cleanup will never follow or remove the link.
                     if marker_out is not None:
                         marker_out.append(entry.name)
                     return True
@@ -1466,36 +1634,66 @@ def _ensure_output_outside_targets(output_path, items):
             raise ValueError("Choose an output path outside the selected cleanup targets")
 
 
+def _path_depth(path):
+    """Count normalized path components so redundant separators do not skew ordering."""
+    return len(_path_components(_path_key(path)))
+
+
+def _path_component_keys(path):
+    """Return normalized components including the drive so trie keys stay volume-specific."""
+    normalized = _path_key(path)
+    drive, tail = ntpath.splitdrive(normalized)
+    components = _path_components(normalized, tail)
+    return ((drive,) if drive else ()) + tuple(components)
+
+
 def _non_overlapping_items(items):
     """Keep the outermost candidate paths so parent/child sizes are not added."""
-    ordered = sorted(items, key=lambda item: (item["path"].count("\\") + item["path"].count("/"), -item["size"]))
+    ordered = sorted(items, key=lambda item: (_path_depth(item["path"]), -item["size"]))
     selected = []
+    path_trie = {}
+    terminal = object()
     for item in ordered:
-        if any(_path_key(item["path"]) == _path_key(parent["path"]) or
-               _is_under(item["path"], parent["path"]) for parent in selected):
+        node = path_trie
+        contained = False
+        for component in _path_component_keys(item["path"]):
+            if terminal in node:
+                contained = True
+                break
+            node = node.setdefault(component, {})
+        if contained or terminal in node:
             continue
         selected.append(item)
+        node[terminal] = True
     return selected
 
 
 def _nested_candidate_pairs(items):
     """Return each nested candidate with its nearest listed parent candidate."""
     pairs = []
+    path_trie = {}
+    terminal = object()
+    for item in items:
+        node = path_trie
+        for component in _path_component_keys(item["path"]):
+            node = node.setdefault(component, {})
+        node.setdefault(terminal, item)
+
     for child in items:
-        parents = [
-            candidate for candidate in items
-            if candidate is not child and _is_under(child["path"], candidate["path"])
-        ]
-        if parents:
-            parent = max(
-                parents,
-                key=lambda item: item["path"].count("\\") + item["path"].count("/"),
-            )
+        node = path_trie
+        parent = None
+        components = _path_component_keys(child["path"])
+        for component in components[:-1]:
+            node = node.get(component)
+            if node is None:
+                break
+            parent = node.get(terminal, parent)
+        if parent is not None:
             pairs.append((parent, child))
     return sorted(
         pairs,
         key=lambda pair: (
-            pair[1]["path"].count("\\") + pair[1]["path"].count("/"),
+            _path_depth(pair[1]["path"]),
             _path_key(pair[1]["path"]),
         ),
     )
@@ -1509,7 +1707,8 @@ def _nested_candidate_summary(items, pairs=None, pair_limit=5):
         return []
 
     lines = [
-        "Some listed items are inside a listed folder. Each row is shown separately, but the same space is counted only once in the total."
+        "A listed folder can contain another listed item. Each folder row shows its full scan size, "
+        "while review-group and overall estimates count each file once."
     ]
     for parent, child in pairs[:pair_limit]:
         lines.append(
@@ -1539,7 +1738,12 @@ def _tier_size_estimates(categories, nested_pairs=None):
 
     caution_order = {"low": 0, "medium": 1, "high": 2}
 
-    def assign(item, available_size):
+    pending = [
+        (item, max(0, int(item["size"])))
+        for item in reversed(_non_overlapping_items(items))
+    ]
+    while pending:
+        item, available_size = pending.pop()
         remaining = max(0, int(available_size))
         children = sorted(
             children_by_parent.get(id(item), []),
@@ -1558,11 +1762,7 @@ def _tier_size_estimates(categories, nested_pairs=None):
         priority = priority_by_id.get(id(item))
         if priority in estimates:
             estimates[priority] += remaining
-        for child, allocated in allocations:
-            assign(child, allocated)
-
-    for item in _non_overlapping_items(items):
-        assign(item, max(0, int(item["size"])))
+        pending.extend(reversed(allocations))
 
     return estimates
 
@@ -1772,6 +1972,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         expanded_candidate_keys = set()
         manual_file_heap = []
         manual_file_sequence = 0
+        configured_cache_root_index = _configured_cleanup_root_rule_index()
         for row in reader:
             rows_processed += 1
             if progress_callback and rows_processed % ANALYSIS_PROGRESS_INTERVAL == 0:
@@ -1845,10 +2046,11 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 known_temp_location = _is_known_temp_location(path, path_components)
                 for priority, pattern_info, pattern_components in _candidate_cleanup_rules(
                         path, path_components, path_component_set, path_sequences,
-                        known_temp_location):
+                        known_temp_location, configured_cache_root_index):
                     if _cleanup_rule_matches(pattern_info, pattern_components, path_components,
                                              path_component_set, path_sequences, path=path,
-                                             known_temp_location=known_temp_location):
+                                             known_temp_location=known_temp_location,
+                                             configured_cache_root_index=configured_cache_root_index):
                         matched_cleanup_rule = True
                         # Folder browsing honors the review level the user
                         # selected. Do not let a more cautious match fall
@@ -2016,7 +2218,8 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         manual_files_seen.add(path_key)
         current_path = path.rstrip('\\/')
         if (_path_has_reparse_component_cached(current_path, final_manual_reparse_cache) or
-                _is_excluded_path(path) or _matches_any_cleanup_rule(path) or
+                _is_excluded_path(path) or
+                _matches_any_cleanup_rule(path, configured_cache_root_index) or
                 not os.path.isfile(current_path) or os.path.isdir(current_path)):
             continue
         if not _live_file_size_matches_scan(current_path, logical_size):
@@ -2101,7 +2304,7 @@ def print_report(results, show_all_items=False, item_limit=10):
     elif results.get("scan_mode") == "wiztree_fast":
         print("Scan mode: WizTree fast full-drive scan.")
     elif results.get("scan_mode") == "windirstat":
-        print("Scan mode: WinDirStat; saved filters and access permissions apply.")
+        print("Scan mode: WinDirStat; its saved filters and this account's access can leave some files out.")
 
     if results["total_size"] > 0:
         if results.get("space_source") == "current":
@@ -2119,10 +2322,6 @@ def print_report(results, show_all_items=False, item_limit=10):
     nested_pairs = _nested_candidate_pairs(all_items)
     for line in _nested_candidate_summary(all_items, nested_pairs):
         print(line)
-    if nested_pairs:
-        print(
-            "The same space is counted once in the total, even when items appear in different review groups. Each folder row still shows its full size."
-        )
     tier_estimates = _tier_size_estimates(results["categories"], nested_pairs)
 
     for priority in ["high", "medium", "low"]:
@@ -2152,11 +2351,11 @@ def print_report(results, show_all_items=False, item_limit=10):
 
     print("=" * 60)
     unique_size = sum(item["size"] for item in _non_overlapping_items(all_items))
-    print(f"Estimated space in automatic cleanup suggestions (counted once): {format_size(unique_size)}")
+    print(f"Estimated space in automatic cleanup suggestions (each file counted once): {format_size(unique_size)}")
     print("Drive Cleanr protects Windows system data, recovery data, personal folders, messaging data, and credentials.")
-    print("WizTree allocated sizes are used when available; hard-linked files are excluded. Actual free space may differ.")
-    print("Folder sizes can include protected contents that cleanup keeps, so the space recovered may be lower.")
-    print("Lower-risk items are usually recreatable, but review every path before cleanup.")
+    print("WizTree's used-space estimate is used when available. Files Windows stores once under multiple paths are excluded; actual free space may differ.")
+    print("A folder's size can include protected contents that cleanup keeps, so the space recovered may be lower.")
+    print("Lower-risk means an item is often temporary or cached data that an app can recreate; it does not guarantee that a specific item is safe to remove. Review every path.")
     if results.get("stale_candidate_count", 0):
         print(f"Skipped {results['stale_candidate_count']} listed files or folders that no longer exist.")
     if results.get("changed_candidate_count", 0):
@@ -2374,6 +2573,8 @@ def generate_clean_script(results, output_path, priority="high", selected_paths=
 
     script = '''# Drive Cleanr Cleanup Plan - {priority_name}
 # Auto-generated: {timestamp}
+# Drive Cleanr Plan Format: 1
+# Source scan identity: {scan_identity}
 # Source scan last modified: {scan_file_time}
 # Run in PowerShell with only the permissions needed for the selected paths.
 
@@ -2412,10 +2613,12 @@ function Write-PreviewFolderSizeProgress([long]$Current, [long]$Total) {{
     }}
     $status = "$Current of $Total folder-size entries checked."
     $percentComplete = [int](100.0 * $Current / $Total)
-    Write-Progress -Activity "Summarizing eligible folder sizes" -Status $status -PercentComplete $percentComplete
+    Write-Progress -Activity "Adding up file sizes in folders" -Status $status -PercentComplete $percentComplete
     Write-Host "  Folder size summary: $status" -ForegroundColor Gray
 }}
 
+Write-Host "Loading cleanup safety checks. This may take a moment; nothing has been removed." -ForegroundColor Cyan
+Write-Host "This saved cleanup plan does not update when Drive Cleanr changes. Create a new plan after updating the program." -ForegroundColor Gray
 __NATIVE_CLEANUP_GUARD__
 
 Write-Host "========================================" -ForegroundColor Cyan
@@ -2477,8 +2680,27 @@ $projectMarkers = @(
 {project_markers}
 )
 $projectMarkerSuffixPattern = [regex]::new({project_marker_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
+$projectMarkerDirectorySuffixPattern = [regex]::new({project_marker_directory_suffix_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
 $pythonRequirementsMarkerPattern = [regex]::new({python_requirements_marker_pattern}, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase -bor [System.Text.RegularExpressions.RegexOptions]::Compiled)
-$profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode', '.cursorrules', '.claude', '.cursor', '.gemini', '.github', '.opencode', '.windsurf', 'agents.md', 'agents.override.md', 'claude.md', 'gemini.md', 'copilot-instructions.md', 'skill.md', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'bun.lock', 'bun.lockb', 'pnpm-lock.yaml', 'yarn.lock')
+$profileRootIgnoredMarkers = @({profile_root_ignored_markers})
+$projectMarkerDirectoryCache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$activeUserProfileRoot = $null
+if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {{
+    try {{
+        $activeUserProfileRoot = [System.IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\\')
+    }} catch {{ }}
+}}
+
+function Get-ProjectCheckProgressPath([string]$Path, [string]$EntryName) {{
+    $normalizedPath = $Path.TrimEnd('\\') + '\\'
+    $isProtectedItem = $protectedPathPattern.IsMatch($normalizedPath) -or
+        ($projectMarkers -contains $EntryName) -or
+        $projectMarkerSuffixPattern.IsMatch($EntryName) -or
+        $projectMarkerDirectorySuffixPattern.IsMatch($EntryName) -or
+        $pythonRequirementsMarkerPattern.IsMatch($EntryName)
+    if ($isProtectedItem) {{ return "(protected item; path hidden)" }}
+    return Get-CleanupProgressPath $Path
+}}
 
 function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress = $false) {{
     try {{
@@ -2487,8 +2709,22 @@ function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress 
             ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
             return $true
         }}
-        $normalizedDirectory = $Directory.TrimEnd('\\')
+        $normalizedDirectory = [System.IO.Path]::GetFullPath($directoryItem.FullName).TrimEnd('\\')
+        if ($projectMarkerDirectorySuffixPattern.IsMatch([System.IO.Path]::GetFileName($normalizedDirectory))) {{
+            return $true
+        }}
+        $directoryWriteTicks = [long]$directoryItem.LastWriteTimeUtc.Ticks
+        $cachedProjectCheck = $null
+        if ($projectMarkerDirectoryCache.TryGetValue($normalizedDirectory, [ref]$cachedProjectCheck) -and
+            [long]$cachedProjectCheck.LastWriteTicks -eq $directoryWriteTicks) {{
+            return [bool]$cachedProjectCheck.HasProjectMarker
+        }}
         $isProfileRoot = $normalizedDirectory -match '^[A-Za-z]:\\\\(?:Users|Documents and Settings)\\\\[^\\\\]+$'
+        if (-not $isProfileRoot -and $activeUserProfileRoot) {{
+            $isProfileRoot = [string]::Equals(
+                $normalizedDirectory, $activeUserProfileRoot,
+                [System.StringComparison]::OrdinalIgnoreCase)
+        }}
         $entryCount = 0
         $hasProjectMarker = $false
         $projectCheckWatch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -2499,20 +2735,24 @@ function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress 
             $elapsedProjectSeconds = [int]$projectCheckWatch.Elapsed.TotalSeconds
             if ($ShowProgress -and ($entryCount -eq 1 -or ($entryCount % 100) -eq 0 -or
                 ($elapsedProjectSeconds - $lastProjectNoticeSeconds) -ge 10)) {{
+                $projectCheckProgressPath = Get-ProjectCheckProgressPath $entryPath $entryName
                 $projectCheckStatus = if ($entryCount -eq 1) {{
-                    "First entry checked for project files."
+                    "First entry checked for project files. Current item: $projectCheckProgressPath. This check removes no files."
                 }} else {{
-                    "$entryCount entries checked for project files."
+                    "$entryCount entries checked for project files. Current item: $projectCheckProgressPath. This check removes no files."
                 }}
                 Write-Progress -Activity "Checking selected paths for project files" -Status $projectCheckStatus
                 Write-Host "  Project check: $projectCheckStatus" -ForegroundColor Gray
                 $lastProjectNoticeSeconds = $elapsedProjectSeconds
             }}
             if ($isProfileRoot -and ($profileRootIgnoredMarkers -contains $entryName -or
-                $entryName -like '*.code-workspace' -or $entryName -like '*-requirements.txt' -or
+                $entryName -like '*.code-workspace' -or $entryName -like '*.wsb' -or
+                $entryName -like '*-requirements.txt' -or
                 $entryName -like '*-requirements.in' -or
                 $pythonRequirementsMarkerPattern.IsMatch($entryName))) {{ continue }}
             if ($projectMarkers -contains $entryName) {{ $hasProjectMarker = $true; break }}
+            if ($projectMarkerDirectorySuffixPattern.IsMatch($entryName) -and
+                [System.IO.Directory]::Exists($entryPath)) {{ $hasProjectMarker = $true; break }}
             if (($projectMarkerSuffixPattern.IsMatch($entryName) -or
                 $pythonRequirementsMarkerPattern.IsMatch($entryName)) -and
                 -not [System.IO.Directory]::Exists($entryPath)) {{ $hasProjectMarker = $true; break }}
@@ -2526,6 +2766,13 @@ function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress 
             }}
             Write-Host "  $projectCheckSummary" -ForegroundColor Gray
         }}
+        $finalDirectoryItem = Get-Item -LiteralPath $Directory -Force -EA Stop
+        if ($finalDirectoryItem.LastWriteTimeUtc.Ticks -eq $directoryWriteTicks) {{
+            $projectMarkerDirectoryCache[$normalizedDirectory] = [pscustomobject]@{{
+                LastWriteTicks = $directoryWriteTicks
+                HasProjectMarker = [bool]$hasProjectMarker
+            }}
+        }}
         return $hasProjectMarker
     }} catch {{
         # A directory that cannot be checked must not be treated as disposable.
@@ -2534,8 +2781,8 @@ function Test-DirectoryHasProjectMarker([string]$Directory, [bool]$ShowProgress 
     }}
 }}
 
-function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowProgress = $false) {{
-    if ($ShowProgress) {{
+function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowProgress = $false, [bool]$ShowStartMessage = $true) {{
+    if ($ShowProgress -and $ShowStartMessage) {{
         Write-Host "Checking this item and its parent folders for project files. This can take a while." -ForegroundColor Gray
     }}
     $current = if ($IsDirectory) {{ $Path }} else {{ [System.IO.Path]::GetDirectoryName($Path) }}
@@ -2543,6 +2790,9 @@ function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowPr
         if (Test-DirectoryHasProjectMarker $current $ShowProgress) {{ return $true }}
         $normalizedCurrent = $current.TrimEnd('\\')
         if ($normalizedCurrent -match '^[A-Za-z]:\\\\(?:Users|Documents and Settings)(?:\\\\[^\\\\]+)?$') {{ break }}
+        if ($activeUserProfileRoot -and [string]::Equals(
+            $normalizedCurrent, $activeUserProfileRoot,
+            [System.StringComparison]::OrdinalIgnoreCase)) {{ break }}
         $parent = [System.IO.Directory]::GetParent($current)
         if (-not $parent) {{ break }}
         $current = $parent.FullName
@@ -2550,10 +2800,14 @@ function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowPr
     return $false
 }}
 
-function Assert-TargetMatchesScan([object]$Target, [bool]$CheckScanSize = $false) {{
+function Assert-TargetMatchesScan([object]$Target, [bool]$CheckScanSize = $false, [bool]$ShowProgress = $false) {{
     $current = [System.IO.Path]::GetFullPath($Target.Path)
     $isTarget = $true
+    if ($ShowProgress) {{
+        Write-Host "Checking the selected path and its parent folders for links or type changes. This check removes no files." -ForegroundColor Gray
+    }}
     while ($current) {{
+        if ($ShowProgress) {{ Write-Host "  Rechecking path: $(Get-CleanupProgressPath $current)" -ForegroundColor Gray }}
         $item = Get-Item -LiteralPath $current -Force -EA Stop
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {{
             throw "The target or one of its parent paths is now a reparse point; refusing cleanup: $($Target.Path)"
@@ -2571,12 +2825,39 @@ function Assert-TargetMatchesScan([object]$Target, [bool]$CheckScanSize = $false
         $current = $parent.FullName
         $isTarget = $false
     }}
+    if ($ShowProgress) {{ Write-Host "Selected path and parent-folder check complete." -ForegroundColor Gray }}
+}}
+
+function Test-PathUnderTemporaryRoot([string]$Path) {{
+    try {{
+        $candidatePath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\\')
+    }} catch {{
+        return $false
+    }}
+    $temporaryPaths = @($env:TEMP, $env:TMP)
+    try {{ $temporaryPaths += [System.IO.Path]::GetTempPath() }} catch {{}}
+    foreach ($temporaryPath in $temporaryPaths) {{
+        if ([string]::IsNullOrWhiteSpace($temporaryPath)) {{ continue }}
+        try {{
+            $temporaryRoot = [System.IO.Path]::GetFullPath($temporaryPath).TrimEnd('\\')
+        }} catch {{ continue }}
+        if ($candidatePath.StartsWith(($temporaryRoot + '\\'), [System.StringComparison]::OrdinalIgnoreCase)) {{
+            return $true
+        }}
+    }}
+    return $false
 }}
 
 function Get-CleanupProtectedRoot([string]$FullName, [string]$Name, [bool]$IsDirectory) {{
     $protectedRoot = $null
-    if ($Name -like 'claude*') {{ $protectedRoot = $FullName }}
+    if ($Name -like 'claude*' -and (Test-PathUnderTemporaryRoot $FullName)) {{ $protectedRoot = $FullName }}
     if ($projectMarkers -contains $Name) {{
+        $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
+    }}
+    if ($IsDirectory -and $projectMarkerDirectorySuffixPattern.IsMatch($Name)) {{
+        # Python project detection also treats the containing directory as a
+        # project root when it contains an Xcode bundle. Keep the generated
+        # cleanup plan's protected-root inventory aligned with that check.
         $protectedRoot = [System.IO.Directory]::GetParent($FullName).FullName
     }}
     if (-not $IsDirectory -and ($projectMarkerSuffixPattern.IsMatch($Name) -or
@@ -2695,12 +2976,12 @@ if ($Select.Count -gt 0) {{
     }}
 }} else {{
     $choicePrompt = if ($ManualReviewOnly) {{
-        "Choose listed files by number (comma-separated), A for all, or Q to cancel"
+        "Choose listed files by number (comma-separated), A = select all listed files, or press Enter to cancel"
     }} else {{
-        "Choose listed files or folders by number (comma-separated), A for all, or Q to cancel"
+        "Choose listed files or folders by number (comma-separated), A = select all listed items, or press Enter to cancel"
     }}
     $choice = Read-Host $choicePrompt
-    if ([string]::IsNullOrWhiteSpace($choice) -or $choice -match '^(?i:q|quit)$') {{
+    if ([string]::IsNullOrWhiteSpace($choice)) {{
         Write-Host "Cancelled; nothing was changed." -ForegroundColor Yellow
         exit 0
     }} elseif ($choice -match '^(?i:a|all)$') {{
@@ -2709,7 +2990,7 @@ if ($Select.Count -gt 0) {{
         $numbers = @()
         foreach ($token in ($choice -split '[,; ]+')) {{
             $number = 0
-            if (-not [int]::TryParse($token, [ref]$number)) {{ throw "Invalid selection '$token'. Enter item numbers, A, or Q." }}
+            if (-not [int]::TryParse($token, [ref]$number)) {{ throw "Invalid selection '$token'. Enter item numbers or A to select all." }}
             $numbers += $number
         }}
         $invalid = @($numbers | Where-Object {{ $availableIndexes -notcontains $_ }})
@@ -2724,7 +3005,7 @@ if ($Select.Count -gt 0) {{
 $targetSnapshotIndex = 0
 foreach ($target in $cleanTargets) {{
     $targetSnapshotIndex++
-    Assert-TargetMatchesScan $target $true
+    Assert-TargetMatchesScan $target $true $true
     if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory) $true) {{
         throw "A selected target is now inside a project or an unreadable folder; rescan before cleanup: $($target.Path)"
     }}
@@ -2780,7 +3061,7 @@ if ($directoryTargets.Count -gt 0) {{
     }}
 }}
 
-Write-Host "Use -PreviewOnly to list every eligible path after the safety checks without creating a backup or removing anything." -ForegroundColor Gray
+Write-Host "Use -PreviewOnly to list every file and folder this plan could remove after its safety checks. It creates no backup and removes nothing." -ForegroundColor Gray
 
 if ($ManualReviewOnly) {{
     Write-Host "`nSelected targets (individual files only):" -ForegroundColor Cyan
@@ -2788,13 +3069,19 @@ if ($ManualReviewOnly) {{
     Write-Host "`nSelected targets (folder contents are included, except protected and project data and higher-risk candidates you did not explicitly select):" -ForegroundColor Cyan
 }}
 foreach ($target in $cleanTargets) {{ Write-Host "  [$($target.Index)] $($target.ItemType) | $($target.Path) - $($target.Size)" }}
+if (-not $PreviewOnly -and -not $SkipBackup -and (-not $Force -or $CreateBackup)) {{
+    Write-Host "A verified backup gives you a way to restore selected data if cleanup affects something an app or Windows needs." -ForegroundColor Gray
+    if ($directoryTargets.Count -gt 0) {{
+        Write-Host "A folder backup copies its accessible contents, including items this cleanup plan will preserve. It may require more space than the cleanup removes." -ForegroundColor Gray
+    }}
+}}
 $backupEnabled = $false
 if (-not $PreviewOnly -and $SkipBackup) {{
     $backupEnabled = $false
 }} elseif (-not $PreviewOnly -and $CreateBackup) {{
     $backupEnabled = $true
 }} elseif (-not $PreviewOnly -and -not $Force) {{
-    $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N]").Trim()
+    $backupAnswer = (Read-Host "Create a verified backup of these selected items first? [y/N] (Y = create and verify a backup; Enter or N = continue without a backup)").Trim()
     if ($backupAnswer -match '^(y|yes)$') {{
         $backupEnabled = $true
     }} elseif ($backupAnswer -eq "" -or $backupAnswer -match '^(n|no)$') {{
@@ -2900,7 +3187,7 @@ foreach ($target in $cleanTargets) {{
     $targetBytesRemoved = [decimal]0
     $targetRemovalCountsAdded = $false
     try {{
-        Assert-TargetMatchesScan $target $true
+        Assert-TargetMatchesScan $target $true $true
         if (Test-PathInsideProject $target.Path ([bool]$target.IsDirectory) $true) {{
             throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
         }}
@@ -3177,14 +3464,14 @@ foreach ($target in $cleanTargets) {{
                     Write-PreviewFolderSizeProgress $previewSizeWorkIndex $previewSizeWorkTotal
                 }}
                 if ($previewSizeWorkTotal -gt 0) {{
-                    Write-Progress -Activity "Summarizing eligible folder sizes" -Completed
+                    Write-Progress -Activity "Adding up file sizes in folders" -Completed
                 }}
             }}
             if ($backupEnabled) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             }}
-            Assert-TargetMatchesScan $target $true
+            Assert-TargetMatchesScan $target $true $true
             Write-Host "Rechecking this folder's identity and extra Windows file data before cleanup; this check does not remove files." -ForegroundColor Gray
             $verifiedTargetProgressAction = New-CleanupHashProgressAction $cleanupItemIndex $cleanTargets.Count "folder" $target.Path "Rechecking"
             $verifiedTargetSnapshot = [{native_class_name}]::GetDirectoryIdentityAndStreamsHash($target.Path, $verifiedTargetProgressAction)
@@ -3245,7 +3532,7 @@ foreach ($target in $cleanTargets) {{
             $fileRecheckTotal = @($orderedDeletable | Where-Object {{ -not $_.PSIsContainer }}).Count
             $folderRecheckTotal = @($orderedDeletable | Where-Object {{ $_.PSIsContainer }}).Count
             if ($PreviewOnly) {{
-                Write-Host "Eligible contents that would be removed if cleanup is started:" -ForegroundColor Cyan
+                Write-Host "Files and folders that would be removed if cleanup starts:" -ForegroundColor Cyan
                 foreach ($entry in $orderedDeletable) {{
                     Assert-CleanupEntryPathWithinSelection $target $entry
                     $previewPath = [System.IO.Path]::GetFullPath($entry.FullName)
@@ -3255,7 +3542,7 @@ foreach ($target in $cleanTargets) {{
                         $previewFolderCount++
                         $previewFolderKey = $previewPath.TrimEnd($previewDirectorySeparators)
                         $folderDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewFolderKey]
-                        Write-Host "  Would remove | Folder | $previewDisplayPath | $folderDataSize of eligible file data below (includes nested folders)"
+                        Write-Host "  Would remove | Folder | $previewDisplayPath | $folderDataSize of files this plan could remove (including subfolders)"
                     }} else {{
                         $previewLength = [long]$entry.CleanupLength
                         $previewFileCount++
@@ -3268,11 +3555,11 @@ foreach ($target in $cleanTargets) {{
                     if ($previewPathsSeen.Add($previewRoot)) {{
                         $previewFolderCount++
                         $rootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
-                        Write-Host "  Would remove | Folder | $(Get-CleanupProgressPath $previewRoot) | $rootDataSize of eligible file data below (includes nested folders)"
+                        Write-Host "  Would remove | Folder | $(Get-CleanupProgressPath $previewRoot) | $rootDataSize of files this plan could remove (including subfolders)"
                     }}
                 }} else {{
                     $keptRootDataSize = Format-PreviewFileDataSize $previewFolderDataBytes[$previewTargetPath]
-                    Write-Host "  Keep selected folder | Protected data will remain inside it | $keptRootDataSize of eligible file data below"
+                    Write-Host "  Keep selected folder | Protected data will remain inside it | $keptRootDataSize of files this plan could remove"
                 }}
                 continue
             }}
@@ -3304,6 +3591,10 @@ foreach ($target in $cleanTargets) {{
                     }}
                 }}
                 Assert-CleanupEntryPathWithinSelection $target $entry
+                if (-not $entry.PSIsContainer -and
+                    (Test-PathInsideProject $entry.FullName $false $true $false)) {{
+                    throw "The selected file is now inside a project or an unreadable folder; refusing cleanup: $(Get-CleanupProgressPath $entry.FullName)"
+                }}
                 if ($entry.PSIsContainer) {{
                     $folderRemovalProgressAction = New-CleanupHashProgressAction $folderRecheckIndex $folderRecheckTotal "folder" $entry.FullName "Rechecking"
                     [{native_class_name}]::DeleteEmptyDirectoryIfUnchanged(
@@ -3366,7 +3657,7 @@ foreach ($target in $cleanTargets) {{
                 $verifyOutput = & python $backupScript verify --id $backup.id --paths $target.Path
                 if ($LASTEXITCODE -ne 0) {{ throw "The target changed after backup or its backup could not be verified; refusing cleanup." }}
             }}
-            Assert-TargetMatchesScan $target $true
+            Assert-TargetMatchesScan $target $true $true
             if (Test-PathInsideProject $target.Path $false $true) {{
                 throw "The target is now inside a project or an unreadable folder; refusing cleanup: $($target.Path)"
             }}
@@ -3442,6 +3733,7 @@ foreach ($target in $cleanTargets) {{
                 "The target changed after backup or its backup could not be verified; refusing cleanup.",
                 "The selected folder was replaced during cleanup review; refusing cleanup:",
                 "The target is now inside a project or an unreadable folder; refusing cleanup:",
+                "The selected file is now inside a project or an unreadable folder; refusing cleanup:",
                 "The selected file was replaced while its contents were checked; refusing cleanup:"
             )
             $knownRuntimeFailure = $false
@@ -3488,8 +3780,8 @@ if ($PreviewOnly) {{
     $previewFilesLabel = if ($previewFileCount -eq 1) {{ "file" }} else {{ "files" }}
     $previewFoldersLabel = if ($previewFolderCount -eq 1) {{ "folder" }} else {{ "folders" }}
     Write-Host "Preview complete: $previewFileCount $previewFilesLabel and $previewFolderCount $previewFoldersLabel would be removed ($previewBytesDisplay bytes of file data)." -ForegroundColor Green
-    Write-Host "Folder sizes include eligible files in nested folders, so folder rows overlap. The total counts each eligible file once." -ForegroundColor Gray
-    Write-Host "This is the total size of eligible files, not a guarantee of space reclaimed; hard links and filesystem behavior can change the amount." -ForegroundColor Gray
+    Write-Host "The same files can appear in more than one folder row because folder sizes include subfolders. The total counts each file once." -ForegroundColor Gray
+    Write-Host "This is file size, not guaranteed free space recovered. Windows may store file data in ways that change the amount." -ForegroundColor Gray
     Write-Host "No recovery backup was created and nothing was removed. The cleanup plan will repeat its safety checks if you run it later." -ForegroundColor Yellow
     Write-Host "========================================" -ForegroundColor Cyan
     exit 0
@@ -3539,8 +3831,14 @@ Write-Host "========================================" -ForegroundColor Cyan
     protected_fragments.extend(re.escape(prefix) + r"[^\\]*" for prefix in EXCLUDE_COMPONENT_PREFIXES)
     protected_pattern = r"(?:^|\\)(?:" + "|".join(protected_fragments) + r")(?:\\|$)"
     project_markers_str = ",\n".join(f"        {_ps_literal(marker)}" for marker in PROJECT_MARKERS)
+    profile_root_ignored_markers_str = ", ".join(
+        _ps_literal(marker) for marker in _PROFILE_ROOT_IGNORED_MARKER_LIST
+    )
     project_suffix_pattern = r"(?:" + "|".join(
         re.escape(suffix) for suffix in PROJECT_MARKER_SUFFIXES
+    ) + r")$"
+    project_directory_suffix_pattern = r"(?:" + "|".join(
+        re.escape(suffix) for suffix in PROJECT_MARKER_DIRECTORY_SUFFIXES
     ) + r")$"
 
     manual_review_only = priority == "manual"
@@ -3549,12 +3847,15 @@ Write-Host "========================================" -ForegroundColor Cyan
         manual_review_only="$true" if manual_review_only else "$false",
         native_class_name=native_class_name,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        scan_identity=scan.scan_export_identity(results.get("scan_file")) or "Unknown",
         scan_file_time=_safe_scan_timestamp(results),
         targets=targets_str.rstrip(",\n"),
         default_selection=default_selection,
         protected_pattern=_ps_literal(protected_pattern),
         project_markers=project_markers_str,
+        profile_root_ignored_markers=profile_root_ignored_markers_str,
         project_marker_suffix_pattern=_ps_literal(project_suffix_pattern),
+        project_marker_directory_suffix_pattern=_ps_literal(project_directory_suffix_pattern),
         python_requirements_marker_pattern=_ps_literal(PYTHON_REQUIREMENTS_MARKER_PATTERN.pattern),
         backup_script_literal=backup_script_literal,
         priority_arg=("manual" if priority == "manual" else priority if priority != "all" else "low")
@@ -3614,10 +3915,6 @@ def write_item_list_report(results, output_path):
         lines.append("")
     nested_pairs = _nested_candidate_pairs(all_candidate_items)
     lines.extend(_nested_candidate_summary(all_candidate_items, nested_pairs))
-    if nested_pairs:
-        lines.append(
-            "The same space is counted once in the total, even when items appear in different review groups. Each folder row still shows its full size."
-        )
     lines.append("")
 
     all_items = []
@@ -3640,8 +3937,8 @@ def write_item_list_report(results, output_path):
 
     lines.append("=" * 60)
     unique_size = sum(item["size"] for item in _non_overlapping_items(all_items))
-    lines.append(f"Estimated space in automatic cleanup suggestions (counted once): {format_size(unique_size)}")
-    lines.append("Folder totals can include nested protected data, which cleanup preserves.")
+    lines.append(f"Estimated space in automatic cleanup suggestions (each file counted once): {format_size(unique_size)}")
+    lines.append("A folder may contain protected files that cleanup leaves in place.")
     lines.append("Every exact path still requires review; estimates can differ from space actually recovered.")
     if manual_review_files:
         lines.append("")
@@ -3668,14 +3965,14 @@ def clear_screen():
 
 def prompt_choice(prompt, choices, default=None):
     """Read a menu choice, optionally using a default value."""
-    suffix = f" [{default}]" if default is not None else ""
+    suffix = f" [{default}] (Enter = {default})" if default is not None else ""
     while True:
         value = input(f"{prompt}{suffix}: ").strip()
         if not value and default is not None:
             return default
         if value in choices:
             return value
-        print(f"Please enter one of: {', '.join(choices)}")
+        print(f"Choose one of these options: {', '.join(choices)}")
 
 
 def parse_cleanup_selection(answer, item_count):
@@ -3702,6 +3999,207 @@ def parse_cleanup_selection(answer, item_count):
         if index not in selected:
             selected.append(index)
     return selected
+
+
+SELECTION_PAGE_SIZE = 6
+
+
+def _keyboard_picker_available():
+    """Return whether this is an interactive Windows console that can read keys."""
+    if os.name != "nt" or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    try:
+        import msvcrt  # noqa: F401 - imported here because it exists only on Windows
+    except ImportError:
+        return False
+    return True
+
+
+def _enable_selection_vt_mode():
+    """Enable ANSI screen updates for the keyboard picker and return the old mode."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # Standard output
+        old_mode = wintypes.DWORD()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(old_mode)):
+            return None
+        if not kernel32.SetConsoleMode(handle, old_mode.value | 0x0004):
+            return None
+        return handle, old_mode.value
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _restore_selection_vt_mode(console_mode):
+    """Restore the terminal mode after the keyboard picker closes."""
+    if console_mode is None:
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.kernel32.SetConsoleMode(console_mode[0], console_mode[1])
+    except (AttributeError, OSError, TypeError, ValueError):
+        pass
+
+
+def _read_selection_key():
+    """Read one Windows console key, translating arrow and page keys."""
+    import msvcrt
+
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        extended = msvcrt.getwch()
+        return {
+            "H": "up", "P": "down", "I": "page_up", "Q": "page_down",
+            "G": "home", "O": "end",
+        }.get(extended.upper(), "ignored")
+    if key == "\r":
+        return "enter"
+    if key in ("\x1b", "\x03"):
+        return "cancel"
+    if key == " ":
+        return "toggle"
+    return key.casefold()
+
+
+def _interactive_select_entries(
+    rows, selected_paths=None, title="Choose items", allow_select_all=False,
+    browse_folder=None, nested_browse=False,
+    filter_prompt="Filter by name or path (blank clears the filter): ",
+):
+    """Select exact files or folders with arrows, Space, and Enter in a Windows console.
+
+    Return (action, selected_paths), or None when numbered input should be used.
+    A folder-browse callback can return a short status message for the screen.
+    """
+    if not _keyboard_picker_available():
+        return None
+    console_mode = _enable_selection_vt_mode()
+    if console_mode is None:
+        return None
+
+    selected = set(selected_paths or ())
+    filter_text = ""
+    cursor = 0
+    status = ""
+    entries = list(rows)
+
+    def path_key_for(item):
+        path = item.get("path", "") if isinstance(item, dict) else ""
+        return _path_key(path) if isinstance(path, str) and path else ""
+
+    try:
+        while True:
+            filtered = [
+                (index, label, item)
+                for index, (label, item) in enumerate(entries)
+                if not filter_text or filter_text in (
+                    str(label) + " " + str(item.get("name", "")) + " " +
+                    str(item.get("path", ""))
+                ).casefold()
+            ]
+            if not filtered:
+                cursor = 0
+            else:
+                cursor = min(max(cursor, 0), len(filtered) - 1)
+            page_count = max(1, (len(filtered) + SELECTION_PAGE_SIZE - 1) // SELECTION_PAGE_SIZE)
+            page = cursor // SELECTION_PAGE_SIZE
+            page_start = page * SELECTION_PAGE_SIZE
+            page_entries = filtered[page_start:page_start + SELECTION_PAGE_SIZE]
+
+            print("\x1b[2J\x1b[H", end="", flush=True)
+            print(title)
+            print("Use the Up/Down arrow keys to move the highlight, Spacebar to select or clear an item, and Enter to finish.")
+            controls = "PageUp/PageDown or N/P = change page; F = filter; Esc or Q = cancel."
+            if browse_folder is not None:
+                controls += " D = browse the highlighted folder."
+            if nested_browse:
+                controls += " D = keep these picks; B = return without adding them."
+            if allow_select_all:
+                controls += " A = select all suggestions in this list, including rows hidden by the filter."
+            print(controls)
+            print(
+                f"Page {page + 1} of {page_count} | {len(filtered)} matching items | "
+                f"{len(selected)} selected total"
+            )
+            if filter_text:
+                print(f"Filter: {filter_text}")
+            if status:
+                print(status)
+                status = ""
+            if not page_entries:
+                print("No files or folders match this filter.")
+            for offset, (original_index, label, item) in enumerate(page_entries):
+                active = ">" if page_start + offset == cursor else " "
+                marker = "x" if path_key_for(item) in selected else " "
+                kind = display_item_type(item)
+                size = item.get("size_formatted", "unknown size")
+                name = item.get("name", "item")
+                print(f"{active} [{marker}] [{original_index + 1}] {label} | {kind} | {size} | {name}")
+                print(f"      {item.get('path', '(unknown path)')}")
+            sys.stdout.flush()
+
+            key = _read_selection_key()
+            if key == "enter":
+                print()
+                return "done", selected
+            if key in {"cancel", "q", "quit"}:
+                print()
+                return "cancel", selected
+            if nested_browse and key in {"d", "done"}:
+                print()
+                return "done", selected
+            if nested_browse and key in {"b", "back"}:
+                print()
+                return "cancel", selected
+            if key == "up" and filtered:
+                cursor = max(0, cursor - 1)
+            elif key == "down" and filtered:
+                cursor = min(len(filtered) - 1, cursor + 1)
+            elif key == "home" and filtered:
+                cursor = 0
+            elif key == "end" and filtered:
+                cursor = len(filtered) - 1
+            elif key == "page_up" and filtered:
+                cursor = max(0, cursor - SELECTION_PAGE_SIZE)
+            elif key in {"page_down", "n", "next"} and filtered:
+                cursor = min(len(filtered) - 1, cursor + SELECTION_PAGE_SIZE)
+            elif key in {"p", "previous", "prev"} and filtered:
+                cursor = max(0, cursor - SELECTION_PAGE_SIZE)
+            elif key == "toggle" and filtered:
+                _original_index, _label, item = filtered[cursor]
+                item_key = path_key_for(item)
+                if item_key in selected:
+                    selected.remove(item_key)
+                elif item_key:
+                    selected.add(item_key)
+            elif key in {"f", "filter"}:
+                try:
+                    filter_text = input(f"\n{filter_prompt}").strip().casefold()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    return "cancel", selected
+                cursor = 0
+            elif key in {"a", "all"} and allow_select_all:
+                selected.update(path_key_for(item) for _label, item in entries if path_key_for(item))
+                status = "All suggestions in this list are selected; folder contents not listed here are not added."
+            elif key in {"d", "browse"} and browse_folder is not None:
+                if not filtered:
+                    status = "There are no folders to browse in this filtered list."
+                else:
+                    _original_index, _label, item = filtered[cursor]
+                    if display_item_type(item) != "Folder":
+                        status = "Move the highlight to a Folder before pressing D."
+                    else:
+                        try:
+                            status = browse_folder(item, selected) or "Folder browse finished."
+                        except (EOFError, KeyboardInterrupt):
+                            status = "Folder browse cancelled; earlier selections are still selected."
+    finally:
+        _restore_selection_vt_mode(console_mode)
 
 
 def _folder_browse_skip_lines(results):
@@ -3761,6 +4259,31 @@ def select_manual_review_files(results):
     print("\nLargest files not included in automatic cleanup suggestions:")
     print("Drive Cleanr cannot tell whether these files are needed. Choose only individual files you recognize and no longer need.")
     print("Protected paths and detected projects are omitted. These entries are never selected automatically.")
+
+    keyboard_selection = _interactive_select_entries(
+        [("Manual review only", item) for item in items],
+        title=(
+            "Choose individual files for manual review. These are not cleanup suggestions; "
+            "select only files you recognize and no longer need."
+        ),
+        filter_prompt="Filter files by name or path (blank clears the filter): ",
+    )
+    if keyboard_selection is not None:
+        action, selected_paths = keyboard_selection
+        if action == "cancel":
+            print("Manual review cancelled; no files were added to a cleanup plan.")
+            return []
+        chosen = [item for item in items if _path_key(item["path"]) in selected_paths]
+        if not chosen:
+            print("No files were selected; no manual-review plan was created.")
+            return []
+        scan_size = sum(item["size"] for item in chosen)
+        print(f"Selected {len(chosen)} individual file(s); scan-reported size: {format_size(scan_size)}.")
+        print("Check every selected path before creating a manual-review plan:")
+        for item in chosen:
+            print(f"  File | {item['size_formatted']} | {item['path']}")
+        return chosen
+
     selected = {}
     page = 0
     filter_text = ""
@@ -3786,7 +4309,10 @@ def select_manual_review_files(results):
             marker = "*" if _path_key(path) in selected else " "
             print(f"{marker} [{index}] File | {item.get('size_formatted', 'unknown size')} | Manual review")
             print(f"      {path}")
-        print("Enter file numbers to select or clear them. N/P changes page; F filters; D finishes; B cancels.")
+        print(
+            "Enter file numbers to select or clear them. N = next page; P = previous page; "
+            "F = filter; D = finish; B = cancel."
+        )
         answer = input("Choose files on this page: ").strip()
         command = answer.casefold()
         if command in {"d", "done"}:
@@ -3839,7 +4365,10 @@ def select_manual_review_files(results):
                 selected[key] = item
 
 
-def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
+def _browse_folder_candidates(
+    csv_file, min_size_mb, folder_entries, priority, initial_selected_paths=None,
+    folder_already_chosen=False, nested_selection_by_folder=None,
+):
     """Find and let the user choose exact scan entries inside one listed folder."""
     if not folder_entries:
         print("There are no listed folders to browse inside.")
@@ -3852,22 +4381,35 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
             f"Folder | {item.get('size_formatted', 'unknown size')} | {item.get('name', 'candidate')}"
         )
         print(f"      {item.get('path', '(unknown path)')}")
-    print("Choose one folder number, or B to return.")
-
-    while True:
-        answer = input("Folder to inspect: ").strip()
-        if answer.casefold() in {"b", "back"}:
-            return []
-        if not answer.isdecimal() or not 1 <= int(answer) <= len(folder_entries):
-            print(f"Enter a folder number from 1 to {len(folder_entries)}, or B to return.")
-            continue
-        folder_priority, folder_item = folder_entries[int(answer) - 1]
-        break
+    if folder_already_chosen and len(folder_entries) == 1:
+        folder_priority, folder_item = folder_entries[0]
+    else:
+        print("Choose the folder whose saved scan entries you want to browse, or B to return.")
+        while True:
+            answer = input("Folder number: ").strip()
+            if answer.casefold() in {"b", "back"}:
+                return []
+            if not answer.isdecimal() or not 1 <= int(answer) <= len(folder_entries):
+                print(f"Enter a folder number from 1 to {len(folder_entries)}, or B to return.")
+                continue
+            folder_priority, folder_item = folder_entries[int(answer) - 1]
+            break
 
     folder_path = folder_item.get("path")
     if not isinstance(folder_path, str) or not folder_path:
         print("This folder entry is incomplete. Scan the drive again before selecting it.")
         return []
+    folder_key = _path_key(folder_path).rstrip("\\/")
+    if not initial_selected_paths and isinstance(nested_selection_by_folder, dict):
+        initial_selected_paths = [
+            item.get("path")
+            for _candidate_priority, item in nested_selection_by_folder.get(folder_key, [])
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+        ]
+    initial_selected_keys = {
+        _path_key(path) for path in (initial_selected_paths or ())
+        if isinstance(path, str) and path
+    }
 
     print("Searching the saved scan for matching files and folders inside this folder...")
 
@@ -3903,8 +4445,10 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
     ]
     entries.sort(key=lambda pair: (-pair[1].get("size", 0), _path_key(pair[1].get("path", ""))))
     if not entries:
+        if isinstance(nested_selection_by_folder, dict):
+            nested_selection_by_folder[folder_key] = []
         if priority == "all":
-            print("No matching eligible scan entries were found inside this folder.")
+            print("No matching files or folders from the scan were found inside this folder.")
         else:
             tier_name = CLEANABLE_PATTERNS[folder_priority]["name"]
             print(f"No matching entries were found for {tier_name} inside this folder.")
@@ -3915,9 +4459,42 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
     print(f"Found {len(entries)} matching scan entries inside the folder.")
     if priority != "all":
         print(f"Showing {CLEANABLE_PATTERNS[folder_priority]['name']} entries only; choose All review levels to include other levels.")
-    print("Selecting a listed folder includes its eligible contents; protected data and detected projects remain protected.")
+    print("Choosing a folder includes files and subfolders that pass safety checks. Protected data, detected projects, and higher-risk items you did not select stay in place.")
+
+    keyboard_selection = _interactive_select_entries(
+        [
+            (CLEANABLE_PATTERNS[candidate_priority]["name"], item)
+            for candidate_priority, item in entries
+        ],
+        selected_paths=initial_selected_paths,
+        title=(
+            "Choose exact files or folders recorded inside this folder. "
+            "A selected folder includes eligible contents; protected data and projects stay in place. "
+            "Press Enter or D to keep these picks; press B, Esc, or Q to return without adding them."
+        ),
+        nested_browse=True,
+        filter_prompt="Filter entries by name or path (blank clears the filter): ",
+    )
+    if keyboard_selection is not None:
+        action, selected_paths = keyboard_selection
+        if action == "cancel":
+            print("Folder browse cancelled; the main-list picks are unchanged.")
+            return None
+        browsed = [
+            (candidate_priority, item)
+            for candidate_priority, item in entries
+            if _path_key(item.get("path", "")) in selected_paths
+        ]
+        if isinstance(nested_selection_by_folder, dict):
+            nested_selection_by_folder[folder_key] = browsed
+        return browsed
+
     page_size = 25
-    selected = {}
+    selected = {
+        _path_key(item.get("path", "")): (candidate_priority, item)
+        for candidate_priority, item in entries
+        if _path_key(item.get("path", "")) in initial_selected_keys
+    }
     page = 0
     filter_text = ""
 
@@ -3946,10 +4523,15 @@ def _browse_folder_candidates(csv_file, min_size_mb, folder_entries, priority):
                 f"{item.get('size_formatted', 'unknown size')} | {item.get('name', 'candidate')}"
             )
             print(f"      {item_path}")
-        print("Numbers add or remove entries. N/P changes page; F filters by name or path; D finishes and keeps these picks; B returns without adding them.")
+        print(
+            "Numbers add or remove entries. N = next page; P = previous page; F = filter by name or path; "
+            "D = finish and keep these picks; B = return without adding these picks."
+        )
         answer = input("Choose entries on this page: ").strip()
         command = answer.casefold()
         if command in {"d", "done", ""}:
+            if isinstance(nested_selection_by_folder, dict):
+                nested_selection_by_folder[folder_key] = list(selected.values())
             return list(selected.values())
         if command in {"b", "back"}:
             print("Folder browse cancelled; its entries were not added to the cleanup plan.")
@@ -4055,52 +4637,143 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
         path = item.get("path", "(unknown path)")
         print(f"  [{index}] {tier_name} | {display_item_type(item)} | {size} | {name}")
         print(f"      {path}")
-    print("Each row is labeled File or Folder. Choose individual files, folders, or both by number.")
+    print("Each row is labeled File or Folder. A file selection means that file; a folder selection includes eligible contents inside it.")
     print("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.")
     print("Protected paths and detected projects are kept. Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too. The plan preview shows up to 12 direct items; other contents may also be removed.")
-    print("To choose scan entries inside a folder, enter D. The scan must include file rows to select individual files.")
-    print("Enter item numbers to add, A for all listed suggestions, D to browse inside a folder, then Enter to finish. Q cancels.")
+    print("Use Up/Down to move the highlight, Space to select or clear an item, and Enter to finish. Esc or Q cancels.")
+    print("A selects every suggestion in this list. D browses scan entries inside the highlighted folder. The scan must include file rows to select individual files.")
+    print("If arrow-key selection is unavailable, enter one or more item numbers to toggle picks; A selects all listed suggestions, D opens folder browsing, and Q cancels.")
 
     selected_entries = []
     selected_keys = set()
     expanded_candidates = []
+    nested_selection_by_folder = {}
     folders = [
         (candidate_priority, item) for candidate_priority, item in entries
         if display_item_type(item) == "Folder"
     ]
-    while True:
-        answer = input("Add entries by number, D to browse, Enter to finish, or Q to cancel: ").strip()
-        if answer.casefold() in {"d", "browse"}:
-            if not csv_file:
-                print("The saved scan file is unavailable for folder browsing.")
+
+    keyboard_rows = [
+        (CLEANABLE_PATTERNS[candidate_priority]["name"], item)
+        for candidate_priority, item in entries
+    ]
+    expanded_by_key = {}
+
+    def browse_highlighted_folder(folder_item, selected_paths):
+        if not csv_file:
+            return "The saved scan file is unavailable for folder browsing; current picks are unchanged."
+        folder_key = _path_key(folder_item.get("path", "")).rstrip("\\/")
+
+        def is_inside_selected_folder(path_key):
+            normalized = path_key.rstrip("\\/")
+            return normalized.startswith(folder_key + "\\") or normalized.startswith(folder_key + "/")
+
+        previous_nested = {
+            path_key for path_key in expanded_by_key
+            if is_inside_selected_folder(path_key)
+        }
+        initial_nested = previous_nested.intersection(selected_paths)
+        folder_pair = next(
+            pair for pair in folders
+            if _path_key(pair[1].get("path", "")) == _path_key(folder_item.get("path", ""))
+        )
+        browsed = _browse_folder_candidates(
+            csv_file, min_size_mb, [folder_pair], priority,
+            initial_selected_paths=initial_nested,
+            folder_already_chosen=True,
+        )
+        if browsed is None:
+            return "Folder browse cancelled; earlier picks are unchanged."
+        for path_key in previous_nested:
+            selected_paths.discard(path_key)
+            expanded_by_key.pop(path_key, None)
+        for candidate_priority, item in browsed:
+            path_key = _path_key(item.get("path", ""))
+            if path_key:
+                selected_paths.add(path_key)
+                expanded_by_key[path_key] = (candidate_priority, item)
+        count = len(browsed)
+        return f"{count} exact scan file/folder entr{'y' if count == 1 else 'ies'} selected inside this folder."
+
+    keyboard_selection = _interactive_select_entries(
+        keyboard_rows,
+        title=(
+            "Choose the files and folders for the cleanup plan. "
+            "A file means that one file; a folder includes eligible files and subfolders. "
+            "Protected paths, detected projects, and higher-risk entries you do not select stay in place."
+        ),
+        allow_select_all=True,
+        browse_folder=browse_highlighted_folder,
+    )
+    if keyboard_selection is not None:
+        action, selected_path_keys = keyboard_selection
+        if action == "cancel":
+            print("Selection cancelled; no cleanup plan was created.")
+            return None
+        selected_entries = [
+            (candidate_priority, item)
+            for candidate_priority, item in entries
+            if _path_key(item.get("path", "")) in selected_path_keys
+        ]
+        selected_entries.extend(
+            pair for path_key, pair in expanded_by_key.items()
+            if path_key in selected_path_keys
+        )
+        selected_keys = {
+            _path_key(item.get("path", "")) for _candidate_priority, item in selected_entries
+        }
+        expanded_candidates = [
+            pair for path_key, pair in expanded_by_key.items()
+            if path_key in selected_keys
+        ]
+    else:
+        while True:
+            answer = input(
+                "Enter item numbers to select or clear them; A = select all listed suggestions; "
+                "D = browse inside a listed folder; Enter = finish; Q = cancel: "
+            ).strip()
+            if answer.casefold() in {"d", "browse"}:
+                if not csv_file:
+                    print("The saved scan file is unavailable for folder browsing.")
+                    continue
+                browsed = _browse_folder_candidates(
+                    csv_file, min_size_mb, folders, priority,
+                    nested_selection_by_folder=nested_selection_by_folder,
+                )
                 continue
-            browsed = _browse_folder_candidates(
-                csv_file, min_size_mb, folders, priority
-            )
-            for candidate_priority, item in browsed:
-                key = _path_key(item["path"])
-                if key not in selected_keys:
+            if not answer and (selected_entries or any(nested_selection_by_folder.values())):
+                break
+            try:
+                indexes = parse_cleanup_selection(answer, len(entries))
+            except ValueError as exc:
+                print(str(exc))
+                continue
+
+            if indexes is None:
+                print("Selection cancelled; no cleanup plan was created.")
+                return None
+            select_all = answer.casefold() in {"a", "all"}
+            for index in indexes:
+                candidate_priority, item = entries[index - 1]
+                key = _path_key(item.get("path", ""))
+                if key in selected_keys and not select_all:
+                    selected_entries = [
+                        pair for pair in selected_entries
+                        if _path_key(pair[1].get("path", "")) != key
+                    ]
+                    selected_keys.discard(key)
+                elif key not in selected_keys:
+                    selected_entries.append((candidate_priority, item))
+                    selected_keys.add(key)
+
+    if nested_selection_by_folder:
+        for nested_entries in nested_selection_by_folder.values():
+            for candidate_priority, item in nested_entries:
+                key = _path_key(item.get("path", ""))
+                if key and key not in selected_keys:
                     selected_entries.append((candidate_priority, item))
                     expanded_candidates.append((candidate_priority, item))
                     selected_keys.add(key)
-            continue
-        if not answer and selected_entries:
-            break
-        try:
-            indexes = parse_cleanup_selection(answer, len(entries))
-        except ValueError as exc:
-            print(str(exc))
-            continue
-
-        if indexes is None:
-            print("Selection cancelled; no cleanup plan was created.")
-            return None
-        for index in indexes:
-            candidate_priority, item = entries[index - 1]
-            key = _path_key(item.get("path", ""))
-            if key not in selected_keys:
-                selected_entries.append((candidate_priority, item))
-                selected_keys.add(key)
 
     if not selected_entries:
         print("Selection cancelled; no cleanup plan was created.")
@@ -4109,7 +4782,24 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
     selected_paths = [item["path"] for _candidate_priority, item in selected_entries]
     selected = [item for _candidate_priority, item in selected_entries]
     estimate = sum(item["size"] for item in _non_overlapping_items(selected))
-    print(f"\nAdded {len(selected_paths)} selected item(s) to the cleanup plan; estimated listed size: {format_size(estimate)}")
+    file_count = sum(display_item_type(item) == "File" for item in selected)
+    folder_count = sum(display_item_type(item) == "Folder" for item in selected)
+    selection_summary = []
+    if file_count:
+        selection_summary.append(
+            f"{file_count} individual file" + ("s" if file_count != 1 else "")
+        )
+    if folder_count:
+        selection_summary.append(
+            f"{folder_count} folder" + ("s" if folder_count != 1 else "")
+        )
+    if not selection_summary:
+        selection_summary.append(f"{len(selected_paths)} selected entr{'y' if len(selected_paths) == 1 else 'ies'}")
+    print(f"\nAdded {' and '.join(selection_summary)} to the cleanup plan.")
+    print(
+        f"Combined size from the scan, counting nested selections once: "
+        f"{format_size(estimate)}."
+    )
     for candidate_priority, item in selected_entries:
         print(f"  {CLEANABLE_PATTERNS[candidate_priority]['name']} | {display_item_type(item)} | {item['size_formatted']} | {item['name']}")
         print(f"  {item['path']}")
@@ -4172,9 +4862,12 @@ def prompt_existing_csv(initial_csv=None):
             print("N) Show older scans")
         print("M) Choose a scan file by path")
         print("0) Back to the main menu")
-        choice = input("\nEnter a scan number, M for a file path, or 0 to go back: ").strip().lower()
+        choice = input(
+            "\nEnter a scan number, N = show older scans, P = show newer scans (when listed), "
+            "M = choose a scan file by path, or 0 = return to the main menu: "
+        ).strip().lower()
 
-        if choice in {"0", "q", "back"}:
+        if choice == "0":
             return None
         if choice in {"n", "next"} and page + 1 < page_count:
             page += 1
@@ -4183,7 +4876,7 @@ def prompt_existing_csv(initial_csv=None):
             page -= 1
             continue
         if choice in {"m", "path"}:
-            manual = input("Enter the path to a supported scan CSV (or Q to go back): ").strip().strip('"')
+            manual = input("Enter the path to a WizTree or WinDirStat scan CSV, or Q to go back: ").strip().strip('"')
             if manual.casefold() in {"q", "quit", "back", "cancel"}:
                 continue
             if os.path.isfile(manual) and Path(manual).suffix.casefold() == ".csv":
@@ -4259,19 +4952,19 @@ def _run_tui(initial_csv=None, min_size_mb=50):
             print("Drive Cleanr - Review scan results")
             print("=" * 60)
             print(f"Saved scan: {csv_file}")
-            print(f"Minimum item size shown: {current_min_size} MB")
+            print(f"Showing files and folders at least {current_min_size} MB in size")
             print()
             print_report(results, item_limit=5)
             print()
-            print("1) View all suggested files and folders")
-            print("2) Save the suggestions and separate manual-review list to a text file")
-            print("3) Choose individual files, folders, or both for a cleanup plan")
-            print("4) Change the minimum item size shown")
-            print("5) Review a different scan")
-            print("6) Review the largest files outside cleanup suggestions")
-            print("0) Back")
+            print("1) See every suggested file and folder")
+            print("2) Save this review as a text file")
+            print("3) Choose files or folders for a cleanup plan (saving a plan deletes nothing)")
+            print("4) Change the minimum size of files and folders shown")
+            print("5) Choose a different scan to review")
+            print("6) Review large files that are not cleanup suggestions")
+            print("0) Return to the main menu")
 
-            choice = input("\nSelect an option [0-6]: ").strip().lower()
+            choice = input("\nChoose an option [0-6] (0 = return to the main menu): ").strip().lower()
 
             if choice == "1":
                 clear_screen()
@@ -4281,7 +4974,7 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                 input("\nPress Enter to go back...")
             elif choice == "2":
                 default_name = f"{Path(csv_file).stem}.cleanup-items.txt"
-                output_path = input(f"Save the review list to [{default_name}]: ").strip().strip('"') or default_name
+                output_path = input(f"Save the review list to [{default_name}] (Enter = use this file name): ").strip().strip('"') or default_name
                 try:
                     write_item_list_report(results, output_path)
                     print(f"Review list saved to: {output_path}")
@@ -4289,7 +4982,10 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     print(f"Could not save the review list: {describe_error(exc)}")
                 input("Press Enter to continue...")
             elif choice == "3":
-                print("Review groups: high = lower risk, medium = review carefully, low = confirm impact, all = every group.")
+                print(
+                    "Choose which suggestions to browse: High (lower risk), Medium (review carefully), "
+                    "Low (confirm impact), or All (show every group)."
+                )
                 priority = prompt_choice("Choose groups to include", ["high", "medium", "low", "all"], default="high")
                 selection = select_cleanup_candidates(
                     results, priority, csv_file=csv_file, min_size_mb=current_min_size
@@ -4302,7 +4998,7 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     input("Press Enter to continue...")
                     continue
                 default_name = f"{Path(csv_file).stem}.clean.ps1"
-                output_path = input(f"Save the PowerShell cleanup plan to [{default_name}]: ").strip().strip('"') or default_name
+                output_path = input(f"Save the PowerShell cleanup plan to [{default_name}] (Enter = use this file name): ").strip().strip('"') or default_name
                 try:
                     plan_results = _results_with_expanded_candidates(results, expanded_candidates)
                     generate_clean_script(
@@ -4328,7 +5024,8 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     input("Press Enter to continue...")
                     continue
                 confirmation = input(
-                    "Type REVIEWED to save a plan for these exact files, or Q to cancel: "
+                    "Type REVIEWED to save a plan containing these exact files (nothing is deleted now), "
+                    "or press Enter to cancel: "
                 ).strip()
                 if confirmation != "REVIEWED":
                     print("Cancelled; no manual-review plan was created.")
@@ -4336,7 +5033,7 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     continue
                 default_name = f"{Path(csv_file).stem}.manual-review.clean.ps1"
                 output_path = input(
-                    f"Save the manual-review PowerShell plan to [{default_name}]: "
+                    f"Save the manual-review PowerShell plan to [{default_name}] (Enter = use this file name): "
                 ).strip().strip('"') or default_name
                 try:
                     generate_clean_script(
@@ -4354,7 +5051,10 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                     print(f"Could not save the manual-review plan: {describe_error(exc)}")
                 input("Press Enter to continue...")
             elif choice == "4":
-                new_size = input(f"New minimum item size in MB [{current_min_size}]: ").strip()
+                new_size = input(
+                    f"Show files and folders at least how many MB in size? [{current_min_size}] "
+                    "(Enter = keep the current minimum): "
+                ).strip()
                 if new_size:
                     try:
                         current_min_size = max(1, int(new_size))
@@ -4370,7 +5070,7 @@ def _run_tui(initial_csv=None, min_size_mb=50):
                 else:
                     return
                 break
-            elif choice in {"0", "q", "quit", "exit"}:
+            elif choice == "0":
                 return
             else:
                 print("Invalid choice.")

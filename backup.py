@@ -130,6 +130,18 @@ class _BackupProgress:
             f"Still working after {elapsed} seconds; Drive Cleanr will report when this step is finished."
         )
 
+    def tree_heartbeat(self, elapsed_seconds: float, current_path: str) -> None:
+        elapsed = max(0, int(elapsed_seconds))
+        item_count = self.items
+        entry_label = "entry" if item_count == 1 else "entries"
+        name = _safe_terminal_text(
+            os.path.basename(str(current_path).rstrip("\\/")) or "folder entries", "item"
+        )
+        self._emit(
+            f"Still checking links and junctions after {elapsed} seconds; "
+            f"{item_count:,} {entry_label} checked so far. Current item: {name}."
+        )
+
     def finish(self) -> None:
         item_label = "item" if self.items == 1 else "items"
         detail = f"{self.items:,} {item_label} {self._item_action}" if self.items else ""
@@ -175,6 +187,7 @@ def _path_has_reparse_component(path: str) -> bool:
 
 def _tree_has_reparse_point(
     path: str, progress_callback: Optional[Callable[[str], None]] = None,
+    current_callback: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Check an existing destination tree without following directory links."""
     if not os.path.lexists(path):
@@ -185,15 +198,58 @@ def _tree_has_reparse_point(
         return False
     with os.scandir(path) as entries:
         for entry in entries:
+            if current_callback is not None:
+                current_callback(entry.path)
             if _is_reparse_point(entry.path):
+                if progress_callback is not None:
+                    progress_callback(entry.path)
                 return True
             if progress_callback is not None:
                 progress_callback(entry.path)
             if entry.is_dir(follow_symlinks=False) and _tree_has_reparse_point(
-                entry.path, progress_callback,
+                entry.path, progress_callback, current_callback,
             ):
                 return True
     return False
+
+
+def _tree_has_reparse_point_with_progress(path: str, phase: str) -> bool:
+    """Check a directory tree for links while keeping long checks visible."""
+    print(f"Checking {phase} for links and junctions...", flush=True)
+    progress = _BackupProgress(f"Checking {phase}")
+    progress_lock = threading.Lock()
+    stop_heartbeat = threading.Event()
+    started_at = time.monotonic()
+    current = {"path": path}
+
+    def report_entry(entry: str) -> None:
+        with progress_lock:
+            current["path"] = entry
+            progress.item(entry, action="checked")
+
+    def report_current(entry: str) -> None:
+        with progress_lock:
+            current["path"] = entry
+
+    def report_heartbeat() -> None:
+        interval = max(0.01, float(BACKUP_PROGRESS_TIME_INTERVAL_SECONDS))
+        while not stop_heartbeat.wait(interval):
+            with progress_lock:
+                progress.tree_heartbeat(time.monotonic() - started_at, current["path"])
+
+    heartbeat_thread = threading.Thread(
+        target=report_heartbeat, name="drive-cleanr-link-check-progress", daemon=True
+    )
+    heartbeat_thread.start()
+    try:
+        contains_reparse_point = _tree_has_reparse_point(
+            path, progress_callback=report_entry, current_callback=report_current
+        )
+        progress.finish()
+        return contains_reparse_point
+    finally:
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=max(1.0, float(BACKUP_PROGRESS_TIME_INTERVAL_SECONDS)))
 
 
 def _rmtree_with_progress(path: str) -> None:
@@ -1408,6 +1464,26 @@ def _valid_manifest_size(size) -> bool:
     return type(size) is int and size >= 0
 
 
+def _valid_sha256_digest(value) -> bool:
+    """Recognize a complete SHA-256 digest from an untrusted manifest."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{64}", value) is not None
+
+
+def _restore_manifest_item_is_complete(item, manifest_version: int) -> bool:
+    """Validate restorable entry fields; allow size-checked legacy v1 items."""
+    if (not isinstance(item, dict) or
+            not _valid_restore_target(item.get("original_path")) or
+            not isinstance(item.get("backup_path"), str) or not item["backup_path"] or
+            not isinstance(item.get("format"), str) or
+            item.get("format") not in {"file", "copy", "zip"} or
+            not _valid_manifest_size(item.get("size"))):
+        return False
+    digest = item.get("integrity_sha256")
+    if digest is None:
+        return manifest_version == 1
+    return _valid_sha256_digest(digest)
+
+
 def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     """Verify saved payloads and ensure current sources still match them."""
     manifest = get_backup(backup_id)
@@ -1470,8 +1546,8 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
         source_digest = item.get("source_integrity_sha256")
         payload_digest = item.get("integrity_sha256")
         if (not isinstance(backup_format, str) or backup_format not in {"file", "copy", "zip"} or
-                not isinstance(source_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", source_digest) or
-                not isinstance(payload_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", payload_digest) or
+                not _valid_sha256_digest(source_digest) or
+                not _valid_sha256_digest(payload_digest) or
                 not isinstance(backup_path, str)):
             print(f"Backup lacks verifiable integrity data for: {display_path}")
             return False
@@ -1518,7 +1594,8 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 if not os.path.isdir(backup_path) or not os.path.isdir(original_path):
                     print(f"Source item type changed since backup: {display_path}")
                     return False
-                if _tree_has_reparse_point(backup_path) or _tree_has_reparse_point(original_path):
+                if (_tree_has_reparse_point_with_progress(backup_path, "saved backup") or
+                        _tree_has_reparse_point_with_progress(original_path, "source folder")):
                     print(f"Source or backup tree contains a reparse point: {display_path}")
                     return False
                 current_source_digest = _directory_fingerprint_sha256(
@@ -1531,7 +1608,7 @@ def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
                 if not os.path.isfile(backup_path) or not os.path.isdir(original_path):
                     print(f"Source item type changed since backup: {display_path}")
                     return False
-                if _tree_has_reparse_point(original_path):
+                if _tree_has_reparse_point_with_progress(original_path, "source folder"):
                     print(f"Source tree contains a reparse point: {display_path}")
                     return False
                 current_source_digest = _directory_fingerprint_sha256(
@@ -1572,7 +1649,9 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     if not manifest:
         print(f"Backup not found: {_safe_terminal_text(backup_id)}")
         return False
-    if (not isinstance(manifest, dict) or manifest.get("status") != "completed" or
+    manifest_version = _manifest_version(manifest) if isinstance(manifest, dict) else None
+    if (not isinstance(manifest, dict) or manifest_version is None or
+            manifest.get("status") != "completed" or
             not isinstance(manifest.get("items"), list) or not manifest["items"]):
         print("Refusing to restore an incomplete or empty backup")
         return False
@@ -1581,7 +1660,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     if not backup_dir or _path_has_reparse_component(backup_dir):
         print("Refusing to restore from an unavailable or linked backup location")
         return False
-    verify_named_streams = _manifest_uses_named_stream_integrity(manifest)
+    verify_named_streams = manifest_version == 2
     if not verify_named_streams:
         print("Warning: this older backup predates named-stream verification and may not preserve every NTFS data stream.")
 
@@ -1592,18 +1671,12 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     validated_items = []
     restore_destinations = []
     for item in manifest["items"]:
-        if not isinstance(item, dict):
-            print("Refusing to restore a malformed backup manifest")
+        if not _restore_manifest_item_is_complete(item, manifest_version):
+            print("Refusing to restore an invalid or unverifiable backup manifest entry")
             return False
         original_path = item.get("original_path")
         backup_path = item.get("backup_path")
         backup_format = item.get("format")
-        if (not _valid_restore_target(original_path) or not isinstance(backup_path, str) or
-                not isinstance(backup_format, str) or
-                backup_format not in {"file", "copy", "zip"} or
-                not _valid_manifest_size(item.get("size"))):
-            print("Refusing to restore an invalid backup manifest entry")
-            return False
         if _restore_path_overlaps_backup_storage(original_path, backup_storage_roots):
             print("Refusing to restore into or over Drive Cleanr backup storage")
             return False
@@ -1630,7 +1703,8 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                     (backup_format in {"copy", "zip"} and not os.path.isdir(original_path))):
                 print("Refusing to overwrite a path with a different item type")
                 return False
-        if backup_format in {"copy", "zip"} and _tree_has_reparse_point(original_path):
+        if (backup_format in {"copy", "zip"} and
+                _tree_has_reparse_point_with_progress(original_path, "restore destination")):
             print("Refusing to restore into a directory tree containing a reparse point")
             return False
         validated_items.append((item, original_path, backup_path, backup_format))
@@ -1642,7 +1716,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     for item, original_path, backup_path, backup_format in validated_items:
         expected_digest = item.get("integrity_sha256")
         if expected_digest is not None:
-            if not isinstance(expected_digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", expected_digest):
+            if not _valid_sha256_digest(expected_digest):
                 print("Refusing to restore a backup with an invalid integrity hash")
                 return False
             try:
@@ -1737,11 +1811,23 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 if _path_has_reparse_component(original_path) or _path_has_reparse_component(backup_path):
                     raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
                 os.makedirs(original_path, exist_ok=True)
-                if (_path_has_reparse_component(original_path) or
-                        _path_has_reparse_component(backup_path) or
-                        _tree_has_reparse_point(original_path) or
-                        _tree_has_reparse_point(backup_path)):
-                    raise RuntimeError("Restore source or destination changed to a reparse point")
+
+                def recheck_copy_restore_paths():
+                    if (_path_has_reparse_component(original_path) or
+                            _path_has_reparse_component(backup_path) or
+                            _tree_has_reparse_point_with_progress(
+                                original_path, "restore destination"
+                            ) or
+                            _tree_has_reparse_point_with_progress(
+                                backup_path, "saved backup"
+                            ) or
+                            _path_has_reparse_component(original_path) or
+                            _path_has_reparse_component(backup_path)):
+                        raise RuntimeError(
+                            "Restore source or destination changed to a reparse point"
+                        )
+
+                recheck_copy_restore_paths()
                 # Restore by copying the saved directory.
                 command = [
                         "robocopy", backup_path, original_path,
@@ -1766,9 +1852,7 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                                 file_size = 0
                             inventory_progress.item(saved_file, file_size)
                     inventory_progress.finish()
-                if (_path_has_reparse_component(original_path) or
-                        _path_has_reparse_component(backup_path)):
-                    raise RuntimeError("Restore source or destination changed to a reparse point")
+                recheck_copy_restore_paths()
                 return_code = _run_robocopy_with_progress(
                     command, timeout=300, progress=restore_progress
                 )
@@ -2010,31 +2094,42 @@ def main():
     elif args.command == 'restore':
         overwrite = bool(args.yes)
         if not args.yes:
-            try:
-                answer = input(
-                    "Handle existing files: O to overwrite, M to restore missing files and preserve existing ones, or Q to cancel [M]: "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("Restore cancelled")
-                return
-            if answer in {"o", "overwrite"}:
-                overwrite = True
-            elif answer in {"", "m", "merge"}:
-                overwrite = False
-            else:
-                print("Restore cancelled")
-                return
+            while True:
+                try:
+                    answer = input(
+                        "If a file already exists: O = replace it; M = restore only missing files; Q = cancel. "
+                        "Press Enter to choose M: "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("Restore cancelled")
+                    return
+                if answer in {"o", "overwrite"}:
+                    overwrite = True
+                    break
+                if answer in {"", "m", "merge"}:
+                    overwrite = False
+                    break
+                if answer in {"q", "quit", "cancel"}:
+                    print("Restore cancelled")
+                    return
+                print(
+                    "Enter O to replace existing files, M or Enter to restore only missing files "
+                    "and keep existing ones, or Q to cancel."
+                )
         success = restore_backup(args.id, overwrite=overwrite)
         sys.exit(0 if success else 1)
 
     elif args.command == 'delete':
         if not args.yes:
             try:
-                answer = input("Permanently delete this backup? This cannot be undone. (y/N): ").strip().lower()
+                answer = input(
+                    "Permanently delete this saved backup? This cannot be undone. "
+                    "[y/N] (Y = delete; Enter or N = keep it): "
+                ).strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("Backup deletion cancelled")
                 return
-            if answer != "y":
+            if answer not in {"y", "yes"}:
                 print("Backup deletion cancelled")
                 return
         success = delete_backup(args.id)

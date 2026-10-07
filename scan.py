@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Run a supported disk-usage scanner and wait for its export to finish."""
 
+import math
 import os
 import sys
 import time
@@ -11,6 +12,7 @@ import ctypes
 import re
 import csv
 import stat
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +25,7 @@ _DRIVECLEANR_SCAN_NAME = re.compile(
     r"^scan_(?:wiztree_(?:fast|standard)|windirstat)_\d{20}(?:_\d+)?$",
     re.IGNORECASE,
 )
+_LEGACY_ROOT_SCAN_NAME = re.compile(r"^scan_\d{20}(?:_\d+)?$", re.IGNORECASE)
 _LEGACY_SCAN_NAME = re.compile(r"^_\d{20}(?:_\d+)?$", re.IGNORECASE)
 _LEGACY_SCAN_FOLDERS = (
     ("scan",),
@@ -30,6 +33,23 @@ _LEGACY_SCAN_FOLDERS = (
     ("scan", "_wiztree", "_standard"),
     ("scan", "_windirstat"),
 )
+_WIZTREE_CLI_EXPORT_VERSION = (3, 18)
+_WIZTREE_EXPORT_DEPTH_VERSION = (4, 2)
+_WIZTREE_SORT_BY_VERSION = (4, 13)
+_WIZTREE_DRIVE_CAPACITY_VERSION = (4, 25)
+
+
+def scan_export_identity(path):
+    """Return a stable identifier for a scan export's normalized absolute path."""
+    if isinstance(path, os.PathLike):
+        path = os.fspath(path)
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        normalized = os.path.normcase(os.path.abspath(path))
+        return hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
+    except (OSError, ValueError):
+        return None
 
 
 def find_wiztree():
@@ -180,12 +200,13 @@ def _path_has_reparse_component(path):
 
 def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
-    print("Choose which scanner to use:")
-    print("  1. WizTree (fast full-drive scan or standard scan)")
-    print("  2. WinDirStat 2.6+ (standard scan; Administrator access optional)")
+    print("Choose a scanner. Both apps can scan a drive or folder:")
+    print("  1. WizTree")
+    print("  2. WinDirStat (version 2.6 or newer; needed for automatic scan export)")
+    print("Their scan options are explained after you choose an app.")
     while True:
         try:
-            choice = input("Select scanner [1/2]: ").strip().lower()
+            choice = input("Select scanner [1/2] (1 = WizTree; 2 = WinDirStat; Q = cancel): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
             return None
@@ -196,18 +217,22 @@ def choose_scanner():
             return "wiztree"
         if choice in ("2", "windirstat", "win", "wds"):
             return "windirstat"
-        print("Enter 1 for WizTree or 2 for WinDirStat.")
+        print("Enter 1 for WizTree, 2 for WinDirStat, or Q to cancel scan setup.")
 
 
 def choose_wiztree_mode():
-    """Ask which WizTree scan mode to use; auto balances speed and access."""
-    print("Choose a WizTree scan mode for the selected drive or folder:")
-    print("  1. Automatic (fast for a whole drive when run as Administrator; standard otherwise)")
-    print("  2. Fast full-drive scan (requires an Administrator terminal)")
-    print("  3. Standard scan (no Administrator access; may miss files this account cannot access)")
+    """Ask which WizTree scan method to use and explain the practical differences."""
+    print("Choose how WizTree should scan this whole drive:")
+    print("  Administrator access means this terminal was opened with 'Run as administrator'.")
+    print("  1. Automatic (recommended): Drive Cleanr chooses Fast for this drive when this terminal has Administrator access; otherwise it chooses Standard.")
+    print("  2. Fast full-drive: WizTree's quickest method; scans a whole drive and requires Administrator access.")
+    print("  3. Standard: scans through normal Windows file access; works on drives or folders without Administrator access, but may take longer or miss files this account cannot access.")
     while True:
         try:
-            choice = input("Select scan mode [1/2/3]: ").strip().lower()
+            choice = input(
+                "Select a scan method [1/2/3] "
+                "(1 = Automatic; 2 = Fast full-drive; 3 = Standard; Enter = 1; Q = cancel): "
+            ).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nScan cancelled.")
             return None
@@ -220,7 +245,7 @@ def choose_wiztree_mode():
             return "fast"
         if choice in ("3", "standard", "normal"):
             return "standard"
-        print("Enter 1 for automatic, 2 for fast full-drive scanning, or 3 for standard scanning.")
+        print("Enter 1 for Automatic, 2 for Fast full-drive, 3 for Standard, or Q to cancel scan setup.")
 
 
 def check_admin_status() -> bool | None:
@@ -293,7 +318,7 @@ def wait_for_file(filepath, timeout=30, stable_time=2):
 
         time.sleep(1)
 
-    print(f"\nThe scan did not finish within {timeout} seconds.")
+    print(f"\nScan results were not ready within {timeout} seconds.", flush=True)
     return False
 
 
@@ -414,15 +439,27 @@ def _remove_partial_scan_export(filepath):
     return "removed"
 
 
+def _format_duration(seconds):
+    """Format a positive duration using the largest useful time units."""
+    remaining = max(0, math.ceil(seconds))
+    parts = []
+    for unit_seconds, unit_name in ((3600, "hour"), (60, "minute"), (1, "second")):
+        count, remaining = divmod(remaining, unit_seconds)
+        if count:
+            parts.append(f"{count} {unit_name}{'' if count == 1 else 's'}")
+    return " ".join(parts) or "0 seconds"
+
+
 def wait_for_scan_process(process, filepath, timeout=1800, scanner_name="scanner"):
     """Wait for the scanner itself to finish, then verify its closed export file."""
     started = time.monotonic()
     last_report = -5
-    print(f"Waiting for the scanner to finish (timeout: {timeout // 60} minutes)...")
+    time_limit = _format_duration(timeout)
+    print(f"Waiting for the scanner to finish (time limit: {time_limit})...")
     while process.poll() is None:
         elapsed = int(time.monotonic() - started)
         if elapsed >= timeout:
-            print(f"\nScan timed out after {timeout} seconds; stopping {scanner_name}")
+            print(f"\nScan time limit reached after {time_limit}; stopping {scanner_name}.")
             _stop_scan_process(process)
             return False
 
@@ -534,11 +571,11 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         if effective_wiztree_mode == "auto":
             effective_wiztree_mode = "fast" if (elevated and is_whole_drive) else "standard"
         if effective_wiztree_mode == "fast" and not is_whole_drive:
-            print("Error: fast full-drive scanning is only available for drives; choose standard scanning for a folder")
+            print("Error: WizTree's Fast scan is only for whole drives. This target is a folder, so choose Standard scanning.")
             return None
         if effective_wiztree_mode == "fast" and not elevated:
             print("Error: fast full-drive scanning requires an Administrator terminal")
-            print("Run this command in an Administrator terminal, or choose standard scanning with --wiztree-mode standard")
+            print("Open this terminal with 'Run as administrator', or choose the Standard scan method.")
             return None
         if effective_wiztree_mode == "standard":
             print("WizTree standard scan selected; it may be slower and can miss files the current account cannot access.")
@@ -558,11 +595,29 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         env_name = "WIZTREE_PATH" if app == "wiztree" else "WINDIRSTAT_PATH"
         folder_name = "WizTree" if app == "wiztree" else "WinDirStat"
         print(f"Place the executable in this project's {folder_name}\\ folder, or set the {env_name} environment variable")
+        if app == "wiztree":
+            print("Scanning with Drive Cleanr requires WizTree 3.18.0 or newer for command-line CSV export.")
         if app == "windirstat":
             print("Scanning with Drive Cleanr requires WinDirStat 2.6.0 or newer.")
         return None
 
-    if app == "windirstat":
+    if app == "wiztree":
+        version = _get_windows_file_version(executable)
+        if version is None:
+            print("Warning: Could not verify WizTree's version. Command-line CSV export requires version 3.18 or newer; Drive Cleanr will try the scan with basic export options.")
+            if max_depth:
+                print("Drive Cleanr could not confirm that this version supports the requested depth limit.")
+        elif version[:2] < _WIZTREE_CLI_EXPORT_VERSION:
+            detected_version = ".".join(str(part) for part in version)
+            print(f"Error: WizTree {detected_version} is too old for command-line CSV export.")
+            print("Update to WizTree 3.18.0 or newer, then try again.")
+            return None
+        elif max_depth and version[:2] < _WIZTREE_EXPORT_DEPTH_VERSION:
+            detected_version = ".".join(str(part) for part in version)
+            print(f"WizTree {detected_version} cannot limit how many folder levels are exported.")
+            print("Choose unlimited depth, or use WizTree 4.02 or newer for a depth limit.")
+            return None
+    else:
         version = _get_windows_file_version(executable)
         if version is None:
             print("Warning: Could not verify WinDirStat's version. Drive Cleanr needs version 2.6.0 or newer for CSV export; continuing may fail.")
@@ -610,8 +665,18 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         # access and remains available to non-administrator users.
         admin_flag = "/admin=1" if effective_wiztree_mode == "fast" else "/admin=0"
         cmd = [executable, drive, f'/export={partial_file}', admin_flag,
-               '/exportfolders=1', f'/exportfiles={1 if include_files else 0}',
-               '/sortby=2', '/exportdrivecapacity=1', f'/exportmaxdepth={max_depth}']
+               '/exportfolders=1', f'/exportfiles={1 if include_files else 0}']
+        # Optional CSV details were added over several WizTree releases. Add
+        # sorting and capacity metadata only when the version confirms support.
+        # A requested depth is still attempted when the version is unreadable;
+        # the warning above tells the user that support could not be confirmed.
+        if version is not None:
+            if version[:2] >= _WIZTREE_SORT_BY_VERSION:
+                cmd.append('/sortby=2')
+            if version[:2] >= _WIZTREE_DRIVE_CAPACITY_VERSION:
+                cmd.append('/exportdrivecapacity=1')
+        if max_depth:
+            cmd.append(f'/exportmaxdepth={max_depth}')
     else:
         # WinDirStat 2.6+ /SaveTo runs headlessly and selects CSV from the suffix.
         print("Note: WinDirStat follows its saved filters, exclusions, and other scan settings.")
@@ -739,15 +804,46 @@ def _is_saved_scan_export(path, data_path=None):
     except (OSError, ValueError):
         return False
     parent_parts = tuple(part.casefold() for part in relative.parts[:-1])
-    if (parent_parts not in _LEGACY_SCAN_FOLDERS or
-            not _LEGACY_SCAN_NAME.fullmatch(candidate.stem) or
-            _path_has_reparse_component(candidate)):
+    if parent_parts == ():
+        recognized_legacy_name = bool(_LEGACY_ROOT_SCAN_NAME.fullmatch(candidate.stem))
+    else:
+        recognized_legacy_name = (
+            parent_parts in _LEGACY_SCAN_FOLDERS and
+            bool(_LEGACY_SCAN_NAME.fullmatch(candidate.stem))
+        )
+    if not recognized_legacy_name or _path_has_reparse_component(candidate):
         return False
     valid, _error = validate_scan_export(str(candidate))
     return valid
 
 
-def cleanup_old_scans(keep_latest=1, include_scripts=False):
+def is_paired_cleanup_plan(plan_path, scan_export_path):
+    """Check the generated-plan marker and path identity for one scan export."""
+    source_identity = scan_export_identity(scan_export_path)
+    candidate = Path(plan_path)
+    if source_identity is None or _path_has_reparse_component(candidate):
+        return False
+    try:
+        if not stat.S_ISREG(candidate.lstat().st_mode):
+            return False
+        with candidate.open("r", encoding="utf-8-sig", errors="strict") as plan_file:
+            header_lines = []
+            for _ in range(4):
+                line = plan_file.readline(256)
+                if not line.endswith("\n"):
+                    return False
+                header_lines.append(line.rstrip("\r\n"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return (
+        header_lines[0].startswith("# Drive Cleanr Cleanup Plan - ")
+        and header_lines[1].startswith("# Auto-generated: ")
+        and header_lines[2] == "# Drive Cleanr Plan Format: 1"
+        and header_lines[3] == f"# Source scan identity: {source_identity}"
+    )
+
+
+def cleanup_old_scans(keep_latest=1, include_scripts=False, expected_scans=None):
     """
     Clean old scan files and keep only the newest few
 
@@ -774,7 +870,20 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
     # an export that was actually removed.
     old_exports = []
     pruned_exports = []
-    csv_files = [Path(path) for path in get_saved_scans()]
+    current_scans = get_saved_scans()
+    if expected_scans is not None:
+        expected_keys = [
+            os.path.normcase(os.path.abspath(os.fspath(path)))
+            for path in expected_scans
+        ]
+        current_keys = [
+            os.path.normcase(os.path.abspath(os.fspath(path)))
+            for path in current_scans
+        ]
+        if current_keys != expected_keys:
+            print("Saved scans changed after review. Nothing was removed; review the list again.")
+            return 0
+    csv_files = [Path(path) for path in current_scans]
     if len(csv_files) > keep_latest:
         old_exports = csv_files[keep_latest:]
 
@@ -801,12 +910,23 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False):
             if old_file.stem.casefold() in remaining_stems:
                 continue
             script = skill_path / f"{old_file.stem}.clean.ps1"
-            if not script.exists():
-                continue
             if _path_has_reparse_component(script):
                 print(f"Refusing to prune linked cleanup plan: {script.name}")
                 continue
             try:
+                script.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                print(f"Could not check cleanup plan {script.name}: {describe_error(e)}")
+                continue
+            if not is_paired_cleanup_plan(script, old_file):
+                print(f"Keeping same-name script because it is not a verified plan for {old_file.name}")
+                continue
+            try:
+                if not is_paired_cleanup_plan(script, old_file):
+                    print(f"Keeping changed cleanup plan: {script.name}")
+                    continue
                 script.unlink()
                 print(f"Deleted cleanup script: {script.name}")
                 deleted += 1
@@ -824,7 +944,7 @@ def main():
     parser.add_argument('--folders-only', action='store_true', help='Do not include individual files in results (default includes files and folders)')
     parser.add_argument('--max-depth', type=int, default=0, help='Limit how many folder levels appear in WizTree results; 0 includes all levels (default: 0)')
     parser.add_argument('--wiztree-mode', choices=['auto', 'fast', 'standard'], default='auto',
-                        help='WizTree scan mode: fast full-drive scan when run as Administrator, standard scan otherwise (default: auto)')
+                        help='WizTree scan method: auto chooses Fast for a whole drive in an Administrator terminal and Standard otherwise; fast requires a whole drive and Administrator access; standard works on drives or folders (default: auto)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
     parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')
@@ -865,7 +985,7 @@ def main():
             wiztree_mode = choose_wiztree_mode()
         elif normalized_target is not None:
             wiztree_mode = "standard"
-            print("WizTree fast scanning is available only for a full drive; this folder will use standard scanning.")
+            print("WizTree's Fast scan is only for whole drives. This target is a folder, so Drive Cleanr will use Standard.")
     if wiztree_mode is None:
         sys.exit(1)
 
