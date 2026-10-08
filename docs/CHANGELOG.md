@@ -3,7 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
-- Run the Windows test matrix once for pull-request branch updates instead of duplicating it for both `push` and `pull_request`; keep main-branch pushes and manual runs covered.
+- Run the Windows test matrix for `main` pushes and pull requests, avoiding a duplicate run (and skipped check) for PR branch pushes; keep manual runs available.
 - Recognize Python virtual-environment markers (`.venv`, `venv`, and `pyvenv.cfg`) and Conda environment metadata (`conda-meta`) so project and environment data stays out of automatic cleanup suggestions; shared `.venv` and `venv` folders at the profile root do not hide unrelated cleanup locations.
 - Recheck a version 2 ZIP backup's saved hash from its open archive immediately before restore writes, and verify each staged file against the member hash read during preflight so archive changes are not published.
 - Let users select a saved backup by its numbered row in the guided menu, with clear retry and cancel choices, instead of typing its full backup ID.

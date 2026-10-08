@@ -159,16 +159,15 @@ class ScannerDocumentationTests(unittest.TestCase):
 
 
 class GitHubWorkflowTests(unittest.TestCase):
-    def test_windows_matrix_avoids_duplicate_non_main_push_runs(self):
+    def test_windows_matrix_runs_on_main_pushes_and_prs_without_branch_push_duplicates(self):
         workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-tests.yml"
         workflow = workflow_path.read_text(encoding="utf-8")
 
-        self.assertIn("  pull_request:", workflow)
-        self.assertIn("  workflow_dispatch:", workflow)
         self.assertIn(
-            "    if: github.event_name != 'push' || github.ref == 'refs/heads/main'",
+            "  push:\n    branches:\n      - main\n  pull_request:",
             workflow,
         )
+        self.assertIn("  workflow_dispatch:", workflow)
 
 
 class AnalyzeSafetyTests(unittest.TestCase):
