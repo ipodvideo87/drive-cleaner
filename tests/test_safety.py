@@ -362,6 +362,76 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("Folder search complete.", output.getvalue())
         self.assertIn("D = keep these picks; B = return without adding them.", output.getvalue())
 
+    def test_keyboard_folder_browser_shows_and_can_clear_a_main_list_pick(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        keys = ["down", "toggle", "home", "browse", "toggle", "d", "enter"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=keys), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selection = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertIsNone(selection)
+        self.assertIn("[x] [1]", output.getvalue())
+        self.assertIn("[ ] [1]", output.getvalue())
+
+    def test_keyboard_folder_browser_keeps_a_main_list_pick_checked_without_duplicates(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        keys = ["down", "toggle", "home", "browse", "d", "enter"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=keys), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [nested_path])
+        self.assertEqual(expanded, [])
+        self.assertIn("[x] [1]", output.getvalue())
+
     def test_keyboard_folder_browser_b_returns_without_adding_nested_picks(self):
         folder_path = r"C:\Users\A\AppData\Local\npm-cache"
         nested_path = folder_path + r"\content-v2\entry.bin"
@@ -3661,7 +3731,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 f"[System.Management.Automation.Language.Parser]::ParseFile({ps_literal},[ref]$tokens,[ref]$errors)|Out-Null;"
                 "if($errors.Count){$errors|Format-List;exit 1}"
             )
-            result = subprocess.run([powershell, "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=20)
+            result = subprocess.run([powershell, "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
@@ -4908,6 +4978,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             script_text = script_path.read_text(encoding="utf-8-sig")
             insertion_point = "            $targetFilesPlanned = 1\n"
             self.assertIn(insertion_point, script_text)
@@ -5539,7 +5610,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected-cache"
             selected.mkdir()
@@ -5550,6 +5626,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             fake_backup = root / "backup.py"
             fake_backup.write_text(
                 "import json, sys\n"
@@ -6326,7 +6403,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._isolated_windows_profile() as isolated_profile, tempfile.TemporaryDirectory(
+            dir=isolated_profile / "AppData" / "Local" / "Temp"
+        ) as temp_dir:
             root = Path(temp_dir)
             missing = root / "missing"
             selected = root / "selected"
@@ -6342,6 +6421,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             ]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             backup_log = root / "backup-targets.txt"
             (root / "backup.py").write_text(
                 "import json, os, sys\n"

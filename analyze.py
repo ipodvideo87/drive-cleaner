@@ -4368,6 +4368,7 @@ def select_manual_review_files(results):
 def _browse_folder_candidates(
     csv_file, min_size_mb, folder_entries, priority, initial_selected_paths=None,
     folder_already_chosen=False, nested_selection_by_folder=None,
+    available_path_keys=None,
 ):
     """Find and let the user choose exact scan entries inside one listed folder."""
     if not folder_entries:
@@ -4444,6 +4445,12 @@ def _browse_folder_candidates(
         if candidate_priority in {"high", "medium", "low"} and isinstance(item, dict)
     ]
     entries.sort(key=lambda pair: (-pair[1].get("size", 0), _path_key(pair[1].get("path", ""))))
+    if isinstance(available_path_keys, set):
+        available_path_keys.update(
+            _path_key(item.get("path", ""))
+            for _candidate_priority, item in entries
+            if isinstance(item.get("path"), str) and item.get("path")
+        )
     if not entries:
         if isinstance(nested_selection_by_folder, dict):
             nested_selection_by_folder[folder_key] = []
@@ -4658,6 +4665,11 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
         for candidate_priority, item in entries
     ]
     expanded_by_key = {}
+    main_candidate_keys = {
+        _path_key(item["path"])
+        for _candidate_priority, item in entries
+        if isinstance(item.get("path"), str) and item.get("path")
+    }
 
     def browse_highlighted_folder(folder_item, selected_paths):
         if not csv_file:
@@ -4672,7 +4684,12 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
             path_key for path_key in expanded_by_key
             if is_inside_selected_folder(path_key)
         }
-        initial_nested = previous_nested.intersection(selected_paths)
+        main_nested = {
+            path_key for path_key in main_candidate_keys
+            if is_inside_selected_folder(path_key)
+        }
+        available_nested_paths = set()
+        initial_nested = (previous_nested | main_nested).intersection(selected_paths)
         folder_pair = next(
             pair for pair in folders
             if _path_key(pair[1].get("path", "")) == _path_key(folder_item.get("path", ""))
@@ -4681,17 +4698,20 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
             csv_file, min_size_mb, [folder_pair], priority,
             initial_selected_paths=initial_nested,
             folder_already_chosen=True,
+            available_path_keys=available_nested_paths,
         )
         if browsed is None:
             return "Folder browse cancelled; earlier picks are unchanged."
-        for path_key in previous_nested:
+        replace_nested = previous_nested | main_nested.intersection(available_nested_paths)
+        for path_key in replace_nested:
             selected_paths.discard(path_key)
             expanded_by_key.pop(path_key, None)
         for candidate_priority, item in browsed:
             path_key = _path_key(item.get("path", ""))
             if path_key:
                 selected_paths.add(path_key)
-                expanded_by_key[path_key] = (candidate_priority, item)
+                if path_key not in main_candidate_keys:
+                    expanded_by_key[path_key] = (candidate_priority, item)
         count = len(browsed)
         return f"{count} exact scan file/folder entr{'y' if count == 1 else 'ies'} selected inside this folder."
 
