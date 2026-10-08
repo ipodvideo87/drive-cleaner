@@ -345,7 +345,7 @@ def _backup_menu():
                 continue
             if choice == "3":
                 items = manifest.get("items")
-                restore_paths = []
+                restore_items = []
                 manifest_version = backup._manifest_version(manifest)
                 valid_manifest = (
                     manifest.get("status") == "completed" and
@@ -361,21 +361,23 @@ def _backup_menu():
                         restore_path = item.get("original_path")
                         if (not backup._valid_restore_target(restore_path) or
                                 backup._restore_path_overlaps_backup_storage(restore_path, backup_roots) or
-                                any(backup._paths_overlap(restore_path, previous)
-                                    for previous in restore_paths)):
+                                any(backup._paths_overlap(restore_path, previous_path)
+                                    for _, previous_path in restore_items)):
                             valid_manifest = False
                             break
-                        restore_paths.append(restore_path)
+                        restore_items.append((backup._restore_target_type_label(item), restore_path))
                 if not valid_manifest:
                     print("This backup is incomplete or contains invalid restore details. It cannot be restored safely.")
                     _pause()
                     continue
-                print("Original locations in this backup:")
-                for restore_path in restore_paths:
-                    print(f"  {backup._safe_terminal_text(restore_path)}")
-                print("Choose how to handle files already present at these locations:")
+                print("Original items saved in this backup:")
+                for target_type, restore_path in restore_items:
+                    print(f"  {target_type} | {backup._safe_terminal_text(restore_path)}")
+                print("Choose how to handle files that already exist at a restore location:")
+                print("  OVERWRITE replaces files at matching paths, including files inside folders.")
+                print("  MERGE restores missing files and keeps files that already exist.")
                 try:
-                    confirm = input("Type OVERWRITE to replace existing files, MERGE to restore missing files and keep existing ones, or press Enter to cancel: ").strip().upper()
+                    confirm = input("Type OVERWRITE, MERGE, or press Enter to cancel: ").strip().upper()
                 except (EOFError, KeyboardInterrupt):
                     return
                 if confirm in {"OVERWRITE", "MERGE"}:

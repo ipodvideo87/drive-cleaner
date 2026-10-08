@@ -1817,6 +1817,18 @@ def _restore_manifest_item_is_complete(item, manifest_version: int) -> bool:
     return _valid_sha256_digest(digest)
 
 
+def _restore_target_type_label(item) -> str:
+    """Return a safe user-facing type for a validated restore entry."""
+    if not isinstance(item, dict):
+        return "Unknown target"
+    backup_format = item.get("format")
+    if backup_format == "file":
+        return "File"
+    if backup_format in {"copy", "zip"}:
+        return "Folder"
+    return "Unknown target"
+
+
 def verify_backup(backup_id: str, paths: Optional[List[str]] = None) -> bool:
     """Verify saved payloads and ensure current sources still match them."""
     manifest = get_backup(backup_id)
@@ -2116,7 +2128,8 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
     restore_progress = _BackupProgress("Restoring backup")
 
     for item, original_path, backup_path, backup_format in validated_items:
-        print(f"[Restore] {_safe_terminal_text(original_path, 'path')}")
+        target_type = _restore_target_type_label(item)
+        print(f"[Restore] {target_type} | {_safe_terminal_text(original_path, 'path')}")
         item_conflicts = 0
 
         try:

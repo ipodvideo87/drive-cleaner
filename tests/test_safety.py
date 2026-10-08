@@ -7971,9 +7971,29 @@ class ScanSafetyTests(unittest.TestCase):
              redirect_stdout(io.StringIO()) as output:
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=False)
-        self.assertIn("Original locations in this backup", output.getvalue())
+        self.assertIn("Original items saved in this backup", output.getvalue())
+        self.assertIn("File |", output.getvalue())
         self.assertIn(r"C:\Users\ExampleUser\cache.bin", output.getvalue())
-        self.assertIn("restore missing files and keep existing ones", user_input.call_args_list[2].args[0])
+        self.assertIn("MERGE restores missing files", output.getvalue())
+        self.assertIn("MERGE", user_input.call_args_list[2].args[0])
+
+    def test_backup_menu_labels_folder_restore_targets(self):
+        manifests = [{
+            "id": "backup_test", "version": 1, "status": "completed",
+            "items": [{
+                "original_path": r"C:\Users\ExampleUser\Documents\saved-folder",
+                "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.zip",
+                "format": "zip", "size": 1,
+            }],
+        }]
+        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True), \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(io.StringIO()) as output:
+            drive_cleaner._backup_menu()
+        self.assertIn(r"Folder | C:\Users\ExampleUser\Documents\saved-folder", output.getvalue())
 
     def test_backup_menu_requires_explicit_overwrite_choice(self):
         manifests = [{"id": "backup_test", "version": 1, "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\cache.bin", "format": "file", "size": 1}]}]
@@ -11218,6 +11238,7 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             self.assertFalse(destination.exists())
             restore_summary = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+            self.assertIn("[Restore] Folder |", restore_summary)
             self.assertIn("Restore incomplete: 0/1 items; 1 failed", restore_summary)
             self.assertNotIn("Restore complete", restore_summary)
 

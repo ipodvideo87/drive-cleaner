@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Label each guided restore destination and restore progress item as a File or Folder, and explain the scope of OVERWRITE and MERGE before the choice.
 - Open the paginated keyboard picker before printing candidates, so large selections do not spend time dumping off-page paths before users can begin.
 - Explain that WizTree's Fast full-drive mode reads the file table directly only on NTFS (a common Windows file system); other file systems use normal Windows scanning, as shown in the scan menu, progress, reports, and guide.
 - Reject mapped network and optical drives at scan setup, skip non-local scan-export entries, require real local volumes for backup and restore paths, and recheck the volume type when a saved cleanup plan starts.
