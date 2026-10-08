@@ -2109,6 +2109,35 @@ class AnalyzeSafetyTests(unittest.TestCase):
         )
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_python_and_conda_environment_markers_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            marker_specs = (
+                ("python-venv-folder", ".venv", "directory"),
+                ("python-venv-folder-name", "venv", "directory"),
+                ("python-venv-config", "pyvenv.cfg", "file"),
+                ("conda-environment", "conda-meta", "directory"),
+            )
+            for project_name, marker, marker_type in marker_specs:
+                project = Path(temp_dir) / project_name
+                cache = project / "Cache"
+                cache.mkdir(parents=True)
+                marker_path = project / marker
+                if marker_type == "directory":
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(marker_specs))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for _, marker, _ in marker_specs},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
     def test_project_marker_at_user_profile_root_is_checked_before_walking_stops(self):
         profile = r"C:\Users\ExampleUser"
         cache_path = profile + r"\AppData\Local\Temp\pip\cache"
@@ -2127,7 +2156,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "Directory.Solution.props", "Directory.Solution.targets",
                 "Work.code-workspace", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md",
                 "GEMINI.md", "SKILL.md", ".cursorrules", "copilot-instructions.md",
-                "WindowsSandbox.wsb",
+                "WindowsSandbox.wsb", ".venv", "venv",
                 ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf"):
             entry = mock.Mock()
             entry.name = name
@@ -2179,6 +2208,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             profile_root = fixture / "relocated profile"
             temp_root = profile_root / "Temp"
             temp_root.mkdir(parents=True)
+            (profile_root / ".venv").mkdir()
+            (profile_root / "venv").mkdir()
             (profile_root / ".gitignore").write_text("*.cache\n", encoding="utf-8")
             (profile_root / "WindowsSandbox.wsb").write_text(
                 "<Configuration></Configuration>", encoding="utf-8"
@@ -5677,11 +5708,19 @@ class AnalyzeSafetyTests(unittest.TestCase):
                     ("julia-explicit-project", "JuliaProject.toml"),
                     ("julia-manifest", "Manifest.toml"),
                     ("julia-explicit-manifest", "JuliaManifest.toml"),
+                    ("python-venv-folder", ".venv"),
+                    ("python-venv-folder-name", "venv"),
+                    ("python-venv-config", "pyvenv.cfg"),
+                    ("conda-environment", "conda-meta"),
                      ("windows-sandbox-config", "Acceptance.wsb")):
                 cross_project = selected / "nested" / project_name
                 cross_cache = cross_project / "Cache"
                 cross_cache.mkdir(parents=True)
-                (cross_project / marker).touch()
+                marker_path = cross_project / marker
+                if marker in {".venv", "venv", "conda-meta"}:
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
                 kept_file = cross_cache / "keep.bin"
                 kept_file.write_bytes(b"project data")
                 cross_platform_kept_files.append(kept_file)

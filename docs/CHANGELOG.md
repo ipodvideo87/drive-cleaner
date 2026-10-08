@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Recognize Python virtual-environment markers (`.venv`, `venv`, and `pyvenv.cfg`) and Conda environment metadata (`conda-meta`) so project and environment data stays out of automatic cleanup suggestions; shared `.venv` and `venv` folders at the profile root do not hide unrelated cleanup locations.
 - Recheck a version 2 ZIP backup's saved hash from its open archive immediately before restore writes, and verify each staged file against the member hash read during preflight so archive changes are not published.
 - Let users select a saved backup by its numbered row in the guided menu, with clear retry and cancel choices, instead of typing its full backup ID.
 - Label each guided restore destination and restore progress item as a File or Folder, and explain the scope of OVERWRITE and MERGE before the choice.

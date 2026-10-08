@@ -952,7 +952,7 @@ PROJECT_MARKERS = (
     "gemfile.lock", "rakefile", "dockerfile", "containerfile", "docker-compose.yml",
     "docker-compose.yaml", "build.sbt", "mix.exs", "pubspec.yaml", "project.godot", "projectsettings",
     "renv.lock", "description", "project.toml", "juliaproject.toml", "manifest.toml",
-    "juliamanifest.toml",
+    "juliamanifest.toml", ".venv", "venv", "pyvenv.cfg", "conda-meta",
 )
 PROJECT_MARKER_SUFFIXES = (
     ".sln", ".slnx", ".csproj", ".vbproj", ".fsproj", ".vcxproj", ".wixproj", ".rproj",
@@ -965,7 +965,7 @@ PYTHON_REQUIREMENTS_MARKER_PATTERN = re.compile(
 )
 _PROJECT_MARKER_NAMES = frozenset(marker.casefold() for marker in PROJECT_MARKERS)
 _PROFILE_ROOT_IGNORED_MARKER_LIST = (
-    ".gitignore", ".editorconfig", ".vscode",
+    ".gitignore", ".editorconfig", ".vscode", ".venv", "venv",
     ".cursorrules", ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf",
     "agents.md", "agents.override.md", "claude.md", "gemini.md",
     "copilot-instructions.md", "skill.md",
