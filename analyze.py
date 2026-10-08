@@ -4702,22 +4702,9 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
         print("No files or folders are available at that review level.")
         return ([], [])
 
-    print("\nChoose the files and folders to include in the cleanup plan:")
-    for index, (candidate_priority, item) in enumerate(entries, start=1):
+    for candidate_priority, item in entries:
         if not isinstance(item, dict):
             raise ValueError("Cleanup plan contains a malformed candidate")
-        tier_name = CLEANABLE_PATTERNS[candidate_priority]["name"]
-        size = item.get("size_formatted", "unknown size")
-        name = item.get("name", "candidate")
-        path = item.get("path", "(unknown path)")
-        print(f"  [{index}] {tier_name} | {display_item_type(item)} | {size} | {name}")
-        print(f"      {path}")
-    print("Each row is labeled File or Folder. A file selection means that file; a folder selection includes eligible contents inside it.")
-    print("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.")
-    print("Protected paths and detected projects are kept. Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too. The plan preview shows up to 12 direct items; other contents may also be removed.")
-    print("Use Up/Down to move the highlight, Space to select or clear an item, and Enter to finish. Esc or Q cancels.")
-    print("A selects every suggestion in this list. D browses scan entries inside the highlighted folder. The scan must include file rows to select individual files.")
-    print("If arrow-key selection is unavailable, enter item numbers to toggle picks; the main list and folder browsing share one selection, so the same file or folder is never added twice. A selects listed suggestions, D opens folder browsing, and Q cancels.")
 
     selected_entries = []
     selected_keys = set()
@@ -4814,6 +4801,22 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
             if path_key in selected_keys
         ]
     else:
+        # Printing thousands of scan rows before launching the paginated
+        # keyboard picker can make the UI appear stalled. Show the full list
+        # only when this terminal needs the numbered-input fallback.
+        print("\nChoose the files and folders to include in the cleanup plan:")
+        for index, (candidate_priority, item) in enumerate(entries, start=1):
+            tier_name = CLEANABLE_PATTERNS[candidate_priority]["name"]
+            size = item.get("size_formatted", "unknown size")
+            name = item.get("name", "candidate")
+            path = item.get("path", "(unknown path)")
+            print(f"  [{index}] {tier_name} | {display_item_type(item)} | {size} | {name}")
+            print(f"      {path}")
+        print("Each row is labeled File or Folder. A file selection means that file; a folder selection includes eligible contents inside it.")
+        print("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.")
+        print("Protected paths and detected projects are kept. Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too. The plan preview shows up to 12 direct items; other contents may also be removed.")
+        print("A selects every suggestion in this list. D browses scan entries inside a listed folder. The scan must include file rows to select individual files.")
+        print("Enter item numbers to toggle picks; the main list and folder browsing share one selection, so the same file or folder is never added twice. A selects listed suggestions, D opens folder browsing, and Q cancels.")
         selected_by_key = {}
         while True:
             answer = input(

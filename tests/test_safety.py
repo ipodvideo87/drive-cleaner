@@ -317,9 +317,38 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
         self.assertEqual(selected, [items[0]["path"], items[6]["path"]])
         self.assertEqual(expanded, [])
-        self.assertIn("Use Up/Down to move the highlight", output.getvalue())
-        self.assertIn("Space to select or clear an item", output.getvalue())
+        self.assertTrue(output.getvalue().startswith("\x1b[2J\x1b[H"))
+        self.assertIn("Use the Up/Down arrow keys to move the highlight", output.getvalue())
+        self.assertIn("Spacebar to select or clear an item", output.getvalue())
         self.assertIn("Page 2 of 2", output.getvalue())
+
+    def test_keyboard_cleanup_picker_does_not_print_every_candidate_before_paging(self):
+        items = [{
+            "path": rf"C:\Users\A\Temp\item-{index}.tmp",
+            "size": index + 1,
+            "size_formatted": f"{index + 1} B",
+            "kind": "File",
+            "name": f"Temporary file {index}",
+        } for index in range(200)]
+        results = {"categories": {
+            "high": {"name": "High", "items": items},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=["toggle", "enter"]), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(results, "high")
+
+        rendered = output.getvalue()
+        self.assertEqual(selected, [items[0]["path"]])
+        self.assertEqual(expanded, [])
+        self.assertTrue(rendered.startswith("\x1b[2J\x1b[H"))
+        self.assertIn("Page 1 of 34", rendered)
+        self.assertNotIn(items[-1]["path"], rendered)
 
     def test_keyboard_cleanup_picker_browses_highlighted_folder_and_keeps_main_picks(self):
         folder_path = r"C:\Users\A\AppData\Local\npm-cache"
@@ -584,10 +613,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("| File |", output.getvalue())
         self.assertIn("| Folder |", output.getvalue())
         self.assertIn("Each row is labeled File or Folder.", output.getvalue())
-        self.assertIn("If arrow-key selection is unavailable, enter item numbers to toggle picks", output.getvalue())
+        self.assertIn("Enter item numbers to toggle picks", output.getvalue())
         self.assertIn("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.", output.getvalue())
         self.assertIn("Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too.", output.getvalue())
-        self.assertIn("D browses scan entries inside the highlighted folder.", output.getvalue())
+        self.assertIn("D browses scan entries inside a listed folder.", output.getvalue())
         self.assertIn("The scan must include file rows to select individual files.", output.getvalue())
         self.assertIn("Added 1 individual file and 1 folder to the cleanup plan.", output.getvalue())
         self.assertIn(

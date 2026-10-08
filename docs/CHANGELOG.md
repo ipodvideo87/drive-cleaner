@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Open the paginated keyboard picker before printing candidates, so large selections do not spend time dumping off-page paths before users can begin.
 - Explain that WizTree's Fast full-drive mode reads the file table directly only on NTFS (a common Windows file system); other file systems use normal Windows scanning, as shown in the scan menu, progress, reports, and guide.
 - Reject mapped network and optical drives at scan setup, skip non-local scan-export entries, require real local volumes for backup and restore paths, and recheck the volume type when a saved cleanup plan starts.
 - Revalidate scan exports and paired cleanup plans through the same opened file that Windows will remove, while holding parent folders against replacement; reject links and junctions inserted after the initial retention review.
