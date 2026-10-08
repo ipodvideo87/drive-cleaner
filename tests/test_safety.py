@@ -149,11 +149,11 @@ class ScannerDocumentationTests(unittest.TestCase):
         readme_path = Path(__file__).resolve().parent.parent / "README.md"
         readme = readme_path.read_text(encoding="utf-8")
 
-        self.assertIn(
-            "Drive Cleanr supports portable versions of both WizTree and WinDirStat.",
-            readme,
-        )
-        self.assertIn("select its `.exe` file", readme)
+        self.assertIn("Drive Cleanr supports the official portable versions of", readme)
+        self.assertIn("[WizTree](https://diskanalyzer.com/download)", readme)
+        self.assertIn("[WinDirStat](https://github.com/windirstat/windirstat/releases)", readme)
+        self.assertIn("choose a different executable for that scanner", readme)
+        self.assertIn("enter its executable path when prompted", readme)
         self.assertIn("WIZTREE_PATH", readme)
         self.assertIn("WINDIRSTAT_PATH", readme)
 
@@ -1222,7 +1222,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.run_tui(initial_csv=str(csv_path))
             generate.assert_not_called()
 
-    def analyze_rows(self, rows, exists=None, **analyze_options):
+    def analyze_rows(self, rows, exists=None, drive_type=3, **analyze_options):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -1237,9 +1237,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         # These tests model filesystem type/existence for synthetic
                         # Windows paths. Treat those modeled files as size-matched;
                         # dedicated stale-size tests use real temporary files.
-                        with mock.patch.object(
-                                analyze, "_live_file_size_matches_scan", return_value=True):
-                            return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
+                        with mock.patch.object(analyze.scan, "_windows_drive_type", return_value=drive_type):
+                            with mock.patch.object(
+                                    analyze, "_live_file_size_matches_scan", return_value=True):
+                                return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
 
     def test_reports_explain_and_preserve_non_english_scan_paths(self):
         non_english_path = r"C:\Users\A\AppData\Local\Temp\临时文件.tmp"
@@ -2461,6 +2462,19 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["scan_mode"], "wiztree_standard")
         self.assertIn("files inaccessible to this account may be missing", report_text)
 
+    def test_fast_wiztree_report_explains_ntfs_only_file_table_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan_wiztree_fast_mock.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            with mock.patch("builtins.print") as output:
+                analyze.print_report(results)
+        report_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertEqual(results["scan_mode"], "wiztree_fast")
+        self.assertIn("NTFS is a common Windows file system", report_text)
+        self.assertIn("reads the file table directly", report_text)
+        self.assertIn("Other file systems use normal Windows scanning", report_text)
+
     def test_review_menu_returns_cleanly_after_an_invalid_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "bad.csv"
@@ -2717,7 +2731,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         custom_paths = {
             r"C:\Users\A\Archive\npm-cache" + "\\",
             r"C:\Users\A\Projects\Unmarked\pip\cache" + "\\",
-            r"D:\Shared\electron\cache" + "\\",
+            r"C:\Shared\electron\cache" + "\\",
             r"C:\Users\A\Archive\yarn\cache" + "\\",
             r"C:\Users\A\Archive\.cache\puppeteer" + "\\",
         }
@@ -3669,6 +3683,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
             script,
         )
         self.assertIn("Preserve excluded paths and nested projects", script)
+        self.assertIn("function Get-CleanupDriveType([string]$DriveRoot)", script)
+        self.assertIn("function Assert-LocalDriveTarget([string]$Path)", script)
+        self.assertIn("[System.IO.DriveType]::Fixed", script)
+        self.assertIn("[System.IO.DriveType]::Removable", script)
+        self.assertIn("[System.IO.DriveType]::Ram", script)
+        self.assertIn("Assert-LocalDriveTarget $Target.Path", script)
         self.assertIn("$protectedPathPattern", script)
         self.assertIn("HashSet[string]", script)
         self.assertIn("$projectMarkers", script)
@@ -3802,6 +3822,54 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run([powershell, "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_refuses_drive_that_now_maps_to_network(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            target = root / "candidate-cache.tmp"
+            original = b"network-drive guard fixture"
+            target.write_bytes(original)
+            label = "Temporary files (check for installers or builds in progress)"
+            results = {"categories": {
+                "high": {"name": "High", "items": [{
+                    "path": str(target), "name": label,
+                    "size": len(original), "scan_logical_size": len(original),
+                    "size_formatted": f"{len(original)} B", "kind": "File",
+                }]},
+                "medium": {"name": "Medium", "items": []},
+                "low": {"name": "Low", "items": []},
+            }}
+            script_path = root / "network-drive-test.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            live_drive_check = (
+                "function Get-CleanupDriveType([string]$DriveRoot) {\n"
+                "    return ([System.IO.DriveInfo]::new($DriveRoot)).DriveType\n"
+                "}"
+            )
+            network_drive_mock = (
+                "function Get-CleanupDriveType([string]$DriveRoot) {\n"
+                "    return [System.IO.DriveType]::Network\n"
+                "}"
+            )
+            self.assertIn(live_drive_check, script_text)
+            script_path.write_text(script_text.replace(live_drive_check, network_drive_mock, 1), encoding="utf-8-sig")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("network", (result.stdout + result.stderr).casefold())
+            self.assertTrue(target.exists(), result.stdout + result.stderr)
+            self.assertEqual(target.read_bytes(), original)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_cleanup_runs_in_windows_powershell_51(self):
@@ -6722,7 +6790,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "size_formatted": "100 B", "kind": "Directory",
         }]
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
-                os.environ, {"GRADLE_USER_HOME": r"Z:\DriveCleanrTest\.gradle"}):
+                os.environ, {"GRADLE_USER_HOME": r"Z:\DriveCleanrTest\.gradle"}), \
+             mock.patch.object(scan, "_windows_drive_type", return_value=3):
             output = Path(temp_dir) / "clean-all.ps1"
             analyze.generate_clean_script({"categories": categories}, str(output), priority="all")
             self.assertIn(path, output.read_text(encoding="utf-8-sig"))
@@ -6971,6 +7040,27 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertEqual(candidate.read_bytes(), b"original scanned contents changed")
 
 
+    def test_analysis_skips_mapped_network_entries_and_reports_the_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic-scan.csv"
+            csv_path.write_text(
+                "File Name,Size\nZ:\\Users\\Example\\AppData\\Local\\Temp\\cache.tmp,104857600\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(analyze.os, "name", "nt"), \
+                 mock.patch.object(scan, "_windows_drive_type", return_value=4):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+        self.assertEqual(results["non_local_drive_path_count"], 1)
+        self.assertEqual(
+            sum(len(category["items"]) for category in results["categories"].values()), 0
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            analyze.print_report(results)
+        self.assertIn("Skipped 1 scan entries on network, optical, unavailable, or unrecognized drives", output.getvalue())
+
+
 class ScanSafetyTests(unittest.TestCase):
     def _capture_wiztree_command(self, version, max_depth=0):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -6994,7 +7084,7 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
                      mock.patch("builtins.print"):
                     result = scan.scan(
-                        "D:", max_depth=max_depth, app="wiztree", wiztree_mode="standard"
+                        "C:", max_depth=max_depth, app="wiztree", wiztree_mode="standard"
                     )
             finally:
                 scan.DATA_DIR = old_data_dir
@@ -7078,11 +7168,20 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_scan_target_accepts_drive_roots_and_existing_local_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            self.assertEqual(scan._normalize_scan_target("d:"), "D:")
+            self.assertEqual(scan._normalize_scan_target("c:"), "C:")
             self.assertEqual(scan._normalize_scan_target("C:\\"), "C:\\")
             self.assertTrue(scan._is_whole_drive_target("C:\\"))
             self.assertEqual(scan._normalize_scan_target(temp_dir), os.path.normpath(temp_dir))
             self.assertFalse(scan._is_whole_drive_target(temp_dir))
+
+    def test_scan_target_rejects_mapped_network_drives(self):
+        with mock.patch.object(scan, "_windows_drive_type", return_value=4):
+            with self.assertRaisesRegex(ValueError, "mapped network"):
+                scan._normalize_scan_target("Z:")
+            if os.name == "nt":
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    with self.assertRaisesRegex(ValueError, "mapped network"):
+                        scan._normalize_scan_target(temp_dir)
 
     def test_scan_target_rejects_missing_relative_and_network_folders(self):
         for target in ("relative\\folder", r"\\server\share", "Z:\\missing\\folder"):
@@ -7115,10 +7214,14 @@ class ScanSafetyTests(unittest.TestCase):
 
         prompt = output.getvalue()
         self.assertIn("opened with 'Run as administrator'", prompt)
+        self.assertIn("NTFS is a common Windows file system", prompt)
         self.assertIn("Automatic (recommended)", prompt)
-        self.assertIn("Drive Cleanr chooses Fast for this drive", prompt)
-        self.assertIn("WizTree's quickest method; scans a whole drive", prompt)
-        self.assertIn("works on drives or folders without Administrator access", prompt)
+        self.assertIn("Drive Cleanr chooses Fast for a whole drive", prompt)
+        self.assertIn("Fast reads the file table directly", prompt)
+        self.assertIn("other file systems use normal Windows scanning", prompt)
+        self.assertIn("Requires a whole drive and Administrator access", prompt)
+        self.assertIn("needs no Administrator access", prompt)
+        self.assertIn("works on drives or folders", prompt)
         self.assertIn(
             "1 = Automatic; 2 = Fast full-drive; 3 = Standard; Enter = 1; Q = cancel",
             input_mock.call_args.args[0],
@@ -7130,6 +7233,7 @@ class ScanSafetyTests(unittest.TestCase):
                 old_data_dir = scan.DATA_DIR
                 scan.DATA_DIR = str(Path(temp_dir) / "data")
                 captured = {}
+                output = io.StringIO()
 
                 def fake_popen(command, **_kwargs):
                     captured["command"] = command
@@ -7144,14 +7248,17 @@ class ScanSafetyTests(unittest.TestCase):
                          mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
                          mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                          mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
-                         mock.patch("builtins.print"):
-                        result = scan.scan("D:", app="wiztree")
+                         redirect_stdout(output):
+                        result = scan.scan("C:", app="wiztree")
                 finally:
                     scan.DATA_DIR = old_data_dir
                 self.assertTrue(result.endswith(".csv"))
                 self.assertIn(expected_flag, captured["command"])
                 expected_mode = "standard" if expected_flag == "/admin=0" else "fast"
                 self.assertTrue(Path(result).name.startswith(f"scan_wiztree_{expected_mode}_"))
+                if elevated:
+                    self.assertIn("NTFS uses direct file-table scanning", output.getvalue())
+                    self.assertIn("other file systems use normal Windows scanning", output.getvalue())
 
     def test_scan_uses_a_manually_selected_scanner_executable(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7179,7 +7286,7 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_export), \
                  redirect_stdout(io.StringIO()):
                 result = scan.scan(
-                    "D:", app="wiztree", wiztree_mode="standard",
+                    "C:", app="wiztree", wiztree_mode="standard",
                     scanner_executable_path=str(executable),
                 )
 
@@ -7193,7 +7300,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              redirect_stdout(output):
             result = scan.scan(
-                "D:", app="wiztree", wiztree_mode="standard",
+                "C:", app="wiztree", wiztree_mode="standard",
                 scanner_executable_path="relative\\missing.exe",
             )
         self.assertIsNone(result)
@@ -7231,7 +7338,7 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch.object(scan, "check_admin", return_value=False), \
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              mock.patch("builtins.print") as output:
-            self.assertIsNone(scan.scan("D:", app="wiztree", wiztree_mode="fast"))
+            self.assertIsNone(scan.scan("C:", app="wiztree", wiztree_mode="fast"))
         launch.assert_not_called()
         self.assertIn("requires an Administrator terminal", " ".join(str(c) for c in output.call_args_list))
 
@@ -7251,7 +7358,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 5, 9, 0)), \
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              redirect_stdout(output):
-            self.assertIsNone(scan.scan("D:", app="windirstat"))
+            self.assertIsNone(scan.scan("C:", app="windirstat"))
 
         self.assertIn("WinDirStat 2.5.9.0 is too old", output.getvalue())
         self.assertIn("Update to WinDirStat 2.6.0 or newer", output.getvalue())
@@ -7264,7 +7371,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "check_admin", return_value=False), \
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              redirect_stdout(output):
-            self.assertIsNone(scan.scan("D:", app="wiztree", wiztree_mode="standard"))
+            self.assertIsNone(scan.scan("C:", app="wiztree", wiztree_mode="standard"))
 
         self.assertIn("WizTree 3.17.9.0 is too old", output.getvalue())
         self.assertIn("Update to WizTree 3.18.0 or newer", output.getvalue())
@@ -7278,7 +7385,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              redirect_stdout(output):
             self.assertIsNone(
-                scan.scan("D:", max_depth=3, app="wiztree", wiztree_mode="standard")
+                scan.scan("C:", max_depth=3, app="wiztree", wiztree_mode="standard")
             )
 
         self.assertIn("cannot limit how many folder levels", output.getvalue())
@@ -7312,13 +7419,13 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                      mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
                      mock.patch("builtins.print") as output:
-                    result = scan.scan("D:", app="windirstat")
+                    result = scan.scan("C:", app="windirstat")
                     output_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
             finally:
                 scan.DATA_DIR = old_data_dir
         self.assertTrue(result.endswith(".csv"))
         self.assertEqual(captured["command"][:2], ["/mock/WinDirStat.exe", "/SaveTo"])
-        self.assertEqual(captured["command"][-1], "D:")
+        self.assertEqual(captured["command"][-1], "C:")
         self.assertNotEqual(captured["command"][2], result)
         self.assertEqual(Path(captured["command"][2]).name, Path(result).name)
         self.assertEqual(Path(captured["command"][2]).parent.name, ".incomplete")
@@ -7331,7 +7438,7 @@ class ScanSafetyTests(unittest.TestCase):
     def test_wiztree_318_scans_with_version_independent_export_options(self):
         result, command = self._capture_wiztree_command((3, 18, 0, 0))
         self.assertTrue(result.endswith(".csv"))
-        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "D:"])
+        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "C:"])
         self.assertIn("/admin=0", command)
         self.assertIn("/exportfolders=1", command)
         self.assertIn("/exportfiles=1", command)
@@ -7363,7 +7470,7 @@ class ScanSafetyTests(unittest.TestCase):
     def test_wiztree_425_launches_documented_csv_export_options(self):
         result, command = self._capture_wiztree_command((4, 25, 0, 0), max_depth=3)
         self.assertTrue(result.endswith(".csv"))
-        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "D:"])
+        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "C:"])
         self.assertIn("/admin=0", command)
         self.assertIn("/exportfolders=1", command)
         self.assertIn("/exportfiles=1", command)
@@ -7375,7 +7482,7 @@ class ScanSafetyTests(unittest.TestCase):
         for options in ({"max_depth": 3}, {"include_files": False}, {"wiztree_mode": "standard"}):
             with self.subTest(options=options), mock.patch("builtins.print") as output, \
                  mock.patch.object(scan.subprocess, "Popen") as launch:
-                self.assertIsNone(scan.scan("D:", app="windirstat", **options))
+                self.assertIsNone(scan.scan("C:", app="windirstat", **options))
                 launch.assert_not_called()
                 message = " ".join(str(c) for c in output.call_args_list)
                 if not options.get("include_files", True):
@@ -7390,11 +7497,11 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "find_windirstat", return_value=detected_scanner) as find_scanner, \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui") as run_review, \
-             mock.patch("builtins.input", side_effect=["", "D:", "", ""]) as input_mock, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", ""]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(
-            drive="D:", include_files=True, max_depth=0, timeout=1800,
+            drive="C:", include_files=True, max_depth=0, timeout=1800,
             app="windirstat", scanner_executable_path=detected_scanner,
         )
         find_scanner.assert_called_once_with()
@@ -7410,7 +7517,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
              mock.patch.object(analyze, "run_tui") as run_review, \
-             mock.patch("builtins.input", side_effect=["", "D:", "", "maybe", "n"]) as input_mock, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", "maybe", "n"]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
 
@@ -7428,7 +7535,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
              mock.patch.object(analyze, "run_tui") as run_review, \
-             mock.patch("builtins.input", side_effect=["", "D:", "", "q", "n"]) as input_mock, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", "q", "n"]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
 
@@ -7468,13 +7575,13 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
                  mock.patch.object(drive_cleaner, "_pause"), \
                  mock.patch("builtins.input", side_effect=[
-                     "relative\\missing.exe", f'"{executable}"', "D:", "y", "0", "30",
+                     "relative\\missing.exe", f'"{executable}"', "C:", "y", "0", "30",
                  ]), \
                  redirect_stdout(output):
                 drive_cleaner._scan_flow()
 
             run_scan.assert_called_once_with(
-                drive="D:", include_files=True, max_depth=0, timeout=1800,
+                drive="C:", include_files=True, max_depth=0, timeout=1800,
                 app="wiztree", wiztree_mode="auto",
                 scanner_executable_path=str(executable),
             )
@@ -7493,13 +7600,13 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
                  mock.patch.object(drive_cleaner, "_pause"), \
                  mock.patch("builtins.input", side_effect=[
-                     "n", str(executable), "D:", "y", "0", "30",
+                     "n", str(executable), "C:", "y", "0", "30",
                  ]), \
                  redirect_stdout(io.StringIO()):
                 drive_cleaner._scan_flow()
 
             run_scan.assert_called_once_with(
-                drive="D:", include_files=True, max_depth=0, timeout=1800,
+                drive="C:", include_files=True, max_depth=0, timeout=1800,
                 app="wiztree", wiztree_mode="auto",
                 scanner_executable_path=str(executable),
             )
@@ -7559,10 +7666,10 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "find_windirstat", return_value=None), \
                  mock.patch.object(scan, "scan", return_value=None) as run_scan, \
                  mock.patch.object(drive_cleaner, "_pause"), \
-                 mock.patch("builtins.input", side_effect=[str(executable), "D:", "", "n"]):
+                 mock.patch("builtins.input", side_effect=[str(executable), "C:", "", "n"]):
                 drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(
-            drive="D:", include_files=True, max_depth=0, timeout=1800,
+            drive="C:", include_files=True, max_depth=0, timeout=1800,
             app="windirstat", scanner_executable_path=str(executable),
         )
 
@@ -7596,9 +7703,9 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["", "D:", "1", "n", "0", "30", "n"]) as input_mock:
+             mock.patch("builtins.input", side_effect=["", "C:", "1", "n", "0", "30", "n"]) as input_mock:
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=False, max_depth=0, timeout=1800,
+        run_scan.assert_called_once_with(drive="C:", include_files=False, max_depth=0, timeout=1800,
                                          app="wiztree", wiztree_mode="auto",
                                          scanner_executable_path="mock-WizTree64.exe")
         self.assertTrue(any("individual files" in call.args[0] for call in input_mock.call_args_list))
@@ -7638,10 +7745,10 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["", "D:", "maybe", "y", "-1", "2", "oops", "0", "30", "n"]) as input_mock, \
+             mock.patch("builtins.input", side_effect=["", "C:", "maybe", "y", "-1", "2", "oops", "0", "30", "n"]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=True, max_depth=2,
+        run_scan.assert_called_once_with(drive="C:", include_files=True, max_depth=2,
                                          timeout=1800, app="wiztree", wiztree_mode="auto",
                                          scanner_executable_path="mock-WizTree64.exe")
         self.assertIn("Enter Y for Yes, N for No, or Q to cancel.", output.getvalue())
@@ -7661,7 +7768,7 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan") as run_scan, \
-             mock.patch("builtins.input", side_effect=["", "D:", "q"]), \
+             mock.patch("builtins.input", side_effect=["", "C:", "q"]), \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
         run_scan.assert_not_called()
@@ -8355,7 +8462,7 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
                      mock.patch.object(scan.subprocess, "Popen") as launch, \
                      mock.patch("builtins.print"):
-                    self.assertIsNone(scan.scan("D:", app="windirstat"))
+                    self.assertIsNone(scan.scan("C:", app="windirstat"))
                     self.assertIsNone(scan.get_latest_scan())
                     self.assertEqual(scan.cleanup_old_scans(keep_latest=1), 0)
                 launch.assert_not_called()
@@ -8385,7 +8492,7 @@ class ScanSafetyTests(unittest.TestCase):
                     return object()
 
                 launch.side_effect = write_export
-                output = scan.scan("D:", app="windirstat")
+                output = scan.scan("C:", app="windirstat")
 
             self.assertEqual(output, str(data_dir / "scan_windirstat_20260928120000000000_2.csv"))
             self.assertEqual(base.read_text(encoding="utf-8"), "keep original scan")
@@ -8742,7 +8849,7 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen) as launch, \
                  mock.patch.object(scan, "wait_for_scan_process", return_value=True) as wait_for_scan, \
                  redirect_stdout(output):
-                result = scan.scan("D:", app="windirstat")
+                result = scan.scan("C:", app="windirstat")
                 self.assertIsNone(scan.get_latest_scan())
 
             self.assertIsNone(result)
@@ -8842,7 +8949,7 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan.time, "monotonic", side_effect=lambda: next(ticks)), \
                      mock.patch.object(scan.time, "sleep", return_value=None), \
                      redirect_stdout(output):
-                    self.assertIsNone(scan.scan("D:", app="windirstat", timeout=1))
+                    self.assertIsNone(scan.scan("C:", app="windirstat", timeout=1))
 
                 partial_exports = list((data_dir / ".incomplete").glob("*.csv"))
                 self.assertEqual(len(partial_exports), 1)
@@ -8888,7 +8995,7 @@ class ScanSafetyTests(unittest.TestCase):
                          mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                          mock.patch.object(scan, "wait_for_scan_process", side_effect=failure), \
                          mock.patch("builtins.print"):
-                        self.assertIsNone(scan.scan("D:", app="windirstat"))
+                        self.assertIsNone(scan.scan("C:", app="windirstat"))
                     self.assertTrue(process.terminated)
                     self.assertEqual(list(Path(scan.DATA_DIR).rglob("*.csv")), [])
                 finally:
@@ -8937,7 +9044,7 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "wait_for_scan_process", side_effect=KeyboardInterrupt()), \
                  mock.patch.object(scan, "_remove_scan_file_safely", side_effect=refuse_partial_removal), \
                  redirect_stdout(output):
-                self.assertIsNone(scan.scan("D:", app="windirstat"))
+                self.assertIsNone(scan.scan("C:", app="windirstat"))
 
             self.assertTrue(process.exited)
             self.assertEqual(partial_export.read_text(encoding="utf-8"), "partial scan")
@@ -11341,6 +11448,13 @@ class BackupSafetyTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertFalse(backup._valid_restore_target(path))
+
+    def test_restore_target_rejects_mapped_network_and_unknown_volumes(self):
+        for drive_type in (4, None):
+            with self.subTest(drive_type=drive_type), \
+                 mock.patch.object(backup.os, "name", "nt"), \
+                 mock.patch.object(backup, "_get_backup_drive_type", return_value=drive_type):
+                self.assertFalse(backup._valid_restore_target(r"Z:\Users\ExampleUser\file.bin"))
 
     def test_backup_id_validation_blocks_path_traversal(self):
         self.assertFalse(backup._valid_backup_id(".."))

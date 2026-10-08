@@ -21,6 +21,7 @@ from error_messages import describe_error, safe_terminal_text
 # Configuration: resolve relative to this script's directory instead of hardcoding an absolute path
 SKILL_DIR = Path(__file__).resolve().parent
 DATA_DIR = str(SKILL_DIR / "data")
+LOCAL_DRIVE_TYPES = frozenset({2, 3, 6})  # Removable, fixed, or RAM disk.
 _DRIVECLEANR_SCAN_NAME = re.compile(
     r"^scan_(?:wiztree_(?:fast|standard)|windirstat)_\d{20}(?:_\d+)?$",
     re.IGNORECASE,
@@ -198,6 +199,30 @@ def _path_has_reparse_component(path):
     return False
 
 
+def _windows_drive_type(path):
+    """Return the Windows drive type for a drive-letter path, or None if unknown."""
+    if os.name != "nt":
+        return None
+    try:
+        drive, _tail = os.path.splitdrive(os.path.abspath(os.fspath(path)))
+        if not drive:
+            drive, _tail = os.path.splitdrive(os.fspath(path))
+        if len(drive) != 2 or drive[1] != ":":
+            return None
+        return int(ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive + "\\")))
+    except (AttributeError, ctypes.ArgumentError, OSError, TypeError, ValueError):
+        return None
+
+
+def _is_local_drive_target(path):
+    """Return True only for fixed, removable, or RAM-disk volumes on Windows."""
+    drive_type = _windows_drive_type(path)
+    if drive_type is None and os.name != "nt":
+        # Keep synthetic Windows paths usable by non-Windows test runners.
+        return True
+    return drive_type in LOCAL_DRIVE_TYPES
+
+
 def choose_scanner():
     """Ask an interactive user which installed scanner should create the export."""
     print("Choose a scanner. Both apps can scan a drive or folder:")
@@ -224,9 +249,13 @@ def choose_wiztree_mode():
     """Ask which WizTree scan method to use and explain the practical differences."""
     print("Choose how WizTree should scan this whole drive:")
     print("  Administrator access means this terminal was opened with 'Run as administrator'.")
-    print("  1. Automatic (recommended): Drive Cleanr chooses Fast for this drive when this terminal has Administrator access; otherwise it chooses Standard.")
-    print("  2. Fast full-drive: WizTree's quickest method; scans a whole drive and requires Administrator access.")
-    print("  3. Standard: scans through normal Windows file access; works on drives or folders without Administrator access, but may take longer or miss files this account cannot access.")
+    print("  NTFS is a common Windows file system. On NTFS, Fast reads the file table directly;")
+    print("  other file systems use normal Windows scanning.")
+    print("  1. Automatic (recommended): Drive Cleanr chooses Fast for a whole drive when this terminal has Administrator access; otherwise Standard.")
+    print("  2. Fast full-drive: uses this direct file-table scan when the drive is NTFS.")
+    print("     Requires a whole drive and Administrator access; other file systems use normal Windows scanning.")
+    print("  3. Standard: uses normal Windows file access and needs no Administrator access.")
+    print("     It works on drives or folders and may take longer or miss files this account cannot access.")
     while True:
         try:
             choice = input(
@@ -527,11 +556,20 @@ def _normalize_scan_target(target):
     """Accept a local drive root or an existing absolute local folder."""
     target = str(target).strip().strip('"')
     if re.fullmatch(r"[A-Za-z]:", target):
+        if not _is_local_drive_target(target):
+            raise ValueError(
+                "only available fixed, removable, or RAM-disk drives can be scanned for cleanup; "
+                "mapped network, optical, and unknown drives are not supported"
+            )
         return target.upper()
     drive, _ = os.path.splitdrive(target)
     if (not drive or target.startswith(("\\\\", "//"))
             or not os.path.isabs(target) or not os.path.isdir(target)):
         raise ValueError("target must be a drive such as C: or an existing absolute local folder")
+    if not _is_local_drive_target(target):
+        raise ValueError(
+            "mapped network, optical, unavailable, or unrecognized drives cannot be scanned for cleanup"
+        )
     return os.path.normpath(target)
 
 
@@ -563,8 +601,8 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
     """
     try:
         drive = _normalize_scan_target(drive)
-    except (TypeError, ValueError):
-        print("Error: target must be a drive such as C: or an existing absolute local folder")
+    except (TypeError, ValueError) as exc:
+        print(f"Error: {exc}")
         return None
     if max_depth < 0 or timeout <= 0:
         print("Error: folder depth must be zero or more, and the scan time limit must be positive")
@@ -603,7 +641,7 @@ def scan(drive="C:", include_files=True, max_depth=0, timeout=1800, app="wiztree
         if effective_wiztree_mode == "standard":
             print("WizTree standard scan selected; it may be slower and can miss files the current account cannot access.")
         else:
-            print("WizTree fast full-drive scan selected.")
+            print("WizTree Fast full-drive mode selected. NTFS uses direct file-table scanning; other file systems use normal Windows scanning.")
 
     if scanner_executable_path is None:
         executable = find_wiztree() if app == "wiztree" else find_windirstat()
@@ -994,7 +1032,7 @@ def main():
     parser.add_argument('--folders-only', action='store_true', help='Do not include individual files in results (default includes files and folders)')
     parser.add_argument('--max-depth', type=int, default=0, help='Limit how many folder levels appear in WizTree results; 0 includes all levels (default: 0)')
     parser.add_argument('--wiztree-mode', choices=['auto', 'fast', 'standard'], default='auto',
-                        help='WizTree scan method: auto chooses Fast for a whole drive in an Administrator terminal and Standard otherwise; fast requires a whole drive and Administrator access; standard works on drives or folders (default: auto)')
+                        help='WizTree scan method: auto chooses Fast for a whole drive in an Administrator terminal and Standard otherwise; Fast uses direct file-table scanning on NTFS (a common Windows file system) and normal Windows scanning on other file systems; fast requires a whole drive and Administrator access; standard works on drives or folders (default: auto)')
     parser.add_argument('--timeout', type=int, default=1800, help='Maximum scan time in seconds (default: 1800 / 30 minutes)')
     parser.add_argument('--app', choices=['wiztree', 'windirstat'], help='Scanner to use; if omitted, ask interactively')
     parser.add_argument('--latest', action='store_true', help='Show the latest scan file')

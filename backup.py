@@ -626,6 +626,10 @@ def _valid_restore_target(path: str) -> bool:
             any(part.endswith((".", " ")) or _is_windows_reserved_name(part) or
                 any(ord(character) < 32 for character in part) for part in parts if part)):
         return False
+    if os.name == "nt" and _get_backup_drive_type(drive + "\\") not in {2, 3, 6}:
+        # A drive letter can be mapped to a network share even though the path
+        # looks local. Restore and backup-source paths must be local volumes.
+        return False
     return ntpath.normpath(normalized) == normalized.rstrip("\\")
 
 

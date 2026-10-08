@@ -1595,7 +1595,7 @@ def _directory_has_project_marker(directory, marker_out=None):
     return False
 
 
-def _is_local_drive_path(path, drive=None, drive_tail=None):
+def _is_local_drive_path(path, drive=None, drive_tail=None, drive_type_cache=None):
     """Accept only normalized, non-root local Windows paths from scan exports."""
     if not isinstance(path, str) or not path or not path.isprintable():
         return False
@@ -1616,6 +1616,13 @@ def _is_local_drive_path(path, drive=None, drive_tail=None):
         if (not part or part in {".", ".."} or part.endswith((".", " ")) or
                 part.split(".")[0].rstrip(" .").upper() in WINDOWS_RESERVED_NAMES):
             return False
+    if os.name == "nt":
+        drive_key = drive.upper()
+        if drive_type_cache is not None:
+            if drive_key not in drive_type_cache:
+                drive_type_cache[drive_key] = scan._windows_drive_type(drive)
+            return drive_type_cache[drive_key] in scan.LOCAL_DRIVE_TYPES
+        return scan._is_local_drive_target(drive)
     return True
 
 
@@ -1814,6 +1821,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
         "temp_root_candidate_count": 0,
         "unclassified_candidate_count": 0,
         "unsafe_display_path_count": 0,
+        "non_local_drive_path_count": 0,
         "type_mismatch_count": 0,
         "reparse_candidate_count": 0,
         "manual_review_files": [],
@@ -1966,6 +1974,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
 
         rows_processed = 0
         source_drives = set()
+        drive_type_cache = {}
         project_path_cache = {}
         manual_file_reparse_cache = {}
         detected_projects = {}
@@ -1999,8 +2008,20 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 logical_size = int(cell(row, size_column) or 0)
                 normalized_path = path.replace("/", "\\")
                 drive, drive_tail = ntpath.splitdrive(normalized_path)
-                if (len(drive) == 2 and drive[0].isalpha() and drive[1] == ":" and
-                        drive_tail.startswith("\\") and not normalized_path.startswith("\\\\")):
+                has_drive_letter_path = (
+                    len(drive) == 2 and drive[0].isalpha() and drive[1] == ":" and
+                    drive_tail.startswith("\\") and not drive_tail.startswith("\\\\") and
+                    not normalized_path.startswith("\\\\")
+                )
+                if has_drive_letter_path and os.name == "nt":
+                    drive_key = drive.upper()
+                    if drive_key not in drive_type_cache:
+                        drive_type_cache[drive_key] = scan._windows_drive_type(drive)
+                    if drive_type_cache[drive_key] not in scan.LOCAL_DRIVE_TYPES:
+                        if drive_tail.strip("\\/"):
+                            results["non_local_drive_path_count"] += 1
+                        continue
+                if has_drive_letter_path:
                     source_drives.add(drive.upper())
                 allocated_raw = next((cell(row, name) for name in allocated_columns
                                       if cell(row, name) not in (None, '')), None)
@@ -2026,7 +2047,7 @@ def analyze_csv(csv_path, min_size_mb=50, progress_callback=None, expand_under=N
                 # Imported CSVs are data, not authority. Only accept ordinary
                 # absolute drive paths and reject roots, traversal, UNC, and
                 # device paths before any item can become executable.
-                if not _is_local_drive_path(path, drive, drive_tail):
+                if not _is_local_drive_path(path, drive, drive_tail, drive_type_cache):
                     continue
 
                 # Skip small entries and excluded paths.
@@ -2302,7 +2323,7 @@ def print_report(results, show_all_items=False, item_limit=10):
     if results.get("scan_mode") == "wiztree_standard":
         print("Scan mode: WizTree standard file-system scan; files inaccessible to this account may be missing.")
     elif results.get("scan_mode") == "wiztree_fast":
-        print("Scan mode: WizTree fast full-drive scan.")
+        print("Scan mode: WizTree Fast full-drive mode. NTFS is a common Windows file system; on NTFS drives, WizTree reads the file table directly. Other file systems use normal Windows scanning.")
     elif results.get("scan_mode") == "windirstat":
         print("Scan mode: WinDirStat; its saved filters and this account's access can leave some files out.")
 
@@ -2366,6 +2387,11 @@ def print_report(results, show_all_items=False, item_limit=10):
     if results.get("unsafe_display_path_count", 0):
         print(
             f"Skipped {results['unsafe_display_path_count']} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
+        )
+    if results.get("non_local_drive_path_count", 0):
+        print(
+            f"Skipped {results['non_local_drive_path_count']} scan entries on network, optical, unavailable, or unrecognized drives. "
+            "Drive Cleanr only creates cleanup plans for fixed, removable, or RAM-disk drives."
         )
     for line in _project_protection_lines(results):
         print(line)
@@ -2800,7 +2826,32 @@ function Test-PathInsideProject([string]$Path, [bool]$IsDirectory, [bool]$ShowPr
     return $false
 }}
 
+function Get-CleanupDriveType([string]$DriveRoot) {{
+    return ([System.IO.DriveInfo]::new($DriveRoot)).DriveType
+}}
+
+function Assert-LocalDriveTarget([string]$Path) {{
+    $driveRoot = [System.IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($driveRoot) -or $driveRoot -notmatch '^[A-Za-z]:\\\\$') {{
+        throw "The selected path is not on a supported local drive; refusing cleanup: $(Get-CleanupProgressPath $Path)"
+    }}
+    try {{
+        $driveType = Get-CleanupDriveType $driveRoot
+    }} catch {{
+        throw "Could not confirm that the selected drive is local; refusing cleanup: $(Get-CleanupProgressPath $Path)"
+    }}
+    $localDriveTypes = @(
+        [System.IO.DriveType]::Fixed,
+        [System.IO.DriveType]::Removable,
+        [System.IO.DriveType]::Ram
+    )
+    if ($localDriveTypes -notcontains $driveType) {{
+        throw "The selected drive is network, optical, unavailable, or unrecognized; refusing cleanup: $(Get-CleanupProgressPath $Path)"
+    }}
+}}
+
 function Assert-TargetMatchesScan([object]$Target, [bool]$CheckScanSize = $false, [bool]$ShowProgress = $false) {{
+    Assert-LocalDriveTarget $Target.Path
     $current = [System.IO.Path]::GetFullPath($Target.Path)
     $isTarget = $true
     if ($ShowProgress) {{
@@ -3906,6 +3957,12 @@ def write_item_list_report(results, output_path):
             f"Skipped {results['unsafe_display_path_count']} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
         )
         lines.append("")
+    if results.get("non_local_drive_path_count", 0):
+        lines.append(
+            f"Skipped {results['non_local_drive_path_count']} scan entries on network, optical, unavailable, or unrecognized drives. "
+            "Drive Cleanr only creates cleanup plans for fixed, removable, or RAM-disk drives."
+        )
+        lines.append("")
     if results.get("temp_root_candidate_count", 0):
         lines.append(f"Known temporary folders skipped: {results['temp_root_candidate_count']}; files and folders inside are shown separately when they match the cleanup rules.")
         lines.append("")
@@ -4228,6 +4285,11 @@ def _folder_browse_skip_lines(results):
     if unsafe_display_path_count:
         lines.append(
             f"Skipped {unsafe_display_path_count} scan entries with hidden or control characters in their paths; they cannot be shown safely for review."
+        )
+    non_local_drive_path_count = results.get("non_local_drive_path_count", 0)
+    if non_local_drive_path_count:
+        lines.append(
+            f"Skipped {non_local_drive_path_count} scan entries on network, optical, unavailable, or unrecognized drives."
         )
     temp_root_count = results.get("temp_root_candidate_count", 0)
     if temp_root_count:
