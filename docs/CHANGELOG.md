@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Remove saved backups through opened Windows handles and reject reparse points at the removal boundary, including junctions swapped in after the initial inspection; report accurately whether any entries were removed.
 - Retry an invalid overwrite/merge choice in the standalone backup restore command and explain the accepted choices instead of silently cancelling.
 - Recognize VS Code Dev Container project configurations in `.devcontainer/` and `.devcontainer.json` so project-local build and cache data stays protected.
 - Recognize the required Helm `Chart.yaml` file as a project marker so chart contents and local dependency data stay out of cleanup suggestions.

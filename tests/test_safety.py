@@ -9152,7 +9152,7 @@ class BackupSafetyTests(unittest.TestCase):
         output = io.StringIO()
         with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\backup_20260928_123456_123456"), \
              mock.patch.object(backup, "_tree_has_reparse_point", return_value=True), \
-             mock.patch.object(backup.shutil, "rmtree") as remove_tree, \
+             mock.patch.object(backup, "_remove_backup_tree") as remove_tree, \
              redirect_stdout(output):
             self.assertFalse(backup.delete_backup("backup_20260928_123456_123456"))
         remove_tree.assert_not_called()
@@ -9163,7 +9163,7 @@ class BackupSafetyTests(unittest.TestCase):
         backup_id = "backup_20260928_123456_123456"
         with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\" + backup_id), \
              mock.patch.object(backup, "_tree_has_reparse_point", side_effect=KeyboardInterrupt), \
-             mock.patch.object(backup.shutil, "rmtree") as remove_tree, \
+             mock.patch.object(backup, "_remove_backup_tree") as remove_tree, \
              redirect_stdout(output):
             self.assertIsNone(backup.delete_backup(backup_id))
 
@@ -9180,19 +9180,38 @@ class BackupSafetyTests(unittest.TestCase):
             removed_before_interrupt.write_bytes(b"removed fixture")
             remaining_after_interrupt.write_bytes(b"remaining fixture")
 
-            def interrupt_after_one_removal(path):
-                (Path(path) / "first.bin").unlink()
+            def interrupt_after_one_removal(path, on_removed=None, on_removal_started=None):
+                first = Path(path) / "first.bin"
+                first.unlink()
+                if on_removed is not None:
+                    on_removed(str(first))
                 raise KeyboardInterrupt
 
             output = io.StringIO()
             with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
-                 mock.patch.object(backup.shutil, "rmtree", side_effect=interrupt_after_one_removal), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=interrupt_after_one_removal), \
                  redirect_stdout(output):
                 self.assertIsNone(backup.delete_backup(backup_id))
 
             self.assertFalse(removed_before_interrupt.exists())
             self.assertTrue(remaining_after_interrupt.is_file())
             self.assertIn("Backup deletion interrupted; the saved backup may be incomplete", output.getvalue())
+
+    def test_delete_backup_reports_no_removal_when_interrupted_before_first_entry(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            saved_file = backup_dir / "payload.bin"
+            saved_file.write_bytes(b"backup fixture")
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=KeyboardInterrupt), \
+                 redirect_stdout(output):
+                self.assertIsNone(backup.delete_backup(backup_id))
+
+            self.assertTrue(saved_file.is_file())
+            self.assertIn("before removing any contents; Drive Cleanr removed nothing", output.getvalue())
 
     def test_delete_backup_reports_possible_partial_removal_on_failure(self):
         backup_id = "backup_20260928_123456_123456"
@@ -9204,13 +9223,16 @@ class BackupSafetyTests(unittest.TestCase):
             removed_before_failure.write_bytes(b"removed fixture")
             remaining_after_failure.write_bytes(b"remaining fixture")
 
-            def fail_after_one_removal(path):
-                (Path(path) / "first.bin").unlink()
+            def fail_after_one_removal(path, on_removed=None, on_removal_started=None):
+                first = Path(path) / "first.bin"
+                first.unlink()
+                if on_removed is not None:
+                    on_removed(str(first))
                 raise OSError("mock deletion failure")
 
             output = io.StringIO()
             with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
-                 mock.patch.object(backup.shutil, "rmtree", side_effect=fail_after_one_removal), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=fail_after_one_removal), \
                  redirect_stdout(output):
                 self.assertFalse(backup.delete_backup(backup_id))
 
@@ -9226,16 +9248,19 @@ class BackupSafetyTests(unittest.TestCase):
             for index in range(101):
                 (backup_dir / f"payload-{index:03}.bin").write_bytes(b"fixture")
 
-            real_rmtree = backup.shutil.rmtree
+            real_remove_tree = backup._remove_backup_tree
 
-            def delayed_rmtree(path):
+            def delayed_remove_tree(path, on_removed=None, on_removal_started=None):
                 time.sleep(0.2)
-                real_rmtree(path)
+                real_remove_tree(
+                    path, on_removed=on_removed,
+                    on_removal_started=on_removal_started,
+                )
 
             output = io.StringIO()
             with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
                  mock.patch.object(backup, "BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS", 0.1), \
-                 mock.patch.object(backup.shutil, "rmtree", side_effect=delayed_rmtree), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=delayed_remove_tree), \
                  redirect_stdout(output):
                 self.assertTrue(backup.delete_backup(backup_id))
 
@@ -9246,8 +9271,80 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertIn("Backup contents check complete: 101 entries examined", rendered)
             self.assertIn("Deleting the saved backup now. This cannot be undone.", rendered)
             self.assertIn("Still working after", rendered)
-            self.assertIn("Backup deletion complete.", rendered)
+            self.assertIn("Backup deletion complete: 102 items removed.", rendered)
             self.assertFalse(backup_dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "handle-based backup deletion targets Windows")
+    def test_windows_backup_deletion_removes_nested_and_read_only_entries_by_handle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / "backup-fixture"
+            nested = backup_dir / "nested"
+            nested.mkdir(parents=True)
+            readonly_file = nested / "readonly.bin"
+            readonly_file.write_bytes(b"synthetic backup data")
+            readonly_file.chmod(0o444)
+            (backup_dir / "ordinary.bin").write_bytes(b"more synthetic data")
+
+            removed_entries = backup._windows_delete_tree_no_follow(str(backup_dir))
+
+            self.assertEqual(4, removed_entries)
+            self.assertFalse(backup_dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "handle-based backup deletion targets Windows")
+    def test_windows_backup_deletion_rejects_junction_swapped_after_enumeration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / "backup-fixture"
+            backup_dir.mkdir()
+            child = backup_dir / "cache"
+            child.mkdir()
+            moved_child = backup_dir / "original-cache"
+            outside = root / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / "keep.bin"
+            outside_sentinel.write_bytes(b"must remain untouched")
+
+            def create_junction(link, target):
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode:
+                    self.skipTest("Windows could not create a temporary junction fixture")
+
+            real_scandir = os.scandir
+            swapped = {"done": False}
+
+            class EnumeratedBeforeSwap:
+                def __init__(self, path):
+                    self.path = path
+                    self.iterator = real_scandir(path)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    self.iterator.close()
+
+                def __iter__(self):
+                    entries = list(self.iterator)
+                    if (not swapped["done"] and
+                            ntpath.normcase(ntpath.normpath(str(self.path))) ==
+                            ntpath.normcase(ntpath.normpath(str(backup_dir)))):
+                        swapped["done"] = True
+                        child.rename(moved_child)
+                        create_junction(child, outside)
+                    return iter(entries)
+
+            with mock.patch.object(backup.os, "scandir", side_effect=lambda path: EnumeratedBeforeSwap(path)):
+                with self.assertRaisesRegex(OSError, "reparse point or junction"):
+                    backup._windows_delete_tree_no_follow(str(backup_dir))
+
+            self.assertTrue(swapped["done"])
+            self.assertTrue(moved_child.is_dir())
+            self.assertTrue(outside_sentinel.is_file())
+            os.rmdir(child)  # Remove the junction itself, never its target.
 
     def test_bulk_backup_cleanup_stops_after_deletion_cancellation(self):
         backups = [{"id": "first"}, {"id": "second"}, {"id": "third"}]

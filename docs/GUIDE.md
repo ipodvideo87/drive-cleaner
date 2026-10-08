@@ -81,7 +81,7 @@ python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds
 python backup.py restore --id backup_YYYYMMDD_HHMMSS_microseconds --yes
 ```
 
-To remove one backup permanently, use `python backup.py delete --id <id>` and confirm the prompt. Ctrl+C at a restore or delete confirmation cancels before the operation starts. Do not remove a backup until you no longer need its recovery copy.
+To remove one backup permanently, use `python backup.py delete --id <id>` and confirm the prompt. Drive Cleanr checks for links and junctions, then rechecks each opened entry as it removes it; if the safety check fails before anything is removed, it says that it removed nothing. If removal begins and then fails or is interrupted, the backup may be incomplete. Ctrl+C at a restore or delete confirmation cancels before the operation starts. Do not remove a backup until you no longer need its recovery copy.
 
 ## 5. Other useful options
 

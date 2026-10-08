@@ -91,7 +91,9 @@ class _BackupProgress:
         print(f"{self.phase}: {message}", file=self.stream, flush=True)
         self._last_message = time.monotonic()
 
-    def item(self, path: str, known_bytes: int = 0, action: str = "checked") -> None:
+    def item(
+        self, path: str, known_bytes: int = 0, action: str = "checked", include_size: bool = True,
+    ) -> None:
         self.items += 1
         self.known_bytes += max(0, int(known_bytes))
         self._item_action = action
@@ -100,9 +102,11 @@ class _BackupProgress:
                 elapsed >= BACKUP_PROGRESS_TIME_INTERVAL_SECONDS):
             name = _safe_terminal_text(os.path.basename(str(path).rstrip("\\/")), "item")
             item_label = "item" if self.items == 1 else "items"
-            self._emit(
-                f"{self.items:,} {item_label} {action}; {format_size(self.known_bytes)} of file data found so far. Current item: {name}"
+            size_detail = (
+                f"; {format_size(self.known_bytes)} of file data found so far"
+                if include_size else ""
             )
+            self._emit(f"{self.items:,} {item_label} {action}{size_detail}. Current item: {name}")
 
     def file_bytes(self, path: str, processed: int, total: int, action: str = "checked") -> None:
         processed = max(0, int(processed))
@@ -125,7 +129,7 @@ class _BackupProgress:
             self._last_file_message_bytes = processed
 
     def heartbeat(self, elapsed_seconds: float) -> None:
-        elapsed = max(0, int(elapsed_seconds))
+        elapsed = max(1, int(elapsed_seconds))
         self._emit(
             f"Still working after {elapsed} seconds; Drive Cleanr will report when this step is finished."
         )
@@ -252,12 +256,265 @@ def _tree_has_reparse_point_with_progress(path: str, phase: str) -> bool:
         heartbeat_thread.join(timeout=max(1.0, float(BACKUP_PROGRESS_TIME_INTERVAL_SECONDS)))
 
 
+class _BackupDeletionStopped(Exception):
+    """A safe backup deletion stopped, with whether it had removed any entries."""
+
+    def __init__(
+        self, message: str, removed_entries: int, interrupted: bool = False,
+        removal_started: bool = False,
+    ):
+        super().__init__(message)
+        self.removed_entries = max(0, int(removed_entries))
+        self.interrupted = interrupted
+        self.removal_started = bool(removal_started)
+
+
+def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_started=None) -> int:
+    """Remove a directory tree through opened handles without following reparse points."""
+    if os.name != "nt":
+        raise OSError("Handle-based backup deletion is available only on Windows")
+
+    import ctypes
+    from ctypes import wintypes
+
+    FILE_READ_ATTRIBUTES = 0x0080
+    FILE_WRITE_ATTRIBUTES = 0x0100
+    DELETE = 0x00010000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    FILE_ATTRIBUTE_DIRECTORY = 0x00000010
+    FILE_ATTRIBUTE_READONLY = 0x00000001
+    FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+    FILE_ATTRIBUTE_NORMAL = 0x00000080
+    FILE_BASIC_INFO_CLASS = 0
+    FILE_DISPOSITION_INFO_CLASS = 4
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    class FileBasicInformation(ctypes.Structure):
+        _fields_ = [
+            ("CreationTime", ctypes.c_longlong),
+            ("LastAccessTime", ctypes.c_longlong),
+            ("LastWriteTime", ctypes.c_longlong),
+            ("ChangeTime", ctypes.c_longlong),
+            ("FileAttributes", wintypes.DWORD),
+        ]
+
+    class FileDispositionInformation(ctypes.Structure):
+        _fields_ = [("DeleteFile", wintypes.BOOL)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    get_information = kernel32.GetFileInformationByHandle
+    get_information.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_information.restype = wintypes.BOOL
+    get_information_ex = kernel32.GetFileInformationByHandleEx
+    get_information_ex.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    get_information_ex.restype = wintypes.BOOL
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    invalid_handle = ctypes.c_void_p(-1).value
+    held_ancestors = []
+    removed_entries = 0
+
+    def extended_path(value: str) -> str:
+        normalized = ntpath.normpath(value)
+        if normalized.startswith("\\\\"):
+            raise OSError("Refusing to delete backup data through a network path")
+        if not ntpath.isabs(normalized):
+            raise OSError("Refusing to delete backup data through a relative path")
+        return "\\\\?\\" + normalized
+
+    def win_error(path: str) -> OSError:
+        error = ctypes.get_last_error()
+        return ctypes.WinError(error, filename=path)
+
+    def open_handle(value: str, access: int):
+        handle = create_file(
+            extended_path(value),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle == invalid_handle:
+            raise win_error(value)
+        return handle
+
+    def read_attributes(handle, value: str) -> int:
+        information = ByHandleFileInformation()
+        if not get_information(handle, ctypes.byref(information)):
+            raise win_error(value)
+        attributes = int(information.dwFileAttributes)
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+            raise OSError(f"Refusing to remove a reparse point or junction: {value}")
+        return attributes
+
+    def mark_for_removal(handle, value: str, attributes: int) -> None:
+        if attributes & FILE_ATTRIBUTE_READONLY:
+            basic = FileBasicInformation()
+            if not get_information_ex(
+                    handle, FILE_BASIC_INFO_CLASS, ctypes.byref(basic), ctypes.sizeof(basic)):
+                raise win_error(value)
+            basic.FileAttributes = attributes & ~FILE_ATTRIBUTE_READONLY
+            if basic.FileAttributes == 0:
+                basic.FileAttributes = FILE_ATTRIBUTE_NORMAL
+            if not set_information(
+                    handle, FILE_BASIC_INFO_CLASS, ctypes.byref(basic), ctypes.sizeof(basic)):
+                raise win_error(value)
+        if on_removal_started is not None:
+            on_removal_started()
+        disposition = FileDispositionInformation(True)
+        if not set_information(
+                handle, FILE_DISPOSITION_INFO_CLASS,
+                ctypes.byref(disposition), ctypes.sizeof(disposition)):
+            raise win_error(value)
+
+    def close(handle) -> None:
+        if handle and handle != invalid_handle:
+            close_handle(handle)
+
+    def report_removed(value: str) -> None:
+        nonlocal removed_entries
+        removed_entries += 1
+        if on_removed is not None:
+            on_removed(value)
+
+    def remove_directory(value: str, directory_handle, directory_attributes: int) -> None:
+        while True:
+            with os.scandir(value) as entries:
+                child_names = [entry.name for entry in entries]
+            if not child_names:
+                break
+
+            found_live_entry = False
+            for child_name in child_names:
+                child_path = os.path.join(value, child_name)
+                child_handle = None
+                try:
+                    child_handle = open_handle(
+                        child_path,
+                        DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                    )
+                except OSError as exc:
+                    if getattr(exc, "winerror", None) in (2, 3):
+                        continue
+                    raise
+
+                try:
+                    child_attributes = read_attributes(child_handle, child_path)
+                    found_live_entry = True
+                    if child_attributes & FILE_ATTRIBUTE_DIRECTORY:
+                        remove_directory(child_path, child_handle, child_attributes)
+                    else:
+                        mark_for_removal(child_handle, child_path, child_attributes)
+                        report_removed(child_path)
+                finally:
+                    close(child_handle)
+
+            if not found_live_entry:
+                # Entries disappeared between enumeration and opening. Re-enumerate
+                # to distinguish an empty directory from one that changed again.
+                continue
+
+        mark_for_removal(directory_handle, value, directory_attributes)
+        report_removed(value)
+
+    try:
+        original_path = os.fspath(path)
+        if not ntpath.isabs(original_path):
+            raise OSError("Refusing to delete a backup through a relative path")
+        absolute = ntpath.normpath(original_path)
+        drive, tail = ntpath.splitdrive(absolute)
+        if (not drive or drive.startswith("\\\\") or not tail.startswith("\\") or
+                not tail.strip("\\")):
+            raise OSError("Refusing to delete a drive root or non-local backup path")
+
+        components = [part for part in tail.split("\\") if part]
+        current = drive + "\\"
+        root_handle = open_handle(current, FILE_READ_ATTRIBUTES)
+        held_ancestors.append(root_handle)
+        root_attributes = read_attributes(root_handle, current)
+        if not root_attributes & FILE_ATTRIBUTE_DIRECTORY:
+            raise OSError(f"Refusing to delete through a non-folder drive root: {current}")
+
+        for index, component in enumerate(components):
+            current = ntpath.join(current, component)
+            is_target = index == len(components) - 1
+            access = FILE_READ_ATTRIBUTES
+            if is_target:
+                access |= DELETE | FILE_WRITE_ATTRIBUTES
+            handle = open_handle(current, access)
+            held_ancestors.append(handle)
+            attributes = read_attributes(handle, current)
+            if not attributes & FILE_ATTRIBUTE_DIRECTORY:
+                raise OSError(f"Refusing to remove a backup path that is not a folder: {current}")
+
+        target_handle = held_ancestors[-1]
+        target_attributes = read_attributes(target_handle, current)
+        remove_directory(current, target_handle, target_attributes)
+        return removed_entries
+    finally:
+        for handle in reversed(held_ancestors):
+            close(handle)
+
+
+def _remove_backup_tree(path: str, on_removed=None, on_removal_started=None) -> None:
+    """Delete a backup tree without following links or junctions."""
+    if os.name == "nt":
+        _windows_delete_tree_no_follow(path, on_removed=on_removed)
+        return
+    if not getattr(shutil.rmtree, "avoids_symlink_attacks", False):
+        raise OSError("This platform cannot safely remove a backup tree without following links")
+    if on_removal_started is not None:
+        on_removal_started()
+    shutil.rmtree(path)
+
+
 def _rmtree_with_progress(path: str) -> None:
-    """Keep users informed while shutil removes a large saved backup."""
+    """Keep users informed while safely removing a large saved backup."""
     finished = threading.Event()
     started_at = time.monotonic()
     progress = _BackupProgress("Backup deletion")
     interval = max(0.1, float(BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS))
+    removed_entries = 0
+    removal_started = False
+
+    def report_removed(value: str) -> None:
+        nonlocal removed_entries
+        removed_entries += 1
+        progress.item(value, action="removed", include_size=False)
+
+    def report_removal_started() -> None:
+        nonlocal removal_started
+        removal_started = True
 
     def report_heartbeat() -> None:
         while not finished.wait(interval):
@@ -273,7 +530,20 @@ def _rmtree_with_progress(path: str) -> None:
     )
     heartbeat_thread.start()
     try:
-        shutil.rmtree(path)
+        _remove_backup_tree(
+            path, on_removed=report_removed,
+            on_removal_started=report_removal_started,
+        )
+    except KeyboardInterrupt as exc:
+        raise _BackupDeletionStopped(
+            "Backup deletion was interrupted", removed_entries,
+            interrupted=True, removal_started=removal_started,
+        ) from exc
+    except Exception as exc:
+        raise _BackupDeletionStopped(
+            str(exc), removed_entries, interrupted=False,
+            removal_started=removal_started,
+        ) from exc
     finally:
         finished.set()
         heartbeat_thread.join()
@@ -1954,14 +2224,21 @@ def delete_backup(backup_id: str) -> Optional[bool]:
         _rmtree_with_progress(backup_dir)
         print(f"Deleted backup: {backup_id}")
         return True
-    except KeyboardInterrupt:
-        print("Backup deletion interrupted; the saved backup may be incomplete.")
-        return None
-    except Exception as e:
-        print(
-            "Backup deletion failed; the saved backup may be incomplete: "
-            f"{describe_error(e)}"
-        )
+    except _BackupDeletionStopped as exc:
+        if exc.interrupted:
+            if exc.removed_entries or exc.removal_started:
+                print("Backup deletion interrupted; the saved backup may be incomplete.")
+            else:
+                print("Backup deletion interrupted before removing any contents; Drive Cleanr removed nothing.")
+            return None
+        detail = describe_error(exc.__cause__ or exc)
+        if exc.removed_entries or exc.removal_started:
+            print(f"Backup deletion failed; the saved backup may be incomplete: {detail}")
+        else:
+            print(f"Backup deletion failed before removing any contents; Drive Cleanr removed nothing: {detail}")
+        return False
+    except Exception as exc:
+        print(f"Backup deletion stopped; its final state could not be confirmed: {describe_error(exc)}")
         return False
 
 
