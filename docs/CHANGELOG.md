@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Let users select a saved backup by its numbered row in the guided menu, with clear retry and cancel choices, instead of typing its full backup ID.
 - Label each guided restore destination and restore progress item as a File or Folder, and explain the scope of OVERWRITE and MERGE before the choice.
 - Open the paginated keyboard picker before printing candidates, so large selections do not spend time dumping off-page paths before users can begin.
 - Explain that WizTree's Fast full-drive mode reads the file table directly only on NTFS (a common Windows file system); other file systems use normal Windows scanning, as shown in the scan menu, progress, reports, and guide.

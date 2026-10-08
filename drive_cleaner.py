@@ -319,7 +319,7 @@ def _backup_menu():
         if choice == "0":
             return
         if choice == "1":
-            backup.print_backups_table(backup.list_backups())
+            backup.print_backups_table(backup.list_backups(), numbered=True)
             _pause()
         elif choice == "2":
             root = backup.find_backup_drive()
@@ -331,18 +331,37 @@ def _backup_menu():
             _pause()
         elif choice in {"3", "4"}:
             manifests = backup.list_backups()
-            backup.print_backups_table(manifests)
-            try:
-                backup_id = input("Enter the backup ID shown in the list (blank to cancel): ").strip()
-            except (EOFError, KeyboardInterrupt):
-                return
-            if not backup_id:
-                continue
-            manifest = next((item for item in manifests if item.get("id") == backup_id), None)
-            if not manifest:
-                print("That backup ID is not in the saved backup list.")
+            backup.print_backups_table(manifests, numbered=True)
+            if not manifests:
                 _pause()
                 continue
+            while True:
+                try:
+                    answer = input(
+                        f"Choose a backup by number [1-{len(manifests)}] (0 or Enter = cancel): "
+                    ).strip()
+                except (EOFError, KeyboardInterrupt):
+                    return
+                if not answer or answer == "0":
+                    manifest = None
+                    break
+                if not answer.isdecimal():
+                    print("Enter one of the listed backup numbers, or 0 to cancel.")
+                    continue
+                try:
+                    selected_number = int(answer)
+                except ValueError:
+                    print("Enter one of the listed backup numbers, or 0 to cancel.")
+                    continue
+                if not 1 <= selected_number <= len(manifests):
+                    print("That number is not in the backup list. Choose a listed number or 0 to cancel.")
+                    continue
+                manifest = manifests[selected_number - 1]
+                break
+            if manifest is None:
+                print("Backup selection cancelled.")
+                continue
+            backup_id = manifest["id"]
             if choice == "3":
                 items = manifest.get("items")
                 restore_items = []

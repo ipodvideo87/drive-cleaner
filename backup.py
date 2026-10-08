@@ -2346,19 +2346,21 @@ def get_latest_backup() -> Optional[Dict]:
     return backups[0] if backups else None
 
 
-def print_backups_table(backups: List[Dict]):
-    """Print a backup list table"""
+def print_backups_table(backups: List[Dict], numbered: bool = False):
+    """Print saved backups, optionally numbering rows for guided selection."""
     if not backups:
         print("No backups found")
         return
 
-    print("=" * 96)
+    table_width = 102 if numbered else 96
+    print("=" * table_width)
     print("                         Backup List")
-    print("=" * 96)
-    print(f"{'ID':<30} {'Time':<20} {'Size':<12} {'Items':<8} {'Status':<14}")
-    print("-" * 96)
+    print("=" * table_width)
+    number_heading = f"{'No.':<5} " if numbered else ""
+    print(f"{number_heading}{'ID':<30} {'Time':<20} {'Size':<12} {'Items':<8} {'Status':<14}")
+    print("-" * table_width)
 
-    for backup in backups:
+    for index, backup in enumerate(backups, start=1):
         backup_id = _safe_terminal_text(backup.get("id", "Unknown"))
         timestamp = _safe_terminal_text(backup.get("timestamp", "Unknown")[:19].replace("T", " "))
         size = _safe_terminal_text(backup.get("total_size_formatted", "Unknown"))
@@ -2370,13 +2372,14 @@ def print_backups_table(backups: List[Dict]):
         }
         raw_status = backup.get("status")
         status = status_labels.get(raw_status, "Unknown") if isinstance(raw_status, str) else "Unknown"
-        print(f"{backup_id:<30} {timestamp:<20} {size:<12} {items:<8} {status:<14}")
+        number_column = f"{index:<5} " if numbered else ""
+        print(f"{number_column}{backup_id:<30} {timestamp:<20} {size:<12} {items:<8} {status:<14}")
         backup_root = backup.get("backup_root")
         if isinstance(backup_root, str) and backup_root:
             location = _safe_terminal_text(ntpath.join(backup_root, backup_id))
             print(f"  Saved to: {location}")
 
-    print("=" * 96)
+    print("=" * table_width)
 
 
 def main():

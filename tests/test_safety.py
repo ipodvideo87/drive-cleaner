@@ -7963,7 +7963,7 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_backup_menu_can_merge_without_overwriting(self):
         manifests = [{"id": "backup_test", "version": 1, "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\cache.bin", "format": "file", "size": 1}]}]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]) as user_input, \
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]) as user_input, \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
@@ -7975,7 +7975,47 @@ class ScanSafetyTests(unittest.TestCase):
         self.assertIn("File |", output.getvalue())
         self.assertIn(r"C:\Users\ExampleUser\cache.bin", output.getvalue())
         self.assertIn("MERGE restores missing files", output.getvalue())
-        self.assertIn("MERGE", user_input.call_args_list[2].args[0])
+        self.assertIn("Choose a backup by number", user_input.call_args_list[1].args[0])
+        self.assertIn("OVERWRITE, MERGE", user_input.call_args_list[2].args[0])
+
+    def test_backup_menu_selects_by_number_and_retries_invalid_choices(self):
+        first_id = "backup_20261007_120002_000001"
+        second_id = "backup_20261007_120001_000002"
+        manifests = [
+            {"id": first_id, "timestamp": "2026-10-07T12:00:02", "status": "completed", "items": []},
+            {"id": second_id, "timestamp": "2026-10-07T12:00:01", "status": "completed", "items": []},
+        ]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", "not a number", "9" * 5000, "3", "2", "DELETE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "delete_backup", return_value=True) as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(second_id)
+        rendered = output.getvalue()
+        self.assertIn("No.", rendered)
+        self.assertIn(f"1     {first_id}", rendered)
+        self.assertIn(f"2     {second_id}", rendered)
+        self.assertIn("Enter one of the listed backup numbers", rendered)
+        self.assertIn("That number is not in the backup list", rendered)
+
+    def test_backup_menu_enter_cancels_backup_selection(self):
+        manifests = [{
+            "id": "backup_20261007_120000_000001",
+            "timestamp": "2026-10-07T12:00:00", "status": "completed", "items": [],
+        }]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", "", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "delete_backup") as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_not_called()
+        self.assertIn("Backup selection cancelled.", output.getvalue())
 
     def test_backup_menu_labels_folder_restore_targets(self):
         manifests = [{
@@ -7986,7 +8026,7 @@ class ScanSafetyTests(unittest.TestCase):
                 "format": "zip", "size": 1,
             }],
         }]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]), \
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True), \
@@ -7997,7 +8037,7 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_backup_menu_requires_explicit_overwrite_choice(self):
         manifests = [{"id": "backup_test", "version": 1, "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\cache.bin", "format": "file", "size": 1}]}]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "OVERWRITE", "0"]), \
+        with mock.patch("builtins.input", side_effect=["3", "1", "OVERWRITE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
@@ -8028,7 +8068,7 @@ class ScanSafetyTests(unittest.TestCase):
                     "timestamp": "2026-10-04T12:34:56", "items": [item],
                 }
                 output = io.StringIO()
-                with mock.patch("builtins.input", side_effect=["3", backup_id, "0"]) as user_input, \
+                with mock.patch("builtins.input", side_effect=["3", "1", "0"]) as user_input, \
                      mock.patch.object(backup, "list_backups", return_value=[manifest]), \
                      mock.patch.object(backup, "_existing_backup_roots", return_value=[r"D:\DriveCleanrBackups"]), \
                      mock.patch.object(backup, "print_backups_table"), \
@@ -8052,7 +8092,7 @@ class ScanSafetyTests(unittest.TestCase):
             "items": [{"original_path": backup_root + r"\restore-target.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.bin", "format": "file", "size": 1}],
         }]
         output = io.StringIO()
-        with mock.patch("builtins.input", side_effect=["3", backup_id, "0"]) as user_input, \
+        with mock.patch("builtins.input", side_effect=["3", "1", "0"]) as user_input, \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "_existing_backup_roots", return_value=[backup_root]), \
              mock.patch.object(backup, "print_backups_table"), \
@@ -8078,7 +8118,7 @@ class ScanSafetyTests(unittest.TestCase):
             backup_dir = root / backup_id
             backup_dir.mkdir()
             (backup_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-            with mock.patch("builtins.input", side_effect=["4", backup_id, "DELETE", "0"]), \
+            with mock.patch("builtins.input", side_effect=["4", "1", "DELETE", "0"]), \
                  mock.patch.object(backup, "_existing_backup_roots", return_value=[str(root)]), \
                  mock.patch.object(backup, "delete_backup", return_value=True) as delete, \
                  mock.patch.object(drive_cleaner, "_pause"), \
@@ -8093,7 +8133,7 @@ class ScanSafetyTests(unittest.TestCase):
         backup_id = "backup_20261004_123456_000005"
         manifests = [{"id": backup_id, "status": "completed", "items": []}]
         output = io.StringIO()
-        with mock.patch("builtins.input", side_effect=["4", backup_id, "DELETE", "0"]), \
+        with mock.patch("builtins.input", side_effect=["4", "1", "DELETE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "delete_backup", return_value=None) as delete, \
@@ -8123,7 +8163,7 @@ class ScanSafetyTests(unittest.TestCase):
                     "status": status, "items": items,
                 }]
                 output = io.StringIO()
-                with mock.patch("builtins.input", side_effect=["3", backup_id, "0"]), \
+                with mock.patch("builtins.input", side_effect=["3", "1", "0"]), \
                      mock.patch.object(backup, "list_backups", return_value=manifests), \
                      mock.patch.object(backup, "print_backups_table"), \
                      mock.patch.object(backup, "restore_backup") as restore, \
@@ -8142,7 +8182,7 @@ class ScanSafetyTests(unittest.TestCase):
             "items": [{"original_path": "C:\\Users\\A\\cache\\\u009b.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.bin", "format": "file", "size": 1}],
         }
         output = io.StringIO()
-        with mock.patch("builtins.input", side_effect=["3", backup_id, "MERGE", "0"]), \
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=[manifest]), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
