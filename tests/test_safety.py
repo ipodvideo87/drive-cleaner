@@ -1,15 +1,17 @@
 import csv
 import io
 import json
+import ntpath
 import os
 import shutil
 import subprocess
 import struct
+import sys
 import tempfile
 import time
 import unittest
 import zipfile
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,12 +19,60 @@ from unittest import mock
 
 import analyze
 import backup
+import cleanup_runner
 import scan
 import drive_cleaner
-from error_messages import describe_error
+from error_messages import describe_error, safe_terminal_text
+
+
+def _paired_cleanup_plan_header(scan_export_path):
+    return (
+        "# Drive Cleanr Cleanup Plan - Test review\n"
+        "# Auto-generated: test fixture\n"
+        "# Drive Cleanr Plan Format: 1\n"
+        f"# Source scan identity: {scan.scan_export_identity(scan_export_path)}\n"
+    )
+
+
+class UserFacingLanguageTests(unittest.TestCase):
+    def test_interface_modules_do_not_contain_cjk_text(self):
+        interface_modules = (
+            "analyze.py",
+            "backup.py",
+            "cleanup_runner.py",
+            "drive_cleaner.py",
+            "error_messages.py",
+            "scan.py",
+        )
+        cjk_ranges = (
+            (0x3400, 0x4DBF),  # CJK Extension A
+            (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+            (0xF900, 0xFAFF),  # CJK Compatibility Ideographs
+            (0x3040, 0x30FF),  # Hiragana and Katakana
+            (0xAC00, 0xD7AF),  # Hangul syllables
+        )
+        for module_name in interface_modules:
+            source_path = Path(__file__).resolve().parents[1] / module_name
+            source = source_path.read_text(encoding="utf-8-sig")
+            unexpected = [
+                (line_number, character)
+                for line_number, line in enumerate(source.splitlines(), start=1)
+                for character in line
+                if any(start <= ord(character) <= end for start, end in cjk_ranges)
+            ]
+            with self.subTest(module=module_name):
+                self.assertEqual(unexpected, [], f"Unexpected CJK text in {source_path}")
 
 
 class ErrorMessageTests(unittest.TestCase):
+    def test_untrusted_error_text_escapes_terminal_controls(self):
+        message = describe_error(RuntimeError("bad\x1b[2J\nspoof\u202e"))
+        self.assertEqual(message, r"bad\x1b[2J\x0aspoof\u202e")
+        self.assertNotIn("\x1b", message)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\u202e", message)
+        self.assertEqual(safe_terminal_text(None), "Unknown")
+
     def test_localized_os_error_text_is_replaced_with_english_summary(self):
         error = PermissionError(13, "localized access-denied text", "private-path")
         message = describe_error(error)
@@ -45,18 +95,1511 @@ class ErrorMessageTests(unittest.TestCase):
         self.assertNotIn("private-scan.csv", message)
 
 
+class KnowledgeBaseConsistencyTests(unittest.TestCase):
+    def test_automated_tiers_and_manual_only_examples_are_distinguished(self):
+        knowledge_path = Path(__file__).resolve().parent.parent / "references" / "knowledge.md"
+        knowledge = knowledge_path.read_text(encoding="utf-8")
+        automated_section = knowledge.split("## What Drive Cleanr suggests automatically", 1)[1]
+        automated_section = automated_section.split("## Path patterns to review", 1)[0]
+
+        for phrase in (
+            "Puppeteer", "Electron", "npm", "Yarn", "Windows crash dumps",
+            "Chocolatey staging", "generic cache, log, GPU, shader, and code-cache",
+            "Gradle", "Cargo registry", "NuGet", "Go module", "Scoop",
+            "known Windows default or matching environment-variable root",
+            "NVIDIA App", "Playwright", "Chrome/Edge profile IndexedDB",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, automated_section)
+
+        for phrase in (
+            "manual guidance rather than automatic Drive Cleanr cleanup candidates",
+            "Windows Sandbox",
+            "the Recycle Bin", "DISM component cleanup", "MyDrivers",
+            "Maven `.m2`", "GoogleUpdater `crx_cache`", "WER reports",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, knowledge)
+
+class SkillDocumentationTests(unittest.TestCase):
+    def test_skill_frontmatter_description_is_a_valid_quoted_scalar(self):
+        skill_path = Path(__file__).resolve().parent.parent / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+        frontmatter = skill.split("---", 2)
+        self.assertEqual(len(frontmatter), 3)
+        description_lines = [
+            line.partition(":")[2].strip()
+            for line in frontmatter[1].splitlines()
+            if line.startswith("description:")
+        ]
+        self.assertEqual(len(description_lines), 1)
+        self.assertIsInstance(json.loads(description_lines[0]), str)
+
+    def test_skill_script_examples_use_the_project_directory(self):
+        skill_path = Path(__file__).resolve().parent.parent / "SKILL.md"
+        skill = skill_path.read_text(encoding="utf-8")
+        self.assertNotIn("<skill directory>", skill)
+        for script in ("drive_cleaner.py", "scan.py", "analyze.py", "backup.py"):
+            with self.subTest(script=script):
+                self.assertIn(f'"<project directory>/{script}"', skill)
+
+
+class ScannerDocumentationTests(unittest.TestCase):
+    def test_readme_states_portable_scanner_support_and_how_to_select_one(self):
+        readme_path = Path(__file__).resolve().parent.parent / "README.md"
+        readme = readme_path.read_text(encoding="utf-8")
+
+        self.assertIn("Drive Cleanr supports the official portable versions of", readme)
+        self.assertIn("[WizTree](https://diskanalyzer.com/download)", readme)
+        self.assertIn("[WinDirStat](https://github.com/windirstat/windirstat/releases)", readme)
+        self.assertIn("choose a different executable for that scanner", readme)
+        self.assertIn("enter its executable path when prompted", readme)
+        self.assertIn("WIZTREE_PATH", readme)
+        self.assertIn("WINDIRSTAT_PATH", readme)
+
+
+class GitHubWorkflowTests(unittest.TestCase):
+    def test_windows_matrix_runs_on_main_pushes_and_prs_without_branch_push_duplicates(self):
+        workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-tests.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "  push:\n    branches:\n      - main\n  pull_request:",
+            workflow,
+        )
+        self.assertIn("  workflow_dispatch:", workflow)
+
+    def test_windows_matrix_covers_all_stable_python_minors_in_supported_range(self):
+        workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-tests.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']",
+            workflow,
+        )
+
+
 class AnalyzeSafetyTests(unittest.TestCase):
-    def analyze_rows(self, rows):
+    @staticmethod
+    def _install_complete_mock_backup(plan_dir):
+        """Provide a tiny CLI stub so cleanup tests never create real backups."""
+        plan_root = Path(plan_dir)
+        calls = plan_root / "backup-calls.txt"
+        helper = plan_root / "backup.py"
+        helper.write_text(
+            "import json, sys\nfrom pathlib import Path\n"
+            f"calls = Path({str(calls)!r})\n"
+            "with calls.open('a', encoding='utf-8') as stream: stream.write(sys.argv[1] + '\\n')\n"
+            "if sys.argv[1] == 'verify':\n"
+            "    print(json.dumps({'status': 'verified'}))\n"
+            "    raise SystemExit(0)\n"
+            "start = sys.argv.index('--paths') + 1\n"
+            "end = sys.argv.index('--json')\n"
+            "paths = sys.argv[start:end]\n"
+            "print(json.dumps({'status': 'completed', 'id': 'mock-backup', "
+            "'items': [{'path': path} for path in paths]}))\n",
+            encoding="utf-8",
+        )
+        return calls
+
+    @staticmethod
+    def _stop_generated_plan_project_walk_at_temp(script_path):
+        """Keep PowerShell fixtures from enumerating the real user profile."""
+        path = Path(script_path)
+        script_text = path.read_text(encoding="utf-8-sig")
+        profile_scan_prefix = "if ($normalizedCurrent -match "
+        if profile_scan_prefix not in script_text:
+            raise AssertionError("Generated cleanup script did not contain its project-ancestor check")
+        script_text = script_text.replace(
+            profile_scan_prefix,
+            "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+            1,
+        )
+        path.write_text(script_text, encoding="utf-8-sig")
+
+    @staticmethod
+    @contextmanager
+    def _isolated_windows_temp_root():
+        """Give PowerShell cleanup fixtures a disposable Windows profile and TEMP."""
+        with tempfile.TemporaryDirectory(dir=Path.home()) as isolated_base:
+            temp_root = Path(isolated_base) / "AppData" / "Local" / "Temp"
+            temp_root.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {
+                "USERPROFILE": str(isolated_base),
+                "TEMP": str(temp_root),
+                "TMP": str(temp_root),
+            }), \
+                 mock.patch.object(tempfile, "tempdir", str(temp_root)):
+                yield temp_root
+
+    @staticmethod
+    @contextmanager
+    def _isolated_windows_profile():
+        """Keep profile-root checks inside a disposable Windows-like profile."""
+        with tempfile.TemporaryDirectory(dir=Path.home()) as profile_dir:
+            profile = Path(profile_dir)
+            temp_root = profile / "AppData" / "Local" / "Temp"
+            temp_root.mkdir(parents=True)
+            with mock.patch.dict(os.environ, {
+                "USERPROFILE": str(profile),
+                "TEMP": str(temp_root),
+                "TMP": str(temp_root),
+            }), mock.patch.object(tempfile, "tempdir", str(temp_root)):
+                yield profile
+
+    @staticmethod
+    def _install_mock_backup_that_changes_stream_on_verify(
+        plan_dir, stream_path, replacement, base_path
+    ):
+        """Simulate a named stream changing after its recovery copy was verified."""
+        helper = Path(plan_dir) / "backup.py"
+        helper.write_text(
+            "import json, os, sys\n"
+            f"stream_path = {str(stream_path)!r}\n"
+            f"base_path = {str(base_path)!r}\n"
+            f"replacement = {replacement!r}\n"
+            "if sys.argv[1] == 'verify':\n"
+            "    before = os.stat(base_path)\n"
+            "    with open(stream_path, 'wb') as stream: stream.write(replacement)\n"
+            "    os.utime(base_path, ns=(before.st_atime_ns, before.st_mtime_ns))\n"
+            "    print(json.dumps({'status': 'verified'}))\n"
+            "    raise SystemExit(0)\n"
+            "start = sys.argv.index('--paths') + 1\n"
+            "end = sys.argv.index('--json')\n"
+            "items = [{'path': path} for path in sys.argv[start:end]]\n"
+            "print(json.dumps({'status': 'completed', 'id': 'mock-backup', 'items': items}))\n",
+            encoding="utf-8",
+        )
+        return helper
+
+    def test_generated_plan_caches_project_marker_checks_until_directory_changes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "candidate.tmp"
+            target.write_bytes(b"synthetic cleanup fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(temp_dir) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script = script_path.read_text(encoding="utf-8-sig")
+
+        self.assertIn("$projectMarkerDirectoryCache", script)
+        self.assertIn("$cachedProjectCheck.LastWriteTicks -eq $directoryWriteTicks", script)
+        self.assertIn("$finalDirectoryItem.LastWriteTimeUtc.Ticks -eq $directoryWriteTicks", script)
+
+    def test_windows_selection_key_reader_translates_arrows_and_space(self):
+        fake_msvcrt = SimpleNamespace(
+            getwch=mock.Mock(side_effect=["\xe0", "H", "\xe0", "P", " ", "\r"])
+        )
+        with mock.patch.dict(sys.modules, {"msvcrt": fake_msvcrt}):
+            self.assertEqual(analyze._read_selection_key(), "up")
+            self.assertEqual(analyze._read_selection_key(), "down")
+            self.assertEqual(analyze._read_selection_key(), "toggle")
+            self.assertEqual(analyze._read_selection_key(), "enter")
+
+    def test_cleanup_selection_parser_requires_an_explicit_selection(self):
+        self.assertIsNone(analyze.parse_cleanup_selection("", 3))
+        self.assertIsNone(analyze.parse_cleanup_selection("q", 3))
+        self.assertEqual(analyze.parse_cleanup_selection("2, 1;2", 3), [2, 1])
+        self.assertEqual(analyze.parse_cleanup_selection("A", 3), [1, 2, 3])
+        for answer in ("0", "4", "1,x"):
+            with self.subTest(answer=answer), self.assertRaises(ValueError):
+                analyze.parse_cleanup_selection(answer, 3)
+
+    def test_keyboard_cleanup_picker_keeps_selections_while_moving_between_pages(self):
+        items = [{
+            "path": rf"C:\Users\A\Temp\item-{index}.tmp",
+            "size": index + 1,
+            "size_formatted": f"{index + 1} B",
+            "kind": "File",
+            "name": f"Temporary file {index}",
+        } for index in range(7)]
+        results = {"categories": {
+            "high": {"name": "High", "items": items},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(
+                 analyze, "_read_selection_key",
+                 side_effect=["toggle", "page_down", "toggle", "page_up", "enter"],
+             ), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(results, "high")
+
+        self.assertEqual(selected, [items[0]["path"], items[6]["path"]])
+        self.assertEqual(expanded, [])
+        self.assertTrue(output.getvalue().startswith("\x1b[2J\x1b[H"))
+        self.assertIn("Use the Up/Down arrow keys to move the highlight", output.getvalue())
+        self.assertIn("Spacebar to select or clear an item", output.getvalue())
+        self.assertIn("Page 2 of 2", output.getvalue())
+
+    def test_keyboard_cleanup_picker_does_not_print_every_candidate_before_paging(self):
+        items = [{
+            "path": rf"C:\Users\A\Temp\item-{index}.tmp",
+            "size": index + 1,
+            "size_formatted": f"{index + 1} B",
+            "kind": "File",
+            "name": f"Temporary file {index}",
+        } for index in range(200)]
+        results = {"categories": {
+            "high": {"name": "High", "items": items},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=["toggle", "enter"]), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(results, "high")
+
+        rendered = output.getvalue()
+        self.assertEqual(selected, [items[0]["path"]])
+        self.assertEqual(expanded, [])
+        self.assertTrue(rendered.startswith("\x1b[2J\x1b[H"))
+        self.assertIn("Page 1 of 34", rendered)
+        self.assertNotIn(items[-1]["path"], rendered)
+
+    def test_keyboard_cleanup_picker_browses_highlighted_folder_and_keeps_main_picks(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        main_file_path = r"C:\Users\A\AppData\Local\Temp\selected.tmp"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        main_file = {
+            "path": main_file_path, "size": 10, "size_formatted": "10 B",
+            "kind": "File", "name": "Temporary file",
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, main_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        keys = ["browse", "toggle", "d", "down", "toggle", "enter"]
+        output = io.StringIO()
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=keys), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [main_file_path, nested_path])
+        self.assertEqual(expanded, [("high", nested_file)])
+        self.assertIn("Folder search complete.", output.getvalue())
+        self.assertIn("D = keep these picks; B = return without adding them.", output.getvalue())
+
+    def test_keyboard_folder_browser_shows_and_can_clear_a_main_list_pick(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        keys = ["down", "toggle", "home", "browse", "toggle", "d", "enter"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=keys), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selection = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertIsNone(selection)
+        self.assertIn("[x] [1]", output.getvalue())
+        self.assertIn("[ ] [1]", output.getvalue())
+
+    def test_keyboard_folder_browser_keeps_a_main_list_pick_checked_without_duplicates(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        keys = ["down", "toggle", "home", "browse", "d", "enter"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=keys), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [nested_path])
+        self.assertEqual(expanded, [])
+        self.assertIn("[x] [1]", output.getvalue())
+
+    def test_numbered_folder_browser_shows_and_can_clear_a_main_list_pick(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        file_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": file_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": nested_file}]}
+        output = io.StringIO()
+        answers = ["2", "D", "1", "1", "D", "Q"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=False), \
+             mock.patch.object(analyze, "analyze_csv", return_value=expanded_results), \
+             mock.patch("builtins.input", side_effect=answers), \
+             redirect_stdout(output):
+            selection = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertIsNone(selection)
+        self.assertIn("* [1] High Priority", output.getvalue())
+
+    def test_numbered_main_list_toggle_clears_a_pick_made_in_folder_browsing(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        other_path = folder_path + r"\other-cache.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Nested scan file",
+        }
+        other_file = {
+            "path": other_path, "size": 50, "size_formatted": "50 B",
+            "kind": "File", "name": "Other scan file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file, other_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": nested_file}]}
+        output = io.StringIO()
+        answers = ["D", "1", "1", "D", "2", "3", ""]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=False), \
+             mock.patch.object(analyze, "analyze_csv", return_value=expanded_results), \
+             mock.patch("builtins.input", side_effect=answers), \
+             redirect_stdout(output):
+            selected_paths, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected_paths, [other_path])
+        self.assertEqual(expanded, [])
+        self.assertIn("Folder picks saved. 1 exact file/folder entry currently selected.", output.getvalue())
+        self.assertIn("Current selection: 0 exact file/folder entries.", output.getvalue())
+
+    def test_keyboard_folder_browser_b_returns_without_adding_nested_picks(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        main_file_path = r"C:\Users\A\AppData\Local\Temp\selected.tmp"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        main_file = {
+            "path": main_file_path, "size": 10, "size_formatted": "10 B",
+            "kind": "File", "name": "Temporary file",
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [main_file, folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(
+                 analyze, "_read_selection_key",
+                 side_effect=["toggle", "down", "browse", "toggle", "b", "enter"],
+             ), \
+             mock.patch.object(analyze, "analyze_csv", return_value={
+                 "expanded_candidates": [{"priority": "high", "item": nested_file}],
+             }), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [main_file_path])
+        self.assertEqual(expanded, [])
+        self.assertIn("D = keep these picks; B = return without adding them.", output.getvalue())
+        self.assertIn("Folder browse cancelled; the main-list picks are unchanged.", output.getvalue())
+
+    def test_keyboard_manual_review_picker_selects_individual_files_with_space(self):
+        files = [{
+            "path": rf"C:\Users\A\LargeFiles\file-{index}.bin",
+            "size": 1000 - index,
+            "size_formatted": f"{1000 - index} B",
+            "name": analyze.MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+        } for index in range(3)]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=True), \
+             mock.patch.object(analyze, "_enable_selection_vt_mode", return_value=(1, 0)), \
+             mock.patch.object(analyze, "_restore_selection_vt_mode"), \
+             mock.patch.object(analyze, "_read_selection_key", side_effect=["toggle", "down", "toggle", "enter"]), \
+             redirect_stdout(io.StringIO()):
+            selected = analyze.select_manual_review_files({"manual_review_files": files})
+
+        self.assertEqual([item["path"] for item in selected], [files[0]["path"], files[1]["path"]])
+
+    def test_cleanup_picker_labels_files_and_folders_and_limits_selection_to_listed_entries(self):
+        results = {"categories": {
+            "high": {"name": "High", "items": [
+                {"path": r"C:\Users\A\AppData\Local\Temp\large-file.tmp", "size": 10,
+                 "size_formatted": "10 B", "kind": "File", "name": "Temporary file"},
+                {"path": r"C:\Users\A\AppData\Local\Temp\cache", "size": 20,
+                 "size_formatted": "20 B", "kind": "Directory", "name": "Temporary files"},
+            ]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["1,2", ""]), redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(results, "high")
+        self.assertEqual(selected, [
+            r"C:\Users\A\AppData\Local\Temp\large-file.tmp",
+            r"C:\Users\A\AppData\Local\Temp\cache",
+        ])
+        self.assertEqual(expanded, [])
+        self.assertIn("| File |", output.getvalue())
+        self.assertIn("| Folder |", output.getvalue())
+        self.assertIn("Each row is labeled File or Folder.", output.getvalue())
+        self.assertIn("Enter item numbers to toggle picks", output.getvalue())
+        self.assertIn("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.", output.getvalue())
+        self.assertIn("Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too.", output.getvalue())
+        self.assertIn("D browses scan entries inside a listed folder.", output.getvalue())
+        self.assertIn("The scan must include file rows to select individual files.", output.getvalue())
+        self.assertIn("Added 1 individual file and 1 folder to the cleanup plan.", output.getvalue())
+        self.assertIn(
+            "Combined size from the scan, counting nested selections once: 30 B.",
+            output.getvalue(),
+        )
+
+    def test_picker_browses_collapsed_folder_contents_and_can_select_one_exact_file(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        file_path = folder_path + r"content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label, "safe": True,
+        }
+        file_item = {
+            "path": file_path, "size": 100, "scan_logical_size": 100,
+            "size_formatted": "100 B",
+            "kind": "File", "name": label, "safe": True,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": file_item}]}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value=expanded_results) as expand, \
+             mock.patch("builtins.input", side_effect=["D", "1", "1", "D", ""]), \
+             redirect_stdout(output):
+            selected_paths, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+        self.assertEqual(selected_paths, [file_path])
+        self.assertEqual(expanded, [("high", file_item)])
+        expand.assert_called_once_with(
+            "saved-scan.csv", 50, progress_callback=mock.ANY,
+            expand_under=folder_path, expand_priority="high",
+        )
+        self.assertIn("Searching the saved scan for matching files and folders", output.getvalue())
+        self.assertIn("Found 1 matching scan entries", output.getvalue())
+
+        plan_results = analyze._results_with_expanded_candidates(results, expanded)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "exact-file.ps1"
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True), \
+                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
+                 mock.patch.object(analyze, "_matches_cleanup_rule", return_value=True), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                analyze.generate_clean_script(
+                    plan_results, str(output_path), "high", selected_paths=selected_paths
+                )
+            script = output_path.read_text(encoding="utf-8-sig")
+        self.assertIn(f"Path = '{file_path}'", script)
+        self.assertNotIn(f"Path = '{folder_path}'", script)
+        self.assertEqual(results["categories"]["high"]["items"], [folder_item])
+
+    def test_folder_browser_back_discards_browse_picks_and_keeps_main_selection(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        main_file = r"C:\Users\A\AppData\Local\Temp\selected.tmp"
+        nested_file = folder_path + r"content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label,
+        }
+        main_file_item = {
+            "path": main_file, "size": 10, "size_formatted": "10 B",
+            "kind": "File", "name": "Temporary file",
+        }
+        nested_file_item = {
+            "path": nested_file, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [main_file_item, folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value={
+                "expanded_candidates": [{"priority": "high", "item": nested_file_item}]}), \
+             mock.patch("builtins.input", side_effect=["1", "D", "1", "1", "B", ""]), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [main_file])
+        self.assertEqual(expanded, [])
+        self.assertIn("B = return without adding these picks", output.getvalue())
+        self.assertIn("Folder browse cancelled; its entries were not added", output.getvalue())
+
+    def test_folder_browser_paginates_and_filters_exact_scan_entries(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Directory", "name": label,
+        }
+        expanded_candidates = []
+        for index in range(26):
+            item = {
+                "path": folder_path + f"\\cache-{index:02}.bin",
+                "size": index + 1, "size_formatted": f"{index + 1} B",
+                "kind": "File", "name": label,
+            }
+            expanded_candidates.append({"priority": "high", "item": item})
+        output = io.StringIO()
+        with mock.patch.object(
+                analyze, "analyze_csv", return_value={"expanded_candidates": expanded_candidates}), \
+             mock.patch("builtins.input", side_effect=["1", "N", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected[0][1]["path"], folder_path + r"\cache-00.bin")
+        self.assertIn("Page 1 of 2", output.getvalue())
+        self.assertIn("Page 2 of 2", output.getvalue())
+
+        output = io.StringIO()
+        with mock.patch.object(
+                analyze, "analyze_csv", return_value={"expanded_candidates": expanded_candidates}), \
+             mock.patch("builtins.input", side_effect=["1", "F", "cache-12.bin", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected[0][1]["path"], folder_path + r"\cache-12.bin")
+        self.assertIn("Filter: cache-12.bin", output.getvalue())
+
+    def test_numbered_folder_browser_can_clear_nested_selections_on_reopen(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        first_nested_path = folder_path + r"cache\larger.bin"
+        second_nested_path = folder_path + r"cache\smaller.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 300, "size_formatted": "300 B",
+            "kind": "Folder", "name": label,
+        }
+        first_nested_file = {
+            "path": first_nested_path, "size": 200, "size_formatted": "200 B",
+            "kind": "File", "name": label,
+        }
+        second_nested_file = {
+            "path": second_nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": label,
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [
+            {"priority": "high", "item": first_nested_file},
+            {"priority": "high", "item": second_nested_file},
+        ]}
+        output = io.StringIO()
+        with mock.patch.object(
+                analyze, "analyze_csv", side_effect=[
+                    expanded_results, expanded_results, expanded_results,
+                ]), \
+             mock.patch("builtins.input", side_effect=[
+                 "D", "1", "1,2", "D", "D", "1", "1", "D", "D", "1", "B", "",
+             ]), \
+             redirect_stdout(output):
+            selected, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected, [second_nested_path])
+        self.assertEqual(expanded, [("high", second_nested_file)])
+        self.assertIn("* [1] High Priority", output.getvalue())
+        self.assertIn("Folder | 300 B", output.getvalue())
+        self.assertIn("Folder browse cancelled; its entries were not added", output.getvalue())
+
+    def test_folder_browser_explains_when_no_individual_scan_entries_are_available(self):
+        folder_item = {
+            "path": r"C:\Users\A\AppData\Local\npm-cache", "size": 1000,
+            "size_formatted": "1000 B", "kind": "Directory", "name": "npm cache",
+        }
+        output = io.StringIO()
+        with mock.patch.object(analyze, "analyze_csv", return_value={
+                "expanded_candidates": [], "stale_candidate_count": 1,
+                "project_candidate_count": 1,
+                "project_roots": [{"path": r"C:\Users\A\project", "marker": ".git"}],
+                "reparse_candidate_count": 2,
+            }), \
+             mock.patch("builtins.input", return_value="1"), \
+             redirect_stdout(output):
+            selected = analyze._browse_folder_candidates(
+                "saved-scan.csv", 50, [("high", folder_item)], "high"
+            )
+        self.assertEqual(selected, [])
+        self.assertIn("Only entries recorded in the scan can be selected", output.getvalue())
+        self.assertIn("no longer exist. Rescan to refresh them", output.getvalue())
+        self.assertIn("Detected project folders kept off the cleanup list", output.getvalue())
+        self.assertIn("paths that cross a link or could not be checked", output.getvalue())
+        self.assertIn("Choose All review levels", output.getvalue())
+
+    def test_generated_plan_contains_only_explicitly_selected_candidates(self):
+        first_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
+        second_path = r"C:\Users\A\AppData\Local\Temp\unselected-cache"
+        label = "Temporary files (check for installers or builds in progress)"
+        results = {"categories": {
+            "high": {"items": [
+                {"path": first_path, "name": label, "size": 100,
+                 "size_formatted": "100 B", "kind": "Directory"},
+                {"path": second_path, "name": label, "size": 200,
+                 "size_formatted": "200 B", "kind": "Directory"},
+            ]},
+            "medium": {"items": []},
+            "low": {"items": []},
+        }}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "selected.ps1"
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
+                 mock.patch.object(analyze, "_matches_cleanup_rule", return_value=True), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"):
+                analyze.generate_clean_script(
+                    results, str(output_path), "high", selected_paths=[first_path]
+                )
+            script = output_path.read_text(encoding="utf-8-sig")
+            self.assertIn(f"Path = '{first_path}'", script)
+            self.assertNotIn("unselected-cache", script)
+            self.assertIn("[int[]]$Select = @(1)", script)
+            self.assertIn("ItemType = 'Folder'", script)
+            self.assertIn("$($target.ItemType) | $($target.Path)", script)
+            self.assertIn("Drive Cleanr Cleanup Plan", script)
+            self.assertLess(
+                script.index("Loading cleanup safety checks. This may take a moment; nothing has been removed."),
+                script.index("Add-Type -TypeDefinition"),
+            )
+            self.assertLess(
+                script.index("This saved cleanup plan does not update when Drive Cleanr changes."),
+                script.index("Add-Type -TypeDefinition"),
+            )
+            self.assertIn("Files and folders already selected for this plan:", script)
+            self.assertIn("Selected targets (folder contents are included, except protected and project data and higher-risk candidates you did not explicitly select):", script)
+            self.assertIn("higher-risk candidates you did not explicitly select", script)
+
+            with self.assertRaisesRegex(ValueError, "not in the chosen candidate list"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "unknown.ps1"), "high",
+                    selected_paths=[r"C:\Users\A\AppData\Local\Temp\not-listed"],
+                )
+            with self.assertRaisesRegex(ValueError, "Select at least one"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "empty.ps1"), "high", selected_paths=[]
+                )
+
+    def test_review_menu_builds_plan_from_only_numbered_selection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            selected_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
+            other_path = r"C:\Users\A\AppData\Local\Temp\other-cache"
+            label = "Temporary files (check for installers or builds in progress)"
+            selected_item = {
+                "path": selected_path, "size": 100, "size_formatted": "100 B",
+                "kind": "Directory", "name": label, "safe": True,
+            }
+            other_item = {
+                "path": other_path, "size": 200, "size_formatted": "200 B",
+                "kind": "Directory", "name": label, "safe": True,
+            }
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": [selected_item, other_item]},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            plan_path = root / "reviewed.ps1"
+            output = io.StringIO()
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "3", "high", "1", "", str(plan_path), "", "0",
+                 ]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=None) as preview, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
+                 redirect_stdout(output):
+                analyze.run_tui(initial_csv=str(csv_path))
+            generate.assert_called_once_with(
+                results, str(plan_path), "high", selected_paths=[selected_path]
+            )
+            preview.assert_called_once_with(str(plan_path))
+            offer.assert_called_once_with(str(plan_path))
+            self.assertIn("Showing files and folders at least 50 MB in size", output.getvalue())
+            self.assertIn("3) Choose files or folders for a cleanup plan (saving a plan deletes nothing)", output.getvalue())
+            self.assertIn("| Folder |", output.getvalue())
+
+    def test_guided_menu_does_not_offer_cleanup_after_failed_preview(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            plan_path = root / "reviewed.ps1"
+            selected_path = r"C:\Users\A\AppData\Local\Temp\selected-cache"
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": []},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            output = io.StringIO()
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch.object(analyze, "select_cleanup_candidates", return_value=([selected_path], [])), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=False) as preview, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script") as run_cleanup, \
+                 mock.patch("builtins.input", side_effect=["3", "high", str(plan_path), "", "0"]), \
+                 redirect_stdout(output):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            generate.assert_called_once()
+            preview.assert_called_once_with(str(plan_path))
+            run_cleanup.assert_not_called()
+            self.assertIn("the plan remains saved and this menu will not start cleanup", output.getvalue())
+
+    def test_review_menu_creates_manual_review_plan_only_after_exact_acknowledgement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            manual_file = {
+                "path": r"C:\Users\A\LargeFiles\disk-image.iso",
+                "size": 900000000,
+                "size_formatted": "858.31 MB",
+                "name": analyze.MANUAL_REVIEW_LABEL,
+                "kind": "File",
+                "manual_review": True,
+            }
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "manual_review_files": [manual_file],
+                "categories": {
+                    "high": {"name": "High", "items": []},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            plan_path = root / "manual-review.ps1"
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "6", "REVIEWED", str(plan_path), "", "0",
+                 ]), \
+                 mock.patch.object(analyze, "select_manual_review_files", return_value=[manual_file]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=None) as preview, \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script") as offer, \
+                 redirect_stdout(io.StringIO()):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            generate.assert_called_once_with(
+                results, str(plan_path), "manual", selected_paths=[manual_file["path"]],
+                manual_review_confirmed=True,
+            )
+            preview.assert_called_once_with(str(plan_path))
+            offer.assert_called_once_with(str(plan_path))
+
+    def test_review_menu_browses_folder_and_generates_plan_for_exact_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            csv_path = root / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+            file_path = folder_path + r"\content.bin"
+            label = "Temporary files (check for installers or builds in progress)"
+            folder_item = {
+                "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+                "kind": "Directory", "name": label, "safe": True,
+            }
+            file_item = {
+                "path": file_path, "size": 100, "size_formatted": "100 B",
+                "kind": "File", "name": label, "safe": True,
+            }
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": [folder_item]},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            expanded_results = {"expanded_candidates": [{"priority": "high", "item": file_item}]}
+            plan_path = root / "exact-file.ps1"
+            output = io.StringIO()
+            with mock.patch.object(analyze, "analyze_csv", side_effect=[results, expanded_results]), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "3", "high", "D", "1", "1", "D", "", str(plan_path), "", "0",
+                 ]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate, \
+                 mock.patch.object(analyze, "offer_to_preview_cleanup_script"), \
+                 mock.patch.object(analyze, "offer_to_run_cleanup_script"), \
+                 redirect_stdout(output):
+                analyze.run_tui(initial_csv=str(csv_path))
+
+            args, kwargs = generate.call_args
+            self.assertEqual(args[0]["categories"]["high"]["items"], [folder_item, file_item])
+            self.assertEqual(args[1], str(plan_path))
+            self.assertEqual(args[2], "high")
+            self.assertEqual(kwargs["selected_paths"], [file_path])
+            self.assertEqual(results["categories"]["high"]["items"], [folder_item])
+            self.assertIn("C:\\Users\\A\\AppData\\Local\\npm-cache\\content.bin", output.getvalue())
+
+    def test_admin_status_distinguishes_true_false_and_detection_failure(self):
+        for api_result, expected in ((1, True), (0, False)):
+            api = SimpleNamespace(IsUserAnAdmin=mock.Mock(return_value=api_result))
+            with self.subTest(api_result=api_result), \
+                 mock.patch.object(scan.ctypes, "windll", SimpleNamespace(shell32=api), create=True):
+                self.assertIs(scan.check_admin_status(), expected)
+                self.assertIs(scan.check_admin(), expected)
+
+        api = SimpleNamespace(IsUserAnAdmin=mock.Mock(side_effect=OSError("token query failed")))
+        with mock.patch.object(scan.ctypes, "windll", SimpleNamespace(shell32=api), create=True):
+            self.assertIsNone(scan.check_admin_status())
+            self.assertFalse(scan.check_admin())
+
+    def test_cleanup_script_run_offer_is_hidden_without_admin_token(self):
+        output = io.StringIO()
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=False), \
+             mock.patch("builtins.input") as prompt, \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script, \
+             redirect_stdout(output):
+            self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
+        prompt.assert_not_called()
+        run_script.assert_not_called()
+        self.assertIn("not running as Administrator", output.getvalue())
+
+    def test_cleanup_script_run_offer_explains_unknown_admin_status(self):
+        output = io.StringIO()
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=None), \
+             mock.patch("builtins.input") as prompt, \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script, \
+             redirect_stdout(output):
+            self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
+        prompt.assert_not_called()
+        run_script.assert_not_called()
+        self.assertIn("Could not determine whether this window is running as Administrator", output.getvalue())
+        self.assertIn("The cleanup plan is saved; no files were changed", output.getvalue())
+
+    def test_admin_cleanup_script_run_offer_defaults_to_saved_plan(self):
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
+             mock.patch("builtins.input", return_value="") as input_mock, \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_script:
+            self.assertFalse(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
+        self.assertIn(
+            "Y = open the plan and continue its confirmations; Enter or N = save for later",
+            input_mock.call_args.args[0],
+        )
+        run_script.assert_not_called()
+
+    def test_admin_cleanup_script_run_offer_launches_power_shell_without_force(self):
+        completed = SimpleNamespace(returncode=0)
+        output = io.StringIO()
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
+             mock.patch("builtins.input", return_value="y"), \
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=["pwsh.exe"]), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script, \
+             redirect_stdout(output):
+            self.assertTrue(analyze.offer_to_run_cleanup_script("C:\\Reviewed Plan.ps1"))
+        run_script.assert_called_once_with(
+            ["pwsh.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\Reviewed Plan.ps1"],
+            check=False,
+        )
+        self.assertIn("show your saved selection again", output.getvalue())
+        self.assertIn("ask about a backup and final confirmation", output.getvalue())
+        self.assertNotIn("choose which to clean", output.getvalue())
+
+    def test_admin_cleanup_script_run_offer_uses_powershell_fallback(self):
+        completed = SimpleNamespace(returncode=0)
+        with mock.patch.object(cleanup_runner.scan, "check_admin_status", return_value=True), \
+             mock.patch("builtins.input", return_value="yes"), \
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=[None, "powershell.exe"]), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_script:
+            self.assertTrue(analyze.offer_to_run_cleanup_script("reviewed.ps1"))
+        self.assertEqual(run_script.call_args.args[0][0], "powershell.exe")
+
+    def test_guided_plan_preview_runs_read_only_by_default(self):
+        completed = SimpleNamespace(returncode=0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "reviewed plan.ps1"
+            plan_path.write_text("reviewed plan", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch("builtins.input", return_value="") as input_mock, \
+                 mock.patch.object(cleanup_runner.shutil, "which", side_effect=["pwsh.exe"]), \
+                 mock.patch.object(cleanup_runner.subprocess, "run", return_value=completed) as run_preview, \
+                 redirect_stdout(output):
+                self.assertTrue(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            self.assertIn(
+                "Enter or Y = preview every selected path; N = skip preview",
+                input_mock.call_args.args[0],
+            )
+            run_preview.assert_called_once_with(
+                ["pwsh.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(plan_path), "-PreviewOnly"],
+                check=False,
+            )
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "reviewed plan")
+            self.assertIn("read-only preview", output.getvalue())
+            self.assertIn("creates no backup and removes nothing", output.getvalue())
+
+    def test_declining_guided_plan_preview_does_not_launch_or_change_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "reviewed.ps1"
+            plan_path.write_text("reviewed plan", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch("builtins.input", return_value="n"), \
+                 mock.patch.object(cleanup_runner.shutil, "which") as find_powershell, \
+                 mock.patch.object(cleanup_runner.subprocess, "run") as run_preview, \
+                 redirect_stdout(output):
+                self.assertIsNone(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            find_powershell.assert_not_called()
+            run_preview.assert_not_called()
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "reviewed plan")
+            self.assertIn("Preview skipped", output.getvalue())
+
+    def test_guided_plan_preview_reports_failure_without_claiming_cleanup(self):
+        failed = SimpleNamespace(returncode=1)
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="yes"), \
+             mock.patch.object(cleanup_runner.shutil, "which", return_value="pwsh.exe"), \
+             mock.patch.object(cleanup_runner.subprocess, "run", return_value=failed), \
+             redirect_stdout(output):
+            self.assertFalse(cleanup_runner.offer_to_preview_cleanup_script("reviewed.ps1"))
+        self.assertIn("preview stopped with status 1", output.getvalue())
+        self.assertIn("No files were removed", output.getvalue())
+
+    def test_guided_plan_preview_handles_missing_powershell(self):
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="y"), \
+             mock.patch.object(cleanup_runner.shutil, "which", side_effect=[None, None]), \
+             mock.patch.object(cleanup_runner.subprocess, "run") as run_preview, \
+             redirect_stdout(output):
+            self.assertFalse(cleanup_runner.offer_to_preview_cleanup_script("reviewed.ps1"))
+        run_preview.assert_not_called()
+        self.assertIn("PowerShell was not found", output.getvalue())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup plans target Windows")
+    def test_guided_preview_runs_generated_plan_without_removing_fixture(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, \
+             tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected_folder = root / "Temp"
+            selected_folder.mkdir()
+            candidate = selected_folder / "preview-target.tmp"
+            candidate.write_bytes(b"guided preview fixture")
+            plan_path = root / "reviewed-preview.ps1"
+            label = "Temporary files (check for installers or builds in progress)"
+            item = {
+                "path": str(selected_folder) + "\\",
+                "name": label,
+                "size": candidate.stat().st_size,
+                "size_formatted": f"{candidate.stat().st_size} B",
+                "kind": "Directory",
+            }
+            results = {"categories": {"high": {"name": "High", "items": [item]}}}
+            analyze.generate_clean_script(
+                results, str(plan_path), "high", selected_paths=[item["path"]]
+            )
+            self._stop_generated_plan_project_walk_at_temp(plan_path)
+
+            command = []
+            preview_stdout = []
+            real_run = cleanup_runner.subprocess.run
+
+            def capture_preview(args, check=False):
+                command.extend(args)
+                result = real_run(
+                    args, check=check, capture_output=True, text=True, timeout=90,
+                )
+                preview_stdout.append(result.stdout)
+                return SimpleNamespace(returncode=result.returncode)
+
+            with mock.patch("builtins.input", return_value="y"), \
+                 mock.patch.object(cleanup_runner.shutil, "which", return_value=powershell), \
+                 mock.patch.object(cleanup_runner.subprocess, "run", side_effect=capture_preview), \
+                 redirect_stdout(io.StringIO()):
+                self.assertTrue(cleanup_runner.offer_to_preview_cleanup_script(plan_path))
+
+            self.assertEqual(command[-1], "-PreviewOnly")
+            self.assertEqual(command[command.index("-File") + 1], str(plan_path))
+            self.assertIn("Preview complete: 1 file and 1 folder would be removed", preview_stdout[0])
+            self.assertTrue(candidate.is_file())
+            self.assertEqual(candidate.read_bytes(), b"guided preview fixture")
+
+    def test_review_menu_blank_selection_creates_no_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("placeholder", encoding="utf-8")
+            results = {
+                "scan_file": str(csv_path), "scan_time": "now", "total_size": 0,
+                "free_space": 0, "used_space": 0, "space_source": None,
+                "categories": {
+                    "high": {"name": "High", "items": [{
+                        "path": r"C:\Users\A\AppData\Local\Temp\candidate",
+                        "size": 100, "size_formatted": "100 B",
+                        "kind": "Directory", "name": "Temporary files",
+                    }]},
+                    "medium": {"name": "Medium", "items": []},
+                    "low": {"name": "Low", "items": []},
+                },
+            }
+            with mock.patch.object(analyze, "analyze_csv", return_value=results), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=["3", "high", "", "", "0"]), \
+                 mock.patch.object(analyze, "generate_clean_script") as generate:
+                analyze.run_tui(initial_csv=str(csv_path))
+            generate.assert_not_called()
+
+    def analyze_rows(self, rows, exists=None, drive_type=3, **analyze_options):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=["File Name", "Size", "Allocated", "DRIVECAPACITY", "FREESPACE", "USEDSPACE"])
                 writer.writeheader()
                 writer.writerows(rows)
-            with mock.patch("analyze.os.path.exists", return_value=True):
+            with mock.patch(
+                    "analyze.os.path.exists",
+                    side_effect=exists or (lambda _path: True)):
                 with mock.patch("analyze.os.path.isdir", side_effect=self._synthetic_isdir(rows)):
                     with mock.patch("analyze.os.path.isfile", side_effect=self._synthetic_isfile(rows)):
-                        return analyze.analyze_csv(str(csv_path), min_size_mb=0)
+                        # These tests model filesystem type/existence for synthetic
+                        # Windows paths. Treat those modeled files as size-matched;
+                        # dedicated stale-size tests use real temporary files.
+                        with mock.patch.object(analyze.scan, "_windows_drive_type", return_value=drive_type):
+                            with mock.patch.object(
+                                    analyze, "_live_file_size_matches_scan", return_value=True):
+                                return analyze.analyze_csv(str(csv_path), min_size_mb=0, **analyze_options)
+
+    def test_reports_explain_and_preserve_non_english_scan_paths(self):
+        non_english_path = r"C:\Users\A\AppData\Local\Temp\临时文件.tmp"
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows([{
+                "File Name": non_english_path, "Size": "104857600",
+            }])
+
+        console_output = io.StringIO()
+        with redirect_stdout(console_output):
+            analyze.print_report(results)
+        self.assertIn(analyze.PATH_LANGUAGE_NOTE, console_output.getvalue())
+        self.assertIn(non_english_path, console_output.getvalue())
+        self.assertIn("Temporary files", console_output.getvalue())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "candidate-list.txt"
+            analyze.write_item_list_report(results, str(report_path))
+            saved_report = report_path.read_text(encoding="utf-8")
+        self.assertIn(analyze.PATH_LANGUAGE_NOTE, saved_report)
+        self.assertIn(non_english_path, saved_report)
+        self.assertIn("Temporary files", saved_report)
+
+    def test_analysis_lists_large_unmatched_files_separately_from_cleanup_suggestions(self):
+        unmatched = r"C:\Users\A\LargeFiles\disk-image.iso"
+        automatic = r"C:\Users\A\AppData\Local\Temp\cache.bin"
+        personal = r"C:\Users\A\Documents\family-video.mp4"
+        rows = [
+            {"File Name": unmatched, "Size": "900000000", "Allocated": "900000000"},
+            {"File Name": automatic, "Size": "800000000", "Allocated": "800000000"},
+            {"File Name": personal, "Size": "700000000", "Allocated": "700000000"},
+        ]
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(
+            [item["path"] for item in results["manual_review_files"]], [unmatched]
+        )
+        self.assertTrue(results["manual_review_files"][0]["manual_review"])
+        self.assertEqual(results["manual_review_files"][0]["kind"], "File")
+        self.assertEqual(
+            [item["path"] for item in results["categories"]["high"]["items"]],
+            [automatic],
+        )
+        with mock.patch("builtins.print") as output:
+            analyze.print_report(results)
+        report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertIn("manual review only", report)
+        self.assertIn("not cleanup recommendations", report)
+        self.assertIn(unmatched, report)
+        self.assertNotIn(personal, report)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            report_path = Path(temp_dir) / "review.txt"
+            analyze.write_item_list_report(results, str(report_path))
+            saved_report = report_path.read_text(encoding="utf-8")
+        self.assertIn("Largest files outside automatic cleanup suggestions", saved_report)
+        self.assertIn("They are excluded from the estimated cleanup space above", saved_report)
+        self.assertIn(unmatched, saved_report)
+        self.assertNotIn(personal, saved_report)
+
+    def test_analysis_keeps_unmatched_files_inside_detected_projects_out_of_manual_review(self):
+        project_file = r"C:\Users\A\dev\my-project\large.bin"
+        project_root = r"C:\Users\A\dev\my-project"
+        rows = [{"File Name": project_file, "Size": "900000000", "Allocated": "900000000"}]
+
+        def has_marker(directory, marker_out=None):
+            if analyze._path_key(directory) == analyze._path_key(project_root):
+                if marker_out is not None:
+                    marker_out.append(".git")
+                return True
+            return False
+
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", side_effect=has_marker):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["manual_review_files"], [])
+        self.assertEqual(results["project_roots"], [{"path": project_root, "marker": ".git"}])
+
+    def test_analysis_omits_unmatched_files_that_cross_reparse_points(self):
+        linked_file = r"C:\Users\A\LargeFiles\redirected.bin"
+        rows = [{"File Name": linked_file, "Size": "900000000", "Allocated": "900000000"}]
+        with mock.patch.object(analyze, "_path_has_reparse_component_cached", return_value=True), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["manual_review_files"], [])
+
+    def test_manual_review_reparse_checks_reuse_safe_parent_components(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir) / "shared" / "files"
+            folder.mkdir(parents=True)
+            checked_paths = []
+
+            def report_no_reparse(path):
+                checked_paths.append(os.path.normcase(os.path.abspath(path)))
+                return False
+
+            with mock.patch.object(analyze.scan, "_is_reparse_point", side_effect=report_no_reparse):
+                cache = {}
+                self.assertFalse(analyze._path_has_reparse_component_cached(
+                    str(folder / "first.bin"), cache
+                ))
+                first_check_count = len(checked_paths)
+                self.assertFalse(analyze._path_has_reparse_component_cached(
+                    str(folder / "second.bin"), cache
+                ))
+
+            self.assertEqual(len(checked_paths), first_check_count + 1)
+            self.assertEqual(Path(checked_paths[-1]).name, "second.bin")
+
+    def test_manual_review_filters_projects_and_links_before_bounded_shortlist(self):
+        eligible_paths = [
+            r"C:\Users\A\LargeFiles\eligible-one.iso",
+            r"C:\Users\A\LargeFiles\eligible-two.iso",
+        ]
+        eligible_rows = [
+            {"File Name": eligible_paths[0], "Size": "1000"},
+            {"File Name": eligible_paths[1], "Size": "900"},
+        ]
+
+        for blocker in ("project", "redirected"):
+            with self.subTest(blocker=blocker):
+                blocked_rows = []
+                for index in range(analyze.MANUAL_REVIEW_HEAP_LIMIT + 1):
+                    if blocker == "project":
+                        path = rf"C:\Users\A\Projects\project-{index:04}\large.bin"
+                    else:
+                        path = rf"C:\Users\A\Redirected\large-{index:04}.bin"
+                    blocked_rows.append({"File Name": path, "Size": str(10_000 + index)})
+
+                def has_project_marker(directory, marker_out=None):
+                    is_project_root = ntpath.basename(directory).startswith("project-")
+                    if is_project_root and marker_out is not None:
+                        marker_out.append(".git")
+                    return is_project_root
+
+                def crosses_link(path, _cache):
+                    return blocker == "redirected" and "\\redirected\\" in path.casefold()
+
+                with mock.patch.object(
+                        analyze, "_path_has_reparse_component_cached", side_effect=crosses_link), \
+                     mock.patch.object(
+                         analyze, "_directory_has_project_marker", side_effect=has_project_marker):
+                    results = self.analyze_rows(blocked_rows + eligible_rows)
+
+                self.assertEqual(
+                    [item["path"] for item in results["manual_review_files"]], eligible_paths
+                )
+
+    def test_manual_review_picker_requires_individual_file_choices_and_supports_pages(self):
+        files = [{
+            "path": rf"C:\Users\A\LargeFiles\file-{index:02}.bin",
+            "size": 1000 - index,
+            "size_formatted": f"{1000 - index} B",
+            "name": analyze.MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+        } for index in range(26)]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["A", "N", "1", "D"]), \
+             redirect_stdout(output):
+            selected = analyze.select_manual_review_files({"manual_review_files": files})
+
+        self.assertEqual([item["path"] for item in selected], [files[-1]["path"]])
+        self.assertIn("Bulk selection is unavailable", output.getvalue())
+        self.assertIn("Page 1 of 2", output.getvalue())
+        self.assertIn("Page 2 of 2", output.getvalue())
+
+    def test_manual_cleanup_plan_needs_review_ack_and_accepts_only_unclassified_files(self):
+        path = r"C:\Users\A\LargeFiles\disk-image.iso"
+        item = {
+            "path": path,
+            "size": 900000000,
+            "size_formatted": "858.31 MB",
+            "name": analyze.MANUAL_REVIEW_LABEL,
+            "kind": "File",
+            "manual_review": True,
+            "scan_logical_size": 900000000,
+        }
+        results = {
+            "scan_file_time": "now",
+            "manual_review_files": [item],
+            "categories": {
+                "high": {"items": []},
+                "medium": {"items": []},
+                "low": {"items": []},
+            },
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            plan_path = Path(temp_dir) / "manual.ps1"
+            with self.assertRaisesRegex(ValueError, "explicit reviewed selection"):
+                analyze.generate_clean_script(
+                    results, str(plan_path), "manual", selected_paths=[path]
+                )
+
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(analyze, "_is_excluded_path", return_value=False), \
+                 mock.patch.object(analyze, "_matches_any_cleanup_rule", return_value=False), \
+                 mock.patch.object(analyze.os.path, "isfile", return_value=True), \
+                 mock.patch.object(analyze.os.path, "isdir", return_value=False), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
+                analyze.generate_clean_script(
+                    results, str(plan_path), "manual", selected_paths=[path],
+                    manual_review_confirmed=True,
+                )
+
+            script = plan_path.read_text(encoding="utf-8-sig")
+            self.assertIn("Manual review - exact files selected by the user", script)
+            self.assertIn("$ManualReviewOnly = $true", script)
+            self.assertIn("Drive Cleanr cannot tell whether they are needed", script)
+            self.assertIn("Selected targets (individual files only)", script)
+            self.assertIn("--priority manual", script)
+            self.assertIn(f"Path = '{path}'", script)
+            self.assertNotIn("ItemType = 'Folder'", script)
+
+    def test_manual_plan_generator_rejects_protected_linked_and_project_files(self):
+        path = r"C:\Users\A\LargeFiles\disk-image.iso"
+        item = {
+            "path": path, "size": 900000000, "size_formatted": "858.31 MB",
+            "name": analyze.MANUAL_REVIEW_LABEL, "kind": "File", "manual_review": True,
+            "scan_logical_size": 900000000,
+        }
+        results = {
+            "manual_review_files": [item],
+            "categories": {"high": {"items": []}, "medium": {"items": []}, "low": {"items": []}},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+                 mock.patch.object(analyze, "_is_excluded_path", wraps=analyze._is_excluded_path), \
+                 mock.patch.object(analyze, "_matches_any_cleanup_rule", wraps=analyze._matches_any_cleanup_rule), \
+                 mock.patch.object(analyze.os.path, "isfile", return_value=True), \
+                 mock.patch.object(analyze.os.path, "isdir", return_value=False), \
+                 mock.patch.object(analyze, "_inside_project_tree", return_value=False), \
+                 mock.patch.object(analyze, "_ensure_output_outside_targets"), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
+                with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=True):
+                    with self.assertRaisesRegex(ValueError, "crosses a junction or symbolic link"):
+                        analyze.generate_clean_script(
+                            results, str(Path(temp_dir) / "linked.ps1"), "manual",
+                            selected_paths=[path], manual_review_confirmed=True,
+                        )
+
+                protected = dict(item, path=r"C:\Users\A\Documents\private.iso")
+                protected_results = dict(results, manual_review_files=[protected])
+                with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False):
+                    with self.assertRaisesRegex(ValueError, "protected path"):
+                        analyze.generate_clean_script(
+                            protected_results, str(Path(temp_dir) / "protected.ps1"), "manual",
+                            selected_paths=[protected["path"]], manual_review_confirmed=True,
+                        )
+
+                    with mock.patch.object(analyze, "_inside_project_tree", return_value=True):
+                        with self.assertRaisesRegex(ValueError, "inside a detected project"):
+                            analyze.generate_clean_script(
+                                results, str(Path(temp_dir) / "project.ps1"), "manual",
+                                selected_paths=[path], manual_review_confirmed=True,
+                            )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup plans target Windows")
+    def test_manual_review_plan_removes_only_the_exact_selected_file_in_a_temp_fixture(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_profile() as root:
+            selected_file = root / "selected-large-file.iso"
+            unselected_file = root / "unselected-large-file.iso"
+            selected_file.write_bytes(b"explicitly selected fixture")
+            unselected_file.write_bytes(b"must remain untouched")
+            item = {
+                "path": str(selected_file),
+                "size": selected_file.stat().st_size,
+                "size_formatted": analyze.format_size(selected_file.stat().st_size),
+                "name": analyze.MANUAL_REVIEW_LABEL,
+                "kind": "File",
+                "manual_review": True,
+                "scan_logical_size": selected_file.stat().st_size,
+            }
+            results = {
+                "manual_review_files": [item],
+                "categories": {
+                    "high": {"items": []},
+                    "medium": {"items": []},
+                    "low": {"items": []},
+                },
+            }
+            script_path = root / "manual-review.ps1"
+            analyze.generate_clean_script(
+                results, str(script_path), "manual", selected_paths=[str(selected_file)],
+                manual_review_confirmed=True,
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(selected_file.exists(), result.stdout + result.stderr)
+            self.assertEqual(unselected_file.read_bytes(), b"must remain untouched")
+            self.assertIn("Manual review only", result.stdout)
+            self.assertIn(f"File | {analyze.MANUAL_REVIEW_LABEL} |", result.stdout)
+            self.assertIn("Cleanup complete! Removed 1 file", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
 
     @staticmethod
     def _synthetic_types(rows):
@@ -109,8 +1652,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             report = io.StringIO()
             with redirect_stdout(report):
                 analyze.print_report(results)
-            self.assertIn(f"Scan export last modified: {expected}", report.getvalue())
-            self.assertIn("rescan before cleanup", report.getvalue())
+            self.assertIn(f"Scan file last changed: {expected}", report.getvalue())
+            self.assertIn("Scan again before cleanup", report.getvalue())
 
             candidate_list = Path(temp_dir) / "candidates.txt"
             analyze.write_item_list_report(results, str(candidate_list))
@@ -118,19 +1661,27 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_generated_cleanup_script_discloses_normalized_scan_timestamp(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            source_scan = Path(temp_dir) / "source-scan.csv"
             result = {
+                "scan_file": str(source_scan),
                 "scan_file_time": "2026-01-02T03:04:05-08:00\nWrite-Host 'not a timestamp'",
                 "categories": {"high": {"name": "High", "items": [{
                     "path": r"C:\Users\A\AppData\Local\Temp\cache.bin",
                     "name": "Temporary files (check for installers or builds in progress)",
                     "size": 100, "size_formatted": "100 B", "kind": "File",
+                    "scan_logical_size": 100,
                 }]}, "medium": {"name": "Medium", "items": []}, "low": {"name": "Low", "items": []}},
             }
             output_path = Path(temp_dir) / "clean.ps1"
-            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 analyze.generate_clean_script(result, str(output_path))
             script = output_path.read_text(encoding="utf-8-sig")
         self.assertIn("# Source scan last modified: Unknown", script)
+        self.assertIn(
+            f"# Source scan identity: {scan.scan_export_identity(source_scan)}",
+            script,
+        )
         self.assertNotIn("Write-Host 'not a timestamp'", script)
 
     def test_wiztree_export_with_generated_note_line_is_analyzed(self):
@@ -144,7 +1695,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             with mock.patch("analyze.os.path.exists", return_value=True):
                 with mock.patch("analyze.os.path.isdir", return_value=False), \
-                     mock.patch("analyze.os.path.isfile", return_value=True):
+                     mock.patch("analyze.os.path.isfile", return_value=True), \
+                     mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                     results = analyze.analyze_csv(str(export_path), min_size_mb=0)
         self.assertEqual(len(results["categories"]["high"]["items"]), 1)
         self.assertTrue(results["categories"]["high"]["items"][0]["path"].endswith("large.tmp"))
@@ -163,19 +1715,136 @@ class AnalyzeSafetyTests(unittest.TestCase):
             imported_results = {
                 "categories": {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
             }
-            imported_results["categories"]["high"]["items"] = [{
+            imported_results["categories"]["medium"]["items"] = [{
                 "path": str(cache) + "\\", "size": 100, "size_formatted": "100 B",
-                "name": "pip cache", "kind": "Directory",
+                "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+                "kind": "Directory",
             }]
             with self.assertRaisesRegex(ValueError, "project folder"):
-                analyze.generate_clean_script(imported_results, str(Path(temp_dir) / "project-cache.ps1"))
+                analyze.generate_clean_script(
+                    imported_results, str(Path(temp_dir) / "project-cache.ps1"), priority="medium"
+                )
         self.assertEqual(results["project_candidate_count"], 1)
+        self.assertEqual(results["project_roots"], [{"path": str(project), "marker": ".git"}])
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        report_output = io.StringIO()
+        with redirect_stdout(report_output):
+            analyze.print_report(results)
+        self.assertIn(str(project), report_output.getvalue())
+        self.assertIn("project marker: .git", report_output.getvalue())
+        with tempfile.TemporaryDirectory() as report_dir:
+            candidate_list = Path(report_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_list))
+            exported_report = candidate_list.read_text(encoding="utf-8")
+        self.assertIn(str(project), exported_report)
+        self.assertIn("project marker: .git", exported_report)
+
+    def test_folder_expansion_finds_exact_nested_items_without_changing_summary_totals(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        nested_file = folder + r"content-v2\entry.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": nested_file, "Size": "800000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False):
+            summary = self.analyze_rows(rows)
+            expanded = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+
+        self.assertEqual([item["path"] for item in summary["categories"]["high"]["items"]], [folder])
+        self.assertEqual(summary["categories"]["high"]["total_size"], 1000000)
+        self.assertEqual(
+            [(candidate["priority"], candidate["item"]["path"])
+             for candidate in expanded["expanded_candidates"]],
+            [("high", nested_file)],
+        )
+        self.assertEqual(expanded["categories"]["high"]["items"][0]["path"], nested_file)
+
+    def test_folder_expansion_keeps_protected_and_project_files_out_of_choices(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        allowed_file = folder + "content-v2\\allowed.bin"
+        protected_file = folder + "content-v2\\protected-token.bin"
+        project_file = folder + "content-v2\\project-cache\\build.bin"
+        linked_file = folder + "content-v2\\junction-cache\\linked.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": allowed_file, "Size": "800000"},
+            {"File Name": protected_file, "Size": "700000"},
+            {"File Name": project_file, "Size": "600000"},
+            {"File Name": linked_file, "Size": "500000"},
+        ]
+
+        def excluded(path, *_args, **_kwargs):
+            return "protected-token" in str(path).casefold()
+
+        def in_project(path, *_args, **_kwargs):
+            return "project-cache" in str(path).casefold()
+
+        with mock.patch.object(
+                scan, "_path_has_reparse_component",
+                side_effect=lambda path: "junction-cache" in str(path).casefold()), \
+             mock.patch.object(analyze, "_is_excluded_path", side_effect=excluded), \
+             mock.patch.object(analyze, "_inside_project_tree", side_effect=in_project):
+            expanded = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+
+        self.assertEqual(
+            [candidate["item"]["path"] for candidate in expanded["expanded_candidates"]],
+            [allowed_file],
+        )
+        self.assertEqual(expanded["project_candidate_count"], 1)
+        self.assertEqual(expanded["reparse_candidate_count"], 1)
+
+    def test_folder_expansion_omits_stale_file_rows_and_reports_them(self):
+        folder = r"C:\Users\A\AppData\Local\npm-cache" + "\\"
+        current_file = folder + r"content-v2\current.bin"
+        stale_file = folder + r"content-v2\stale.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": current_file, "Size": "800000"},
+            {"File Name": stale_file, "Size": "700000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False):
+            expanded = self.analyze_rows(
+                rows,
+                exists=lambda path: str(path).rstrip("\\/").casefold() != stale_file.rstrip("\\/").casefold(),
+                expand_under=folder,
+                expand_priority="high",
+            )
+
+        self.assertEqual(expanded["stale_candidate_count"], 1)
+        self.assertEqual(
+            [candidate["item"]["path"] for candidate in expanded["expanded_candidates"]],
+            [current_file],
+        )
+
+    def test_folder_expansion_does_not_relabel_more_cautious_entries_as_selected_tier(self):
+        folder = r"C:\Users\A\AppData\Local\Temp\cleanup-area" + "\\"
+        gradle_cache = folder + r".gradle\caches" + "\\"
+        cache_file = gradle_cache + r"modules-2\package.bin"
+        rows = [
+            {"File Name": folder, "Size": "1000000"},
+            {"File Name": gradle_cache, "Size": "800000"},
+            {"File Name": cache_file, "Size": "700000"},
+        ]
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.dict(os.environ, {"GRADLE_USER_HOME": folder.rstrip("\\") + r"\.gradle"}):
+            high_only = self.analyze_rows(rows, expand_under=folder, expand_priority="high")
+            all_levels = self.analyze_rows(rows, expand_under=folder)
+
+        self.assertEqual(high_only["expanded_candidates"], [])
+        self.assertEqual(
+            [(candidate["priority"], candidate["item"]["path"])
+             for candidate in all_levels["expanded_candidates"]],
+            [("low", gradle_cache), ("low", cache_file)],
+        )
 
     def test_solution_project_and_requirements_files_protect_project_caches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             rows = []
-            markers = ("DriveCleanr.sln", "Worker.csproj", "dev-requirements.txt")
+            markers = (
+                "DriveCleanr.sln", "Worker.csproj", "dev-requirements.txt",
+                "dev-requirements.in", "requirements-dev.txt", "requirements-test.in",
+                "requirements_prod.txt",
+            )
             for index, marker in enumerate(markers):
                 project = Path(temp_dir) / f"project-{index}"
                 cache = project / "pip" / "cache"
@@ -184,24 +1853,165 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
             results = self.analyze_rows(rows)
         self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
-    def test_git_and_ide_workspace_markers_protect_project_caches(self):
+    def test_npm_shrinkwrap_without_package_json_protects_nested_project_cache(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "node-project"
+            cache = project / "Cache"
+            cache.mkdir(parents=True)
+            (project / "npm-shrinkwrap.json").write_text("{}", encoding="utf-8")
+
+            results = self.analyze_rows([{
+                "File Name": str(cache) + "\\", "Size": "104857600",
+            }])
+
+        self.assertEqual(results["project_candidate_count"], 1)
+        self.assertEqual(results["project_roots"][0]["marker"], "npm-shrinkwrap.json")
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_windows_sandbox_configuration_protects_neighboring_temp_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "sandbox-run"
+            cache = project / "host-build" / "cache"
+            cache.mkdir(parents=True)
+            (project / "Acceptance.wsb").write_text(
+                "<Configuration></Configuration>", encoding="utf-8"
+            )
+            results = self.analyze_rows([{
+                "File Name": str(cache) + "\\", "Size": "104857600",
+            }])
+
+        self.assertEqual(results["project_candidate_count"], 1)
+        self.assertEqual(results["project_roots"][0]["marker"], "Acceptance.wsb")
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_xcode_bundle_directories_protect_project_caches(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             rows = []
-            markers = (".gitignore", ".gitattributes", ".editorconfig", ".idea", ".vs")
+            expected_markers = set()
+            for project_name, bundle_name in (
+                    ("xcode-project", "Example.xcodeproj"),
+                    ("xcode-workspace", "Example.xcworkspace")):
+                project = Path(temp_dir) / project_name
+                bundle = project / bundle_name
+                cache_inside_bundle = bundle / "Cache"
+                cache_alongside_bundle = project / "Cache"
+                cache_inside_bundle.mkdir(parents=True)
+                cache_alongside_bundle.mkdir(parents=True)
+                expected_markers.add(bundle_name.casefold())
+                rows.extend([
+                    {"File Name": str(cache_inside_bundle) + "\\", "Size": "104857600"},
+                    {"File Name": str(cache_alongside_bundle) + "\\", "Size": "104857600"},
+                ])
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(expected_markers) * 2)
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            expected_markers,
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_zig_haskell_and_ocaml_manifests_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                "build.zig", "build.zig.zon", "cabal.project", "stack.yaml",
+                "sample.cabal", "dune-project", "dune-workspace", "sample.opam",
+            )
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"project-{index}"
+                cache = project / "build-cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_dotnet_and_clojure_project_files_protect_build_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                "global.json", "Directory.Build.props", "Directory.Build.targets",
+                "Directory.Solution.props", "Directory.Solution.targets", "deps.edn",
+                "project.clj",
+            )
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"project-{index}"
+                cache = project / "build-cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_git_ide_and_agent_settings_markers_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                ".gitignore", ".gitattributes", ".editorconfig", ".idea", ".vscode", ".vs",
+                ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf",
+                "DriveCleanr.code-workspace",
+            )
             for index, marker in enumerate(markers):
                 project = Path(temp_dir) / f"project-{index}"
                 cache = project / "cache"
                 cache.mkdir(parents=True)
                 marker_path = project / marker
-                if marker in {".idea", ".vs"}:
+                if marker in {
+                        ".idea", ".vscode", ".vs", ".claude", ".cursor", ".gemini",
+                        ".github", ".opencode", ".windsurf"}:
                     marker_path.mkdir()
                 else:
                     marker_path.touch()
                 rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
             results = self.analyze_rows(rows)
         self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_ai_project_guidance_files_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                "AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "GEMINI.md",
+                "SKILL.md", ".cursorrules", "copilot-instructions.md",
+            )
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"project-{index}"
+                cache = project / "cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+            results = self.analyze_rows(rows)
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {Path(root["path"]).name for root in results["project_roots"]},
+            {f"project-{index}" for index in range(len(markers))},
+        )
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
     def test_unreal_godot_and_unity_project_markers_protect_cache_paths(self):
@@ -227,16 +2037,148 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["project_candidate_count"], len(marker_types))
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_helm_chart_metadata_protects_chart_cache_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "helm-chart"
+            cache = project / "cache"
+            cache.mkdir(parents=True)
+            (project / "Chart.yaml").write_text(
+                "apiVersion: v2\nname: sample\nversion: 1.0.0\n", encoding="utf-8",
+            )
+            rows = [{"File Name": str(cache) + "\\", "Size": "104857600"}]
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], 1)
+        self.assertEqual(Path(results["project_roots"][0]["path"]).name, "helm-chart")
+        self.assertEqual(results["project_roots"][0]["marker"], "Chart.yaml")
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_devcontainer_folder_and_root_file_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            marker_types = (
+                ("devcontainer-folder", ".devcontainer", "directory"),
+                ("devcontainer-root-file", ".devcontainer.json", "file"),
+            )
+            for project_name, marker, marker_type in marker_types:
+                project = Path(temp_dir) / project_name
+                cache = project / "cache"
+                cache.mkdir(parents=True)
+                marker_path = project / marker
+                if marker_type == "directory":
+                    marker_path.mkdir()
+                    (marker_path / "devcontainer.json").write_text(
+                        '{"image":"example"}\n', encoding="utf-8",
+                    )
+                else:
+                    marker_path.write_text('{"image":"example"}\n', encoding="utf-8")
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(marker_types))
+        self.assertEqual(
+            {Path(root["path"]).name for root in results["project_roots"]},
+            {project_name for project_name, _marker, _kind in marker_types},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_swift_bazel_nix_and_terraform_markers_protect_cache_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                "Package.swift", "Podfile", "Podfile.lock", "WORKSPACE",
+                "WORKSPACE.bazel", "MODULE.bazel", "BUILD.bazel", "flake.nix",
+                "flake.lock", "terragrunt.hcl", "main.tf", "main.tf.json",
+                "terraform.tfvars", "terraform.tfvars.json",
+            )
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"cross-platform-{index}"
+                cache = project / "Cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_r_and_julia_project_files_protect_environment_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            markers = (
+                "Sample.Rproj", "renv.lock", "DESCRIPTION", "Project.toml",
+                "JuliaProject.toml", "Manifest.toml", "JuliaManifest.toml",
+            )
+            for index, marker in enumerate(markers):
+                project = Path(temp_dir) / f"data-project-{index}"
+                cache = project / "Cache"
+                cache.mkdir(parents=True)
+                (project / marker).touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(markers))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for marker in markers},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_python_and_conda_environment_markers_protect_project_caches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            rows = []
+            marker_specs = (
+                ("python-venv-folder", ".venv", "directory"),
+                ("python-venv-folder-name", "venv", "directory"),
+                ("python-venv-config", "pyvenv.cfg", "file"),
+                ("conda-environment", "conda-meta", "directory"),
+            )
+            for project_name, marker, marker_type in marker_specs:
+                project = Path(temp_dir) / project_name
+                cache = project / "Cache"
+                cache.mkdir(parents=True)
+                marker_path = project / marker
+                if marker_type == "directory":
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
+                rows.append({"File Name": str(cache) + "\\", "Size": "104857600"})
+
+            results = self.analyze_rows(rows)
+
+        self.assertEqual(results["project_candidate_count"], len(marker_specs))
+        self.assertEqual(
+            {root["marker"].casefold() for root in results["project_roots"]},
+            {marker.casefold() for _, marker, _ in marker_specs},
+        )
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
     def test_project_marker_at_user_profile_root_is_checked_before_walking_stops(self):
-        profile = r"C:\Users\Jordan"
+        profile = r"C:\Users\ExampleUser"
         cache_path = profile + r"\AppData\Local\Temp\pip\cache"
         is_profile = lambda path: os.path.normcase(path) == os.path.normcase(profile)
         with mock.patch.object(analyze, "_directory_has_project_marker", side_effect=is_profile):
             self.assertTrue(analyze._inside_project_tree(cache_path, True, {}))
 
-    def test_node_tool_metadata_at_profile_root_does_not_hide_other_cleanup_locations(self):
+    def test_shared_tool_metadata_at_profile_root_does_not_hide_other_cleanup_locations(self):
         entries = []
-        for name in ("package.json", "package-lock.json", "bun.lock", ".editorconfig"):
+        for name in (
+                "package.json", "package-lock.json", "bun.lock", ".gitignore",
+                "requirements.txt", "requirements-dev.txt", "requirements-test.in",
+                "dev-requirements.txt", "dev-requirements.in",
+                ".editorconfig", ".vscode",
+                "global.json", "Directory.Build.props", "Directory.Build.targets",
+                "Directory.Solution.props", "Directory.Solution.targets",
+                "Work.code-workspace", "AGENTS.md", "AGENTS.override.md", "CLAUDE.md",
+                "GEMINI.md", "SKILL.md", ".cursorrules", "copilot-instructions.md",
+                "WindowsSandbox.wsb", ".venv", "venv",
+                ".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf"):
             entry = mock.Mock()
             entry.name = name
             entry.is_file.return_value = True
@@ -244,7 +2186,110 @@ class AnalyzeSafetyTests(unittest.TestCase):
         scan_context = mock.MagicMock()
         scan_context.__enter__.return_value = entries
         with mock.patch.object(analyze.os, "scandir", return_value=scan_context):
-            self.assertFalse(analyze._directory_has_project_marker(r"C:\Users\Jordan"))
+            self.assertFalse(analyze._directory_has_project_marker(r"C:\Users\ExampleUser"))
+        self.assertTrue(analyze._is_excluded_path(
+            r"C:\Users\ExampleUser\.vscode\extensions\publisher.example\Cache"
+        ))
+        self.assertFalse(analyze._is_excluded_path(
+            r"C:\Users\ExampleUser\AppData\Local\npm-cache"
+        ))
+
+    def test_shared_metadata_at_relocated_userprofile_root_does_not_mark_profile_as_project(self):
+        with mock.patch.dict(os.environ, {"USERPROFILE": r"D:\Profiles\ExampleUser"}):
+            for shared_marker in (".gitignore", "npm-shrinkwrap.json"):
+                entry = mock.Mock()
+                entry.name = shared_marker
+                entry.is_file.return_value = True
+                scan_context = mock.MagicMock()
+                scan_context.__enter__.return_value = [entry]
+                with mock.patch.object(analyze.os, "scandir", return_value=scan_context):
+                    self.assertFalse(analyze._directory_has_project_marker(r"D:\Profiles\ExampleUser"))
+
+            git_entry = mock.Mock()
+            git_entry.name = ".git"
+            scan_context = mock.MagicMock()
+            scan_context.__enter__.return_value = [git_entry]
+            with mock.patch.object(analyze.os, "scandir", return_value=scan_context):
+                marker = []
+                self.assertTrue(analyze._directory_has_project_marker(
+                    r"D:\Profiles\ExampleUser", marker_out=marker
+                ))
+                self.assertEqual(marker, [".git"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_recognizes_relocated_userprofile_shared_metadata(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory(dir=Path.home()) as fixture_root:
+            fixture = Path(fixture_root)
+            # A project marker outside USERPROFILE must not make the relocated
+            # profile's temporary data look like part of that parent project.
+            (fixture / "Project.toml").touch()
+            profile_root = fixture / "relocated profile"
+            temp_root = profile_root / "Temp"
+            temp_root.mkdir(parents=True)
+            (profile_root / ".venv").mkdir()
+            (profile_root / "venv").mkdir()
+            (profile_root / ".gitignore").write_text("*.cache\n", encoding="utf-8")
+            (profile_root / "WindowsSandbox.wsb").write_text(
+                "<Configuration></Configuration>", encoding="utf-8"
+            )
+            for shared_dotnet_setting in (
+                    "global.json", "Directory.Build.props", "Directory.Build.targets",
+                    "Directory.Solution.props", "Directory.Solution.targets"):
+                (profile_root / shared_dotnet_setting).touch()
+            target = temp_root / "candidate.cache"
+            target.write_bytes(b"synthetic profile temp file")
+            script_path = fixture / "cleanup.ps1"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            child_environment = os.environ.copy()
+            child_environment.update({
+                "USERPROFILE": str(profile_root),
+                "TEMP": str(temp_root),
+                "TMP": str(temp_root),
+            })
+            previous_tempfile_tempdir = tempfile.tempdir
+            try:
+                with mock.patch.dict(os.environ, {
+                        "USERPROFILE": str(profile_root),
+                        "TEMP": str(temp_root),
+                        "TMP": str(temp_root)}):
+                    with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                        analyze.generate_clean_script(results, str(script_path))
+            finally:
+                # tempfile caches the first TEMP/TMP lookup. Restore its cache
+                # after this scoped environment change so the next test does
+                # not try to create fixtures beneath this deleted profile.
+                tempfile.tempdir = previous_tempfile_tempdir
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-PreviewOnly"],
+                capture_output=True, text=True, timeout=180, env=child_environment,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"Would remove | File | {target}", result.stdout)
+            self.assertTrue(target.is_file())
+
+            (profile_root / ".gitignore").unlink()
+            (profile_root / ".git").mkdir()
+            project_result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-PreviewOnly"],
+                capture_output=True, text=True, timeout=180, env=child_environment,
+            )
+            self.assertNotEqual(project_result.returncode, 0, project_result.stdout + project_result.stderr)
+            self.assertIn("inside a project", project_result.stdout + project_result.stderr)
+            self.assertTrue(target.is_file())
 
     def test_temp_named_paths_outside_known_temp_roots_are_caution_candidates(self):
         results = self.analyze_rows([{
@@ -322,14 +2367,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
         report_output = io.StringIO()
         with redirect_stdout(report_output):
             analyze.print_report(results)
-        self.assertIn("Skipped 1 known temporary folder roots", report_output.getvalue())
-        self.assertIn("qualifying items inside them are listed separately", report_output.getvalue())
+        self.assertIn("Known temporary folders skipped: 1", report_output.getvalue())
+        self.assertIn("files and folders inside are shown separately when they match the cleanup rules", report_output.getvalue())
 
         with tempfile.TemporaryDirectory() as temp_dir:
             candidate_report = Path(temp_dir) / "candidates.txt"
             analyze.write_item_list_report(results, str(candidate_report))
             report_text = candidate_report.read_text(encoding="utf-8")
-            self.assertIn("Skipped 1 known temporary folder roots", report_text)
+            self.assertIn("Known temporary folders skipped: 1", report_text)
             plan_path = Path(temp_dir) / "selected-child.ps1"
             analyze.generate_clean_script(results, str(plan_path))
             plan = plan_path.read_text(encoding="utf-8-sig")
@@ -348,7 +2393,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
 
     def test_configured_temp_root_remains_a_lower_risk_candidate(self):
-        with mock.patch.dict(os.environ, {"TEMP": r"D:\Scratch\Session"}):
+        with mock.patch.dict(os.environ, {"TEMP": r"D:\Scratch\Session"}), \
+             mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
             results = self.analyze_rows([{
                 "File Name": "D:\\Scratch\\Session\\build-output\\", "Size": "104857600",
             }])
@@ -358,6 +2405,22 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_project_marker_lookup_failure_is_conservative(self):
         with mock.patch.object(analyze.os, "scandir", side_effect=PermissionError):
             self.assertTrue(analyze._directory_has_project_marker(r"C:\Users\PrivateProject"))
+
+    def test_symlinked_project_manifest_suffix_still_protects_project(self):
+        marker = mock.Mock()
+        marker.name = "Workspace.rproj"
+        marker.is_file.return_value = False
+        marker.is_symlink.return_value = True
+        marker.is_dir.return_value = False
+        context = mock.MagicMock()
+        context.__enter__.return_value = [marker]
+
+        with tempfile.TemporaryDirectory() as project, \
+             mock.patch.object(analyze.os, "scandir", return_value=context):
+            marker_names = []
+            self.assertTrue(analyze._directory_has_project_marker(project, marker_names))
+
+        self.assertEqual(marker_names, ["Workspace.rproj"])
 
     def test_custom_project_protection_marker_hides_unrecognized_project_trees(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -375,6 +2438,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_candidate_list_deduplicates_overlapping_risk_tiers(self):
         results = {
+            "total_size": 0,
             "categories": {
                 "high": {"name": "High", "total_size_formatted": "100 B", "total_size": 100, "items": [
                     {"path": "C:\\Temp\\cache\\", "size": 100, "size_formatted": "100 B", "kind": "Directory", "name": "Temp", "safe": True},
@@ -382,7 +2446,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "medium": {"name": "Medium", "total_size_formatted": "50 B", "total_size": 50, "items": [
                     {"path": "C:\\Temp\\cache\\nested\\", "size": 50, "size_formatted": "50 B", "kind": "Directory", "name": "Cache", "safe": False},
                 ]},
-                "low": {"name": "Low", "total_size_formatted": "25 B", "total_size": 25, "items": [
+                "low": {"name": "Low", "total_size_formatted": "50 B", "total_size": 50, "items": [
+                    {"path": "C:\\Temp\\cache\\nested\\deep\\", "size": 25, "size_formatted": "25 B", "kind": "Directory", "name": "Cache", "safe": False},
                     {"path": "C:\\Temp\\other\\", "size": 25, "size_formatted": "25 B", "kind": "Directory", "name": "Temp", "safe": False},
                 ]},
             }
@@ -391,12 +2456,81 @@ class AnalyzeSafetyTests(unittest.TestCase):
             report_path = Path(temp_dir) / "candidates.txt"
             analyze.write_item_list_report(results, str(report_path))
             report = report_path.read_text(encoding="utf-8")
-        self.assertIn("Potential cleanable space (deduplicated across tiers): 125 B", report)
-        self.assertIn("Tier subtotals may overlap", report)
-        self.assertIn("Folder totals can include nested protected data", report)
+        self.assertIn("Estimated space in automatic cleanup suggestions (each file counted once): 125 B", report)
+        self.assertIn(
+            "A listed folder can contain another listed item. Each folder row shows its full scan size, "
+            "while review-group and overall estimates count each file once.",
+            report,
+        )
+        self.assertIn(
+            "50 B at C:\\Temp\\cache\\nested\\ is inside 100 B at C:\\Temp\\cache\\",
+            report,
+        )
+        self.assertIn(
+            "25 B at C:\\Temp\\cache\\nested\\deep\\ is inside "
+            "50 B at C:\\Temp\\cache\\nested\\",
+            report,
+        )
+        self.assertNotIn("The same space is counted once in the total, even when items appear in different review groups.", report)
+        self.assertIn("[High] - Estimated space: 50 B", report)
+        self.assertIn("[Medium] - Estimated space: 25 B", report)
+        self.assertIn("[Low] - Estimated space: 50 B", report)
+        self.assertIn("A folder may contain protected files that cleanup leaves in place.", report)
         self.assertIn("Risk level: lower risk; review first", report)
         self.assertIn("Risk level: caution; review carefully", report)
         self.assertNotIn("Safe: yes", report)
+
+        console = io.StringIO()
+        with redirect_stdout(console):
+            analyze.print_report(results)
+        console_report = console.getvalue()
+        self.assertIn(
+            "50 B at C:\\Temp\\cache\\nested\\ is inside "
+            "100 B at C:\\Temp\\cache\\",
+            console_report,
+        )
+        self.assertIn(
+            "25 B at C:\\Temp\\cache\\nested\\deep\\ is inside "
+            "50 B at C:\\Temp\\cache\\nested\\",
+            console_report,
+        )
+        self.assertIn(
+            "A listed folder can contain another listed item. Each folder row shows its full scan size, "
+            "while review-group and overall estimates count each file once.",
+            console_report,
+        )
+        self.assertIn("[High] - Estimated space: 50 B", console_report)
+        self.assertIn("[Medium] - Estimated space: 25 B", console_report)
+        self.assertIn("Estimated space in automatic cleanup suggestions (each file counted once): 125 B", console_report)
+
+    def test_nested_candidate_helpers_use_nearest_normalized_path_ancestors(self):
+        outer = {"path": "C:\\Temp\\cache\\\\", "size": 100}
+        nested = {"path": "c:/temp/cache/nested/", "size": 50}
+        deep = {"path": r"C:\Temp\cache\nested\deep.bin", "size": 25}
+        sibling = {"path": r"C:\Temp\cache-old\item.bin", "size": 80}
+        items = [outer, nested, deep, sibling]
+
+        pairs = analyze._nested_candidate_pairs(items)
+        self.assertEqual(pairs, [(outer, nested), (nested, deep)])
+        self.assertEqual(analyze._non_overlapping_items(items), [outer, sibling])
+
+    def test_tier_size_estimates_handle_deep_candidate_chains(self):
+        items = []
+        path = "C:\\"
+        for index in range(1100):
+            path = ntpath.join(path, f"folder-{index}")
+            items.append({"path": path, "size": 1100 - index})
+
+        pairs = analyze._nested_candidate_pairs(items)
+        categories = {
+            "high": {"items": items[0::3]},
+            "medium": {"items": items[1::3]},
+            "low": {"items": items[2::3]},
+        }
+        estimates = analyze._tier_size_estimates(categories, pairs)
+
+        self.assertEqual(len(pairs), len(items) - 1)
+        self.assertEqual(estimates, {"high": 367, "medium": 367, "low": 366})
 
     def test_standard_wiztree_report_discloses_possible_access_gaps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -409,6 +2543,19 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["scan_mode"], "wiztree_standard")
         self.assertIn("files inaccessible to this account may be missing", report_text)
 
+    def test_fast_wiztree_report_explains_ntfs_only_file_table_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan_wiztree_fast_mock.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            with mock.patch("builtins.print") as output:
+                analyze.print_report(results)
+        report_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+        self.assertEqual(results["scan_mode"], "wiztree_fast")
+        self.assertIn("NTFS is a common Windows file system", report_text)
+        self.assertIn("reads the file table directly", report_text)
+        self.assertIn("Other file systems use normal Windows scanning", report_text)
+
     def test_review_menu_returns_cleanly_after_an_invalid_export(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "bad.csv"
@@ -419,6 +2566,118 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 analyze.run_tui()
             self.assertEqual(picker.call_count, 2)
 
+    def test_review_menu_recovers_if_scan_becomes_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(analyze, "prompt_existing_csv", side_effect=[str(csv_path), None]) as picker, \
+                 mock.patch.object(analyze, "analyze_csv", side_effect=PermissionError(13, "denied")), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", return_value=""), \
+                 redirect_stdout(io.StringIO()) as output:
+                analyze.run_tui()
+
+        self.assertEqual(picker.call_count, 2)
+        self.assertIn("Could not review this scan", output.getvalue())
+        self.assertIn("Access was denied", output.getvalue())
+
+    def test_scan_picker_rejects_missing_paths_and_directories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for invalid_path in (str(Path(temp_dir) / "missing.csv"), temp_dir):
+                with self.subTest(path_kind="directory" if Path(invalid_path).is_dir() else "missing"):
+                    output = io.StringIO()
+                    with mock.patch.object(scan, "get_saved_scans", return_value=[]), \
+                         mock.patch.object(analyze, "clear_screen"), \
+                         mock.patch("builtins.input", side_effect=["M", invalid_path, "", "0"]), \
+                         redirect_stdout(output):
+                        selected = analyze.prompt_existing_csv()
+
+                    self.assertIsNone(selected)
+                    self.assertIn("not a CSV file", output.getvalue())
+
+    def test_saved_scan_history_includes_current_and_known_legacy_exports_newest_first(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            current_scan = data / "scan_wiztree_standard_20261001120000000000.csv"
+            legacy_root_scan = data / "scan_20260928120000000000.csv"
+            legacy_windirstat = data / "scan" / "_20260930120000000000.csv"
+            legacy_wiztree = data / "scan" / "_wiztree" / "_fast" / "_20260929120000000000.csv"
+            unrelated_csv = data / "scan" / "user-review.csv"
+            incomplete_scan = data / ".incomplete" / "scan_wiztree_fast_20261002120000000000.csv"
+            for path in (current_scan, legacy_root_scan, legacy_windirstat, legacy_wiztree, unrelated_csv, incomplete_scan):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(current_scan, (3, 3))
+            os.utime(legacy_windirstat, (2.5, 2.5))
+            os.utime(legacy_wiztree, (2, 2))
+            os.utime(legacy_root_scan, (1, 1))
+            with mock.patch.object(scan, "DATA_DIR", str(data)):
+                self.assertEqual(
+                    scan.get_saved_scans(),
+                    [str(current_scan), str(legacy_windirstat), str(legacy_wiztree), str(legacy_root_scan)],
+                )
+                self.assertEqual(scan.get_latest_scan(), str(current_scan))
+
+    def test_scan_picker_uses_zero_as_its_only_menu_return_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "get_saved_scans", return_value=[]), \
+             mock.patch.object(analyze, "clear_screen"), \
+             mock.patch("builtins.input", side_effect=["q", "", "0"]) as user_input, \
+             redirect_stdout(output):
+            selected = analyze.prompt_existing_csv()
+
+        self.assertIsNone(selected)
+        self.assertIn("Choose a displayed scan number", output.getvalue())
+        prompt = user_input.call_args_list[0].args[0]
+        self.assertIn("0 = return to the main menu", prompt)
+        self.assertNotIn("Q", prompt)
+
+    def test_scan_picker_pages_history_and_selects_an_older_saved_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            scans = []
+            for index in range(11):
+                scan_path = data / f"scan_wiztree_standard_202610{index + 1:02d}120000000000.csv"
+                scan_path.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(scan_path, (index + 1, index + 1))
+                scans.append(scan_path)
+
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data)), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=["N", "11"]) as user_input, \
+                 redirect_stdout(output):
+                selected = analyze.prompt_existing_csv()
+
+            self.assertEqual(selected, str(scans[0]))
+            self.assertIn("Saved scans (newest first)", output.getvalue())
+            self.assertIn("N) Show older scans", output.getvalue())
+            self.assertIn("N = show older scans", user_input.call_args_list[0].args[0])
+            self.assertIn("P = show newer scans (when listed)", user_input.call_args_list[0].args[0])
+
+    def test_scan_picker_still_accepts_a_manual_supported_csv_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scan_path = Path(temp_dir) / "outside-saved-scan.csv"
+            scan_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(scan, "get_saved_scans", return_value=[]), \
+                 mock.patch.object(analyze, "clear_screen"), \
+                 mock.patch("builtins.input", side_effect=["M", str(scan_path)]):
+                self.assertEqual(analyze.prompt_existing_csv(), str(scan_path))
+
+    def test_analyzer_cli_reports_unreadable_scan_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "scan.csv"
+            csv_path.write_text("File Name,Size\n", encoding="utf-8")
+            with mock.patch.object(analyze.sys, "argv", ["analyze.py", str(csv_path)]), \
+                 mock.patch.object(analyze, "analyze_csv", side_effect=PermissionError(13, "denied")), \
+                 redirect_stderr(io.StringIO()) as error_output:
+                with self.assertRaises(SystemExit) as exc:
+                    analyze.main()
+
+        self.assertEqual(exc.exception.code, 2)
+        self.assertIn("could not review scan file: Access was denied", error_output.getvalue())
+
     def test_analyzer_cli_handles_picker_interrupt_without_traceback(self):
         for interruption in (KeyboardInterrupt, EOFError):
             with self.subTest(interruption=interruption), \
@@ -427,6 +2686,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  mock.patch("builtins.input", side_effect=interruption), \
                  redirect_stdout(io.StringIO()) as output:
                 analyze.main()
+            self.assertIn("Review cancelled.", output.getvalue())
+
+    def test_guided_review_cancels_cleanly_on_keyboard_interrupt_or_eof(self):
+        for interruption in (KeyboardInterrupt, EOFError):
+            with self.subTest(interruption=interruption), \
+                 mock.patch.object(analyze, "prompt_existing_csv", side_effect=interruption), \
+                 redirect_stdout(io.StringIO()) as output:
+                analyze.run_tui()
             self.assertIn("Review cancelled.", output.getvalue())
 
     def test_only_absolute_local_non_root_paths_become_candidates(self):
@@ -465,6 +2732,46 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "C:\\Windows\\CrashDump.dmp",
         })
 
+    def test_indexed_cleanup_dispatch_includes_every_exhaustive_rule_match(self):
+        for rule_index, (_priority, pattern_info, pattern_components) in enumerate(
+                analyze._CLEANABLE_RULES):
+            if pattern_info.get("root"):
+                base = ntpath.join("C:\\", *analyze._path_components(pattern_info["root"]))
+            elif pattern_info.get("browser_profile"):
+                base = r"C:\Users\Test\AppData\Local\Google\Chrome\User Data\Default"
+            elif pattern_info.get("known_temp_location"):
+                base = r"C:\Users\Test\AppData\Local\Temp"
+            else:
+                base = r"C:\Synthetic"
+            components = analyze._path_components(base)
+            witness_components = list(pattern_components)
+            if pattern_info.get("component_prefix_requires_suffix"):
+                witness_components[-1] += "-review"
+            path = ntpath.join("C:\\", *(components + witness_components))
+            path_components = analyze._path_components(path)
+            component_set, sequences = analyze._path_match_index(path_components)
+            known_temp_location = analyze._is_known_temp_location(path, path_components)
+            indexed_rule_ids = {
+                id(rule) for rule in analyze._candidate_cleanup_rules(
+                    path, path_components, component_set, sequences, known_temp_location
+                )
+            }
+            indexed_indices = {
+                index for index, rule in enumerate(analyze._CLEANABLE_RULES)
+                if id(rule) in indexed_rule_ids
+            }
+            exhaustive_indices = {
+                index for index, (_candidate_priority, candidate_info, candidate_components)
+                in enumerate(analyze._CLEANABLE_RULES)
+                if analyze._cleanup_rule_matches(
+                    candidate_info, candidate_components, path_components,
+                    component_set, sequences, path=path,
+                    known_temp_location=known_temp_location,
+                )
+            }
+            self.assertIn(rule_index, indexed_indices, path)
+            self.assertLessEqual(exhaustive_indices, indexed_indices, path)
+
     def test_generic_cache_and_log_labels_explain_the_uncertainty(self):
         rows = [
             r"C:\Users\A\AppData\Local\App\Cache\settings.db",
@@ -492,6 +2799,86 @@ class AnalyzeSafetyTests(unittest.TestCase):
             ("medium",),
             "Application cache",
         ))
+
+    def test_package_cache_defaults_are_limited_to_standard_profile_locations(self):
+        default_paths = {
+            r"C:\Users\A\AppData\Local\npm-cache" + "\\",
+            r"C:\Users\A\AppData\Roaming\npm-cache" + "\\",
+            r"C:\Users\A\AppData\Local\pip\Cache" + "\\",
+            r"C:\Users\A\.cache\puppeteer" + "\\",
+            r"C:\Users\A\AppData\Local\electron\Cache" + "\\",
+            r"C:\Users\A\AppData\Local\Yarn\Cache" + "\\",
+        }
+        custom_paths = {
+            r"C:\Users\A\Archive\npm-cache" + "\\",
+            r"C:\Users\A\Projects\Unmarked\pip\cache" + "\\",
+            r"C:\Shared\electron\cache" + "\\",
+            r"C:\Users\A\Archive\yarn\cache" + "\\",
+            r"C:\Users\A\Archive\.cache\puppeteer" + "\\",
+        }
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+            results = self.analyze_rows([
+                {"File Name": path, "Size": "104857600"}
+                for path in default_paths | custom_paths
+            ])
+        expected_high_paths = {path.rstrip("\\") for path in default_paths}
+        expected_custom_paths = {path.rstrip("\\") for path in custom_paths}
+        high_by_path = {
+            item["path"].rstrip("\\") for item in results["categories"]["high"]["items"]
+        }
+        medium_by_path = {
+            item["path"].rstrip("\\"): item
+            for item in results["categories"]["medium"]["items"]
+        }
+        self.assertEqual(high_by_path, expected_high_paths)
+        self.assertTrue(expected_custom_paths.isdisjoint(high_by_path))
+        self.assertTrue(
+            expected_custom_paths.issubset(medium_by_path),
+            f"custom cache paths missing from the caution tier: {expected_custom_paths - medium_by_path.keys()}",
+        )
+        self.assertTrue(all(not medium_by_path[path]["safe"] for path in expected_custom_paths))
+        self.assertEqual(
+            medium_by_path[r"C:\Users\A\Archive\npm-cache"]["name"],
+            "Package cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+        )
+
+        imported_plan = {"categories": {
+            "high": {"name": "High", "items": [{
+                "path": r"C:\Users\A\Archive\npm-cache" + "\\",
+                "name": "npm cache", "size": 104857600,
+                "size_formatted": "100 MB", "kind": "Directory",
+            }]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch.object(analyze, "_is_local_drive_path", return_value=True), \
+             mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_inside_project_tree", return_value=False):
+            with self.assertRaisesRegex(ValueError, "does not match its priority and cleanup label"):
+                analyze.generate_clean_script(
+                    imported_plan, str(Path(temp_dir) / "unverified-cache.ps1"), priority="high"
+                )
+
+    def test_package_cache_defaults_follow_nonstandard_active_profile_roots(self):
+        configured_roots = {
+            "LOCALAPPDATA": r"D:\Profiles\A\AppData\Local",
+            "APPDATA": r"D:\Profiles\A\AppData\Roaming",
+            "USERPROFILE": r"D:\Profiles\A",
+        }
+        recognized_paths = (
+            (r"D:\Profiles\A\AppData\Local\npm-cache", "npm cache"),
+            (r"D:\Profiles\A\AppData\Roaming\npm-cache", "npm cache"),
+            (r"D:\Profiles\A\AppData\Local\pip\Cache", "pip cache"),
+            (r"D:\Profiles\A\.cache\puppeteer\chrome", "Puppeteer browser cache"),
+            (r"D:\Profiles\A\AppData\Local\electron\Cache", "Electron download cache"),
+            (r"D:\Profiles\A\AppData\Local\Yarn\Cache", "Yarn Classic cache"),
+        )
+        with mock.patch.dict(os.environ, configured_roots):
+            for path, label in recognized_paths:
+                with self.subTest(path=path):
+                    self.assertTrue(analyze._matches_cleanup_rule(path, ("high",), label))
 
     def test_cargo_install_build_outputs_inside_temp_are_caution_candidates(self):
         path = r"C:\Users\A\AppData\Local\Temp\cargo-installABC\debug\example.exe"
@@ -637,7 +3024,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
             analyze.generate_clean_script(results, str(Path(temp_dir) / "clean.ps1"), priority="low")
 
     def test_crash_dump_rules_are_limited_to_windows_locations(self):
-        with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+        with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+             mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False):
             results = self.analyze_rows([
                 {"File Name": r"C:\Windows\LiveKernelReports\WATCHDOG\WATCHDOG-2026.dmp", "Size": "104857600"},
                 {"File Name": r"C:\Windows\Minidump\memory.dmp", "Size": "104857600"},
@@ -688,7 +3076,10 @@ class AnalyzeSafetyTests(unittest.TestCase):
         results = self.analyze_rows([
             {"File Name": r"C:\Users\A\.gradle\caches" + "\\", "Size": "100000000"},
             {"File Name": r"C:\Users\A\.cargo\registry\cache\download\package.crate", "Size": "90000000"},
+            {"File Name": r"C:\Users\A\.nuget\packages\Microsoft.NETCore.App\8.0.0\package.nupkg", "Size": "88000000"},
+            {"File Name": r"C:\Users\A\go\pkg\mod\golang.org\x\@v\v1.0.0.zip", "Size": "87000000"},
             {"File Name": r"C:\Users\A\scoop\cache\temurin20-jdk.zip", "Size": "85000000"},
+            {"File Name": r"C:\Users\A\AppData\Local\ms-playwright\chromium-101\chrome.exe", "Size": "84000000"},
             {"File Name": r"C:\Users\A\AppData\Local\OtherApp\caches\state.bin", "Size": "80000000"},
         ])
         high = results["categories"]["high"]["items"]
@@ -701,11 +3092,16 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual({item["path"] for item in low}, {
             r"C:\Users\A\.gradle\caches" + "\\",
             r"C:\Users\A\.cargo\registry\cache\download\package.crate",
+            r"C:\Users\A\.nuget\packages\Microsoft.NETCore.App\8.0.0\package.nupkg",
+            r"C:\Users\A\go\pkg\mod\golang.org\x\@v\v1.0.0.zip",
             r"C:\Users\A\scoop\cache\temurin20-jdk.zip",
+            r"C:\Users\A\AppData\Local\ms-playwright\chromium-101\chrome.exe",
         })
         self.assertEqual({item["name"] for item in low}, {
             "Gradle cache", "Cargo cache",
+            "NuGet cache", "Go modules cache",
             "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)",
+            "Playwright test browsers (can be reinstalled with `npx playwright install`)",
         })
         self.assertTrue(analyze._matches_cleanup_rule(
             r"C:\Users\A\scoop\cache\temurin20-jdk.zip", ("low",),
@@ -716,6 +3112,114 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)",
         ))
 
+    def test_tool_cache_specific_labels_require_known_or_configured_roots(self):
+        tools = (
+            ("gradle", "Gradle cache", r".gradle\caches", "Gradle cache-named data (confirm it belongs to Gradle and no build is using it)"),
+            ("cargo", "Cargo cache", r".cargo\registry", "Cargo registry-named data (confirm the owner and inspect its contents)"),
+            ("nuget", "NuGet cache", r".nuget\packages", "NuGet package-folder data (confirm the owner and whether projects need it)"),
+            ("go_modules", "Go modules cache", r"go\pkg\mod", "Go module-folder data (confirm the owner and whether projects need it)"),
+            ("scoop", "Scoop downloaded installers (may be needed for offline reinstall; prefer Scoop cache management)", r"scoop\cache", "Scoop cache-named data (inspect its downloads; they may be useful offline)"),
+            ("playwright", "Playwright test browsers (can be reinstalled with `npx playwright install`)", r"ms-playwright", "Playwright browser-folder data (confirm it contains Playwright browsers before cleanup)"),
+        )
+        lookalike_paths = {
+            "gradle": r"C:\Games\Archive\.gradle\caches\modules-2",
+            "cargo": r"C:\Games\Archive\.cargo\registry\src",
+            "nuget": r"C:\Games\Archive\.nuget\packages\Library",
+            "go_modules": r"C:\Games\Archive\go\pkg\mod\example.org\module",
+            "scoop": r"C:\Games\Archive\scoop\cache\installer.zip",
+            "playwright": r"C:\Games\Archive\ms-playwright\chromium\chrome.exe",
+        }
+        overrides = (
+            "GRADLE_USER_HOME", "CARGO_HOME", "NUGET_PACKAGES", "GOMODCACHE",
+            "GOPATH", "SCOOP", "SCOOP_CACHE", "PLAYWRIGHT_BROWSERS_PATH",
+        )
+        with mock.patch.dict(
+                os.environ,
+                {name: "" for name in overrides} | {"USERPROFILE": r"X:\CurrentProfile"},
+        ):
+            for cache_name, label, _suffix, caution_label in tools:
+                path = lookalike_paths[cache_name]
+                with self.subTest(cache=cache_name):
+                    self.assertFalse(analyze._matches_cleanup_rule(path, ("low",), label))
+                    self.assertTrue(analyze._matches_cleanup_rule(path, ("medium",), caution_label))
+
+            imported_plan = {"categories": {
+                "high": {"name": "High", "items": []},
+                "medium": {"name": "Medium", "items": []},
+                "low": {"name": "Low", "items": [{
+                    "path": lookalike_paths["cargo"], "name": "Cargo cache",
+                    "size": 100, "size_formatted": "100 B", "kind": "Directory",
+                }]},
+            }}
+            with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                    ValueError, "does not match its priority and cleanup label"):
+                analyze.generate_clean_script(
+                    imported_plan, str(Path(temp_dir) / "unverified-cargo-cache.ps1"),
+                    priority="low",
+                )
+
+        configured_roots = {
+            "GRADLE_USER_HOME": r"D:\Tool Homes\Gradle",
+            "CARGO_HOME": r"D:\Tool Homes\Rust",
+            "NUGET_PACKAGES": r"D:\Package Stores\NuGet",
+            "GOMODCACHE": r"D:\Go Modules",
+            "GOPATH": r"E:\Go First;F:\Go Second",
+            "SCOOP": r"D:\Apps\ScoopRoot",
+            "SCOOP_CACHE": r"D:\Shared Downloads\Scoop",
+            "PLAYWRIGHT_BROWSERS_PATH": r"D:\Browser Stores\Playwright",
+            "USERPROFILE": r"X:\CurrentProfile",
+            "LOCALAPPDATA": r"X:\CurrentProfile\AppData\Local",
+            "APPDATA": r"X:\CurrentProfile\AppData\Roaming",
+        }
+        configured_paths = {
+            "gradle": r"D:\Tool Homes\Gradle\caches\modules-2",
+            "cargo": r"D:\Tool Homes\Rust\registry\src\index",
+            "nuget": r"D:\Package Stores\NuGet\Microsoft.NETCore.App",
+            "go_modules": r"D:\Go Modules\example.org\module",
+            "scoop": r"D:\Apps\ScoopRoot\cache\installer.zip",
+            "playwright": r"D:\Browser Stores\Playwright\chromium\chrome.exe",
+        }
+        labels = {cache_name: label for cache_name, label, _suffix, _ in tools}
+        with mock.patch.dict(os.environ, configured_roots):
+            for cache_name, path in configured_paths.items():
+                with self.subTest(configured_cache=cache_name):
+                    self.assertTrue(analyze._matches_cleanup_rule(path, ("low",), labels[cache_name]))
+            self.assertTrue(analyze._matches_cleanup_rule(
+                r"D:\Shared Downloads\Scoop\downloaded-installer.zip",
+                ("low",), labels["scoop"],
+            ))
+            self.assertTrue(analyze._matches_cleanup_rule(
+                r"E:\Go First\pkg\mod\example.org\module",
+                ("low",), labels["go_modules"],
+            ))
+            self.assertFalse(analyze._matches_cleanup_rule(
+                r"F:\Go Second\pkg\mod\example.org\module",
+                ("low",), labels["go_modules"],
+            ))
+
+    def test_analysis_snapshots_configured_cache_roots_once_per_csv(self):
+        rows = [
+            {
+                "File Name": r"D:\Tool Homes\Gradle\caches\modules-2\artifact.bin",
+                "Size": "104857600",
+            },
+            {"File Name": r"D:\Data\ordinary.bin", "Size": "104857600"},
+        ]
+        with mock.patch.dict(os.environ, {"GRADLE_USER_HOME": r"D:\Tool Homes\Gradle"}), \
+             mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+             mock.patch.object(
+                 analyze, "_configured_cleanup_root_rule_index",
+                 wraps=analyze._configured_cleanup_root_rule_index,
+             ) as snapshot_roots:
+            results = self.analyze_rows(rows)
+
+        snapshot_roots.assert_called_once_with()
+        self.assertEqual(
+            [item["path"] for item in results["categories"]["low"]["items"]],
+            [r"D:\Tool Homes\Gradle\caches\modules-2\artifact.bin"],
+        )
+
     def test_exclusions_match_complete_path_components(self):
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive\\Documents\\file.dat"))
         self.assertTrue(analyze._is_excluded_path("C:\\Users\\A\\OneDrive - Contoso\\AppData\\Local\\Temp\\file.dat"))
@@ -723,11 +3227,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_codex_store_package_and_roaming_state_are_protected(self):
         report_paths = [
-            "C:\\Users\\Jordan\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\npm-cache",
-            "C:\\Users\\Jordan\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
-            "C:\\Users\\Jordan\\AppData\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
-            "C:\\Users\\Jordan\\.codex\\plugins\\cache\\openai-curated-remote",
-            "C:\\Users\\Jordan\\.codex-old\\plugins\\cache\\openai-curated-remote",
+            "C:\\Users\\TestUser\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Local\\npm-cache",
+            "C:\\Users\\TestUser\\AppData\\Local\\Packages\\OpenAI.Codex_2p2nqsd0c76g0\\LocalCache\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
+            "C:\\Users\\TestUser\\AppData\\Roaming\\Codex\\web\\Codex\\Default\\Partitions\\codex-browser-app\\Cache\\Cache_Data",
+            "C:\\Users\\TestUser\\.codex\\plugins\\cache\\openai-curated-remote",
+            "C:\\Users\\TestUser\\.codex-old\\plugins\\cache\\openai-curated-remote",
         ]
         for path in report_paths:
             with self.subTest(path=path):
@@ -737,7 +3241,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         ])
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
         self.assertFalse(analyze._is_excluded_path(
-            "C:\\Users\\Jordan\\AppData\\Local\\Temp\\OpenAI.CodexBackup\\build.tmp"
+            "C:\\Users\\TestUser\\AppData\\Local\\Temp\\OpenAI.CodexBackup\\build.tmp"
         ))
 
     def test_scan_paths_reject_windows_devices_streams_and_invalid_names(self):
@@ -745,10 +3249,40 @@ class AnalyzeSafetyTests(unittest.TestCase):
             r"C:\Temp\cache:alternate-stream", r"C:\Temp\CON.txt",
             "C:\\Temp\\COM¹.txt", "C:\\Temp\\LPT³.log",
             r"C:\Temp\bad*name", r"C:\Temp\trailing.\cache",
-            "C:\\Temp\\bad\x00name",
+            "C:\\Temp\\bad\x00name", "C:\\Temp\\hidden\u202e.txt",
+            "C:\\Temp\\control\x1b.txt",
         ):
             with self.subTest(path=path):
                 self.assertFalse(analyze._is_local_drive_path(path))
+
+    def test_scan_paths_with_hidden_or_terminal_controls_are_skipped_and_reported(self):
+        hidden_path = "C:\\Users\\A\\AppData\\Local\\Temp\\name\u202e.txt"
+        control_path = "C:\\Users\\A\\AppData\\Local\\Temp\\name\x1b.txt"
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "104857600"}
+            for path in (hidden_path, control_path)
+        ])
+
+        self.assertEqual(results["unsafe_display_path_count"], 2)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        with io.StringIO() as report_output:
+            with redirect_stdout(report_output):
+                analyze.print_report(results)
+            console_report = report_output.getvalue()
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", console_report)
+        self.assertNotIn("\u202e", console_report)
+        self.assertNotIn("\x1b", console_report)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate_report = Path(temp_dir) / "candidates.txt"
+            analyze.write_item_list_report(results, str(candidate_report))
+            exported_report = candidate_report.read_text(encoding="utf-8")
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", exported_report)
+        self.assertNotIn("\u202e", exported_report)
+        self.assertNotIn("\x1b", exported_report)
+        self.assertIn("Skipped 2 scan entries with hidden or control characters", "\n".join(
+            analyze._folder_browse_skip_lines(results)
+        ))
 
     def test_recovery_data_update_staging_logs_and_service_workers_are_protected(self):
         rows = [
@@ -760,7 +3294,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             {"File Name": r"C:\Users\A\.codex\plugins\cache\extension", "Size": "5000000"},
             {"File Name": r"C:\Users\A\.agents\cache\skills", "Size": "5000000"},
             {"File Name": r"C:\Users\A\.local\share\containers\podman\cache\machine.tar", "Size": "5000000"},
-            {"File Name": r"C:\Users\A\Downloads\PhoenixPE\Workbench\PhoenixPE\Temp\dotnet", "Size": "5000000"},
+            {"File Name": r"C:\Users\A\Downloads\ExampleProject\Workbench\ExampleProject\Temp\dotnet", "Size": "5000000"},
         ]
         # These were false positives in an earlier real report. Stub all
         # filesystem metadata so the regression test never inspects local data.
@@ -769,6 +3303,56 @@ class AnalyzeSafetyTests(unittest.TestCase):
              mock.patch.object(analyze.shutil, "disk_usage", side_effect=OSError):
             results = self.analyze_rows(rows)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_manual_only_knowledge_base_paths_are_not_cleanup_suggestions(self):
+        manual_only_paths = (
+            r"C:\$Recycle.Bin\S-1-5-21\deleted-file.bin",
+            r"C:\Windows\WinSxS\Temp\pending-maintenance.dat",
+            r"C:\MyDrivers\update\download.td",
+            r"C:\Users\ExampleUser\.m2\repository\artifact.jar",
+            r"C:\Program Files\Google\GoogleUpdater\crx_cache\package.crx",
+            r"C:\ProgramData\Microsoft\Windows\WER\ReportQueue\app.dmp",
+            r"C:\Windows\SoftwareDistribution\Download\update.cab",
+        )
+        rows = [
+            {"File Name": path, "Size": "5000000"}
+            for path in manual_only_paths
+        ]
+        # These Windows paths are synthetic. Keep analysis from inspecting any
+        # local files or directories while testing the actual suggestion pass.
+        with mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False), \
+             mock.patch.object(analyze, "_directory_has_project_marker", return_value=False), \
+             mock.patch.object(analyze.shutil, "disk_usage", side_effect=OSError):
+            results = self.analyze_rows(rows)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_generated_plans_reject_manual_only_knowledge_base_paths(self):
+        manual_only_paths = (
+            r"C:\$Recycle.Bin\S-1-5-21\deleted-file.bin",
+            r"C:\Windows\WinSxS\Temp\pending-maintenance.dat",
+            r"C:\MyDrivers\update\download.td",
+            r"C:\Users\ExampleUser\.m2\repository\artifact.jar",
+            r"C:\Program Files\Google\GoogleUpdater\crx_cache\package.crx",
+            r"C:\ProgramData\Microsoft\Windows\WER\ReportQueue\app.dmp",
+            r"C:\Windows\SoftwareDistribution\Download\update.cab",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch.object(analyze.scan, "_path_has_reparse_component", return_value=False):
+            for index, path in enumerate(manual_only_paths):
+                item = {
+                    "path": path,
+                    "name": "Temporary files (check for installers or builds in progress)",
+                    "size": 5_000_000,
+                    "scan_logical_size": 5_000_000,
+                    "size_formatted": "4.77 MB",
+                    "kind": "File",
+                }
+                results = {"categories": {"high": {"name": "High", "items": [item]}}}
+                with self.subTest(path=path), self.assertRaisesRegex(
+                        ValueError, "protected path|does not match its priority and cleanup label"):
+                    analyze.generate_clean_script(
+                        results, str(Path(temp_dir) / f"manual-only-{index}.ps1")
+                    )
 
     def test_virtual_memory_and_hibernation_files_are_protected_from_candidates_and_plans(self):
         paths = (
@@ -819,15 +3403,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_windows_personal_folders_are_excluded_from_candidates_and_imported_plans(self):
         paths = (
-            r"C:\Users\Jordan\Music\Temp\unfinished-recording.wav",
-            r"C:\Users\Jordan\Saved Games\Logs\game-session.log",
-            r"C:\Users\Jordan\Contacts\Cache\contacts.db",
-            r"C:\Users\Jordan\Camera Roll\Cache\photo-index.db",
-            r"C:\Users\Jordan\Saved Pictures\Temp\edited-photo.tmp",
-            r"C:\Users\Jordan\Favorites\Cache\links.dat",
-            r"C:\Users\Jordan\Links\Temp\project-link.lnk",
-            r"C:\Users\Jordan\Searches\Logs\search-history.log",
-            r"C:\Users\Jordan\3D Objects\Cache\model-index.db",
+            r"C:\Users\ExampleUser\Music\Temp\unfinished-recording.wav",
+            r"C:\Users\ExampleUser\Saved Games\Logs\game-session.log",
+            r"C:\Users\ExampleUser\Contacts\Cache\contacts.db",
+            r"C:\Users\ExampleUser\Camera Roll\Cache\photo-index.db",
+            r"C:\Users\ExampleUser\Saved Pictures\Temp\edited-photo.tmp",
+            r"C:\Users\ExampleUser\Favorites\Cache\links.dat",
+            r"C:\Users\ExampleUser\Links\Temp\project-link.lnk",
+            r"C:\Users\ExampleUser\Searches\Logs\search-history.log",
+            r"C:\Users\ExampleUser\3D Objects\Cache\model-index.db",
         )
         results = self.analyze_rows([
             {"File Name": path, "Size": "100000000"} for path in paths
@@ -877,16 +3461,45 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 priority="medium",
             )
 
+    def test_agent_and_editor_settings_data_is_protected_but_lookalikes_are_not(self):
+        settings_paths = tuple(
+            f"C:\\Users\\TestUser\\{folder}\\Cache\\"
+            for folder in (".claude", ".cursor", ".gemini", ".github", ".opencode", ".windsurf")
+        )
+        results = self.analyze_rows([
+            {"File Name": path, "Size": "100000000"} for path in settings_paths
+        ])
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+        self.assertTrue(all(analyze._is_excluded_path(path) for path in settings_paths))
+        self.assertFalse(analyze._is_excluded_path(
+            "C:\\Users\\TestUser\\AppData\\Local\\Temp\\.cursorBackup\\Cache\\"
+        ))
+
+        item = {
+            "path": settings_paths[0],
+            "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+            "size": 100_000_000, "size_formatted": "95.37 MB", "kind": "Directory",
+        }
+        categories = {key: {"name": key, "items": []} for key in ("high", "medium", "low")}
+        categories["medium"]["items"] = [item]
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "protected path"):
+            analyze.generate_clean_script(
+                {"categories": categories},
+                str(Path(temp_dir) / "agent-settings-cleanup.ps1"),
+                priority="medium",
+            )
+
     def test_windows_case_and_separator_aware_parent_deduplication(self):
         self.assertTrue(analyze._is_under(r"C:\Temp\nested", r"c:/temp/"))
         self.assertFalse(analyze._is_under(r"C:\Temp-old\item", r"C:\Temp"))
 
     def test_downloaded_projects_and_installers_are_not_cleanup_candidates(self):
         results = self.analyze_rows([
-            {"File Name": r"C:\Users\Jordan\Downloads\PhoenixPE\Workbench\PhoenixPE\Temp\dotnet", "Size": "700000000"},
-            {"File Name": r"C:\Users\Jordan\Downloads\PhoenixPE\Workbench\PhoenixPE\Cache\Hives", "Size": "200000000"},
-            {"File Name": "C:\\Users\\Jordan\\Downloads\\", "Size": "100000000"},
-            {"File Name": r"C:\Users\Jordan\Downloads\installer.exe", "Size": "100000000"},
+            {"File Name": r"C:\Users\ExampleUser\Downloads\ExampleProject\Workbench\ExampleProject\Temp\dotnet", "Size": "700000000"},
+            {"File Name": r"C:\Users\ExampleUser\Downloads\ExampleProject\Workbench\ExampleProject\Cache\Hives", "Size": "200000000"},
+            {"File Name": "C:\\Users\\ExampleUser\\Downloads\\", "Size": "100000000"},
+            {"File Name": r"C:\Users\ExampleUser\Downloads\installer.exe", "Size": "100000000"},
         ])
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
@@ -932,6 +3545,52 @@ class AnalyzeSafetyTests(unittest.TestCase):
             analyze.generate_clean_script(results, str(script_path))
             self.assertIn("IsDirectory = $true", script_path.read_text(encoding="utf-8-sig"))
 
+    def test_localized_windirstat_headers_are_parsed_from_verified_export_layout(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "imported-scan.csv"
+            headers = [
+                "\u540d\u79f0", "\u6587\u4ef6\u6570", "\u6587\u4ef6\u5939\u6570",
+                "\u903b\u8f91\u5927\u5c0f", "\u7269\u7406\u5927\u5c0f", "\u5c5e\u6027",
+                "\u6700\u540e\u4fee\u6539", "\u5185\u90e8\u5c5e\u6027", "\u7d22\u5f15",
+            ]
+            folder_path = "C:\\Users\\A\\AppData\\Local\\Temp\\Candidate\\"
+            file_path = folder_path + "cache.bin"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(headers)
+                writer.writerow([folder_path, "1", "0", "125000000", "120000000", "", "", "0x20000004", "00000001"])
+                writer.writerow([file_path, "0", "0", "125000000", "120000000", "Archive", "", "0x20000008", "00000002"])
+
+            with mock.patch("analyze.os.path.exists", return_value=True), \
+                 mock.patch("analyze.os.path.isdir", side_effect=lambda path: path.endswith("Candidate")), \
+                 mock.patch("analyze.os.path.isfile", side_effect=lambda path: path.endswith("cache.bin")):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+        candidates = results["categories"]["high"]["items"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["path"], folder_path)
+        self.assertEqual(candidates[0]["size"], 120_000_000)
+        self.assertEqual(candidates[0]["kind"], "Directory")
+        report = io.StringIO()
+        with redirect_stdout(report):
+            analyze.print_report(results)
+        self.assertIn("High priority", report.getvalue())
+        for localized_header in headers:
+            self.assertNotIn(localized_header, report.getvalue())
+
+    def test_unrecognized_nine_column_csv_is_not_guessed_as_windirstat(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "unrecognized.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow([f"Column {index}" for index in range(9)])
+                writer.writerow([
+                    r"C:\Users\A\AppData\Local\Temp\cache.bin", "0", "0", "125000000", "120000000",
+                    "Archive", "", "0x20000001", "not-an-index",
+                ])
+            with self.assertRaisesRegex(ValueError, "missing required columns"):
+                analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
     def test_windirstat_rows_without_type_metadata_are_not_mislabeled_as_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "windirstat-ambiguous.csv"
@@ -959,7 +3618,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with mock.patch("builtins.print") as output:
             analyze.print_report(results)
         report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
-        self.assertIn("no reliable file or folder type", report)
+        self.assertIn("file or folder type could not be confirmed", report)
+
+    def test_display_item_type_keeps_localized_folder_metadata_in_english(self):
+        localized_folder_label = "\u76ee\u5f55"
+        self.assertEqual(analyze.display_item_type({"kind": localized_folder_label}), "Folder")
+        self.assertEqual(analyze.display_item_type({"kind": "directory"}), "Folder")
 
     def test_windirstat_type_metadata_is_checked_against_current_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -978,7 +3642,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 })
             with mock.patch("analyze.os.path.exists", return_value=True), \
                  mock.patch("analyze.os.path.isdir", return_value=False), \
-                 mock.patch("analyze.os.path.isfile", return_value=True):
+                 mock.patch("analyze.os.path.isfile", return_value=True), \
+                 mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                 results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         candidates = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in candidates], [r"C:\Users\A\AppData\Local\Temp\current-file"])
@@ -1001,12 +3666,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with mock.patch("builtins.print") as output:
             analyze.print_report(results)
         report = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
-        self.assertIn("cross a junction, symbolic link", report)
+        self.assertIn("pass through a link or could not be checked", report)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             candidate_file = Path(temp_dir) / "candidates.txt"
             analyze.write_item_list_report(results, str(candidate_file))
-            self.assertIn("cross a junction, symbolic link", candidate_file.read_text(encoding="utf-8"))
+            self.assertIn("pass through a link or could not be checked", candidate_file.read_text(encoding="utf-8"))
 
     def test_windirstat_without_volume_metadata_uses_labeled_current_space(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1048,7 +3713,8 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 })
             with mock.patch("analyze.os.path.exists", return_value=True):
                 with mock.patch("analyze.os.path.isdir", return_value=False), \
-                     mock.patch("analyze.os.path.isfile", return_value=True):
+                     mock.patch("analyze.os.path.isfile", return_value=True), \
+                     mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
                     results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
         items = results["categories"]["high"]["items"]
         self.assertEqual([item["path"] for item in items], [r"C:\Users\A\AppData\Local\Temp\cache.bin"])
@@ -1084,14 +3750,138 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("::DeleteEmptyDirectoryIfUnchanged(", script)
         self.assertNotIn("Remove-Item -LiteralPath $target.Path", script)
         self.assertIn("$target.IsDirectory", script)
+        self.assertIn(
+            'if (-not $PreviewOnly -and -not $SkipBackup -and (-not $Force -or $CreateBackup)) {',
+            script,
+        )
+        self.assertIn(
+            "A verified backup gives you a way to restore selected data if cleanup affects something an app or Windows needs.",
+            script,
+        )
+        self.assertIn("if ($directoryTargets.Count -gt 0) {", script)
+        self.assertIn(
+            "A folder backup copies its accessible contents, including items this cleanup plan will preserve. It may require more space than the cleanup removes.",
+            script,
+        )
         self.assertIn("Preserve excluded paths and nested projects", script)
+        self.assertIn("function Get-CleanupDriveType([string]$DriveRoot)", script)
+        self.assertIn("function Assert-LocalDriveTarget([string]$Path)", script)
+        self.assertIn("[System.IO.DriveType]::Fixed", script)
+        self.assertIn("[System.IO.DriveType]::Removable", script)
+        self.assertIn("[System.IO.DriveType]::Ram", script)
+        self.assertIn("Assert-LocalDriveTarget $Target.Path", script)
         self.assertIn("$protectedPathPattern", script)
         self.assertIn("HashSet[string]", script)
         self.assertIn("$projectMarkers", script)
+        self.assertIn("$projectMarkerDirectorySuffixPattern", script)
+        self.assertIn(r"\.xcodeproj", script)
+        self.assertIn(r"\.xcworkspace", script)
+        self.assertIn(".vscode", script)
+        for marker in (
+                "agents.md", "agents.override.md", "claude.md", "gemini.md", "skill.md",
+                ".cursorrules", ".claude", ".cursor", ".gemini", ".github", ".opencode",
+                ".windsurf", "copilot-instructions.md", "package.swift", "podfile",
+                "podfile.lock", "workspace", "workspace.bazel", "module.bazel", "build.bazel",
+                "flake.nix", "flake.lock", "terragrunt.hcl", "build.zig", "build.zig.zon",
+                "cabal.project", "stack.yaml", "dune-project", "dune-workspace", "global.json",
+                "directory.build.props", "directory.build.targets", "directory.solution.props",
+                "directory.solution.targets", "deps.edn", "project.clj"):
+            self.assertIn(f"'{marker}'", script)
+        self.assertIn(r"\.tf", script)
+        self.assertIn(r"\.tfvars", script)
+        self.assertIn(r"\.wsb", script)
+        self.assertIn(r"\.cabal", script)
+        self.assertIn(r"\.opam", script)
+        self.assertIn(r"\.code\-workspace", script)
+        expected_profile_markers = ", ".join(
+            analyze._ps_literal(marker)
+            for marker in analyze._PROFILE_ROOT_IGNORED_MARKER_LIST
+        )
+        self.assertIn(
+            f"$profileRootIgnoredMarkers = @({expected_profile_markers})",
+            script,
+        )
+        self.assertIn("$profileRootIgnoredMarkers = @('.gitignore', '.editorconfig', '.vscode'", script)
+        self.assertIn("'global.json', 'directory.build.props', 'directory.build.targets'", script)
+        self.assertIn("'.gitignore'", script[script.index("$profileRootIgnoredMarkers"):])
+        self.assertIn("'agents.md'", script[script.index("$profileRootIgnoredMarkers"):])
+        self.assertIn("$pythonRequirementsMarkerPattern = [regex]::new", script)
+        self.assertIn("$pythonRequirementsMarkerPattern.IsMatch($entryName)", script)
+        self.assertIn("$entryName -like '*.code-workspace'", script)
         self.assertIn("$backupScript verify --id $backup.id --paths $target.Path", script)
+        self.assertIn("$backupScript = Join-Path $PSScriptRoot 'backup.py'", script)
+        expected_backup_tool = str(Path(analyze.__file__).resolve().with_name("backup.py"))
+        self.assertIn("$backupScript = " + analyze._ps_literal(expected_backup_tool), script)
         self.assertIn("$backupLocation = Join-Path $backup.backup_root $backup.id", script)
         self.assertIn('Write-Host "Backup saved to: $backupLocation"', script)
+        self.assertIn('[Alias("Backup")][switch]$CreateBackup', script)
+        self.assertIn('[Alias("NoBackup")][switch]$SkipBackup', script)
+        self.assertIn("Choose either -Backup or -NoBackup, not both.", script)
+        self.assertIn(
+            "Choose listed files or folders by number (comma-separated), "
+            "A = select all listed items, or press Enter to cancel",
+            script,
+        )
+        self.assertIn("elseif (-not $PreviewOnly -and $CreateBackup) {", script)
+        self.assertIn("if (-not $PreviewOnly -and -not $Force) {", script)
+        self.assertIn(
+            "Create a verified backup of these selected items first? [y/N] "
+            "(Y = create and verify a backup; Enter or N = continue without a backup)",
+            script,
+        )
+        self.assertIn("A verified recovery backup will be created before cleanup.", script)
+        self.assertIn("Type CLEAN to back up and remove", script)
+        self.assertIn("Type DELETE WITHOUT BACKUP", script)
+        self.assertIn("No backup will be created", script)
         self.assertIn("only the permissions needed for the selected paths", script)
+        self.assertIn("$cleanupItemIndex = 0", script)
+        self.assertIn("function Get-CleanupProgressPath", script)
+        self.assertIn("function Get-CleanupEntryProgressPath", script)
+        self.assertIn("$pathRoot = [System.IO.Path]::GetPathRoot($fullPath).TrimEnd", script)
+        self.assertIn("[string]::Equals($parentPath, $current, [System.StringComparison]::OrdinalIgnoreCase)", script)
+        self.assertIn('[string]$PhaseLabel = "Checking"', script)
+        self.assertIn('Write-Progress -Activity "$PhaseLabel selected $ItemLabel contents"', script)
+        self.assertIn('Write-Progress -Activity "Rechecking selected file contents" -Status "Comparing file contents"', script)
+        self.assertIn("$hiddenFormattingPattern = [regex]::new('[\\p{Cc}\\p{Cf}]'", script)
+        self.assertIn("$safePath = $hiddenFormattingPattern.Replace($Path, '?')", script)
+        self.assertIn("$hiddenFormattingPattern.IsMatch($pathPart)", script)
+        self.assertIn("Skipped one item with hidden formatting in its path", script)
+        self.assertIn("Current item: $progressPath", script)
+        self.assertIn('Write-Host "`nChecking selected item $cleanupItemIndex of $($cleanTargets.Count): $($target.ItemType) | $($target.Name) | $($target.Path). $previousItemStatus"', script)
+        self.assertIn('"Files from earlier selected items may already have been removed."', script)
+        self.assertIn("Checking this item and its parent folders for project files. This can take a while.", script)
+        self.assertIn("Reviewing files and folders inside this selection; large folders can take a while. This review does not remove files.", script)
+        self.assertIn("Write-Progress -Activity \"Reviewing selected folder contents\"", script)
+        entry_guard_start = script.index("function Assert-CleanupEntryPathWithinSelection")
+        entry_guard_end = script.index("\n}\n\n$available", entry_guard_start)
+        entry_guard = script[entry_guard_start:entry_guard_end]
+        self.assertIn("StartsWith($targetRootWithSeparator", entry_guard)
+        self.assertNotIn("Get-Item -LiteralPath $entryPath", entry_guard)
+        self.assertIn("native removal routine", entry_guard)
+        self.assertIn("CleanupLastWriteTimeUtcFileTime", script)
+        self.assertIn("RequireFileSnapshot", script)
+        self.assertIn("Checking this item and its parent folders for project files.", script)
+        self.assertIn("[System.IO.Directory]::EnumerateFileSystemEntries($Directory)", script)
+        self.assertIn("Folder review complete", script)
+        self.assertIn("$inventoryCurrentPath = Get-CleanupEntryProgressPath $_.FullName $protectedRoots", script)
+        self.assertIn("current item: $inventoryCurrentPath", script)
+        self.assertIn("current item: $projectContentProgressPath", script)
+        self.assertIn("current item: $protectedContentProgressPath", script)
+        self.assertIn("current item: $freshProjectProgressPath", script)
+        self.assertIn("function Get-ProjectCheckProgressPath", script)
+        self.assertIn("Current item: $projectCheckProgressPath", script)
+        self.assertIn('return "(protected item; path hidden)"', script)
+        self.assertIn("Checking this folder for links and project files; this check does not remove files.", script)
+        self.assertIn("$reparseProgressPath = Get-CleanupEntryProgressPath $entry.FullName $protectedRoots", script)
+        self.assertNotIn("$reparseEntry = $entries | Where-Object", script)
+        self.assertIn('Write-Host "  Project check: $projectCheckStatus"', script)
+        self.assertIn('Write-Host "  Folder review: $inventoryStatus"', script)
+        self.assertIn('Write-Host "  Checked $fileHashIndex of $fileHashTotal selected files; this check does not remove files."', script)
+        self.assertIn("Initial checks passed. Each selected file will be rechecked immediately before removal; earlier files from this item may already be removed if a later check fails.", script)
+        self.assertIn('Write-Progress -Activity "Rechecking selected files" -Status "Checking file $fileRecheckIndex of $fileRecheckTotal before removal; current item: $fileRemovalProgressPath. Earlier files may already be removed."', script)
+        self.assertIn('New-CleanupHashProgressAction $fileRecheckIndex $fileRecheckTotal "file" $entry.FullName "Rechecking"', script)
+        self.assertIn("Removed $targetFilesRemoved of $fileRecheckTotal selected files from this item.", script)
+        self.assertIn("FileStream(handle, FileAccess.Read, 131072, false)", script)
         self.assertNotIn("Run with administrator privileges", script)
 
     def test_generated_script_parses_in_powershell_when_available(self):
@@ -1099,7 +3889,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         if not powershell:
             self.skipTest("PowerShell is not installed")
         results = {"categories": {"high": {"name": "High", "items": [{
-            "path": "C:\\Users\\Jordan\\AppData\\Local\\Temp\\candidate-folder\\", "name": "Temporary files (check for installers or builds in progress)",
+            "path": "C:\\Users\\TestUser\\AppData\\Local\\Temp\\candidate-folder\\", "name": "Temporary files (check for installers or builds in progress)",
             "size": 100, "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1111,18 +3901,1380 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 f"[System.Management.Automation.Language.Parser]::ParseFile({ps_literal},[ref]$tokens,[ref]$errors)|Out-Null;"
                 "if($errors.Count){$errors|Format-List;exit 1}"
             )
-            result = subprocess.run([powershell, "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=20)
+            result = subprocess.run([powershell, "-NoProfile", "-Command", command], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_refuses_drive_that_now_maps_to_network(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            target = root / "candidate-cache.tmp"
+            original = b"network-drive guard fixture"
+            target.write_bytes(original)
+            label = "Temporary files (check for installers or builds in progress)"
+            results = {"categories": {
+                "high": {"name": "High", "items": [{
+                    "path": str(target), "name": label,
+                    "size": len(original), "scan_logical_size": len(original),
+                    "size_formatted": f"{len(original)} B", "kind": "File",
+                }]},
+                "medium": {"name": "Medium", "items": []},
+                "low": {"name": "Low", "items": []},
+            }}
+            script_path = root / "network-drive-test.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            live_drive_check = (
+                "function Get-CleanupDriveType([string]$DriveRoot) {\n"
+                "    return ([System.IO.DriveInfo]::new($DriveRoot)).DriveType\n"
+                "}"
+            )
+            network_drive_mock = (
+                "function Get-CleanupDriveType([string]$DriveRoot) {\n"
+                "    return [System.IO.DriveType]::Network\n"
+                "}"
+            )
+            self.assertIn(live_drive_check, script_text)
+            script_path.write_text(script_text.replace(live_drive_check, network_drive_mock, 1), encoding="utf-8-sig")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("network", (result.stdout + result.stderr).casefold())
+            self.assertTrue(target.exists(), result.stdout + result.stderr)
+            self.assertEqual(target.read_bytes(), original)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_runs_in_windows_powershell_51(self):
+        powershell = shutil.which("powershell")
+        if not powershell:
+            self.skipTest("Windows PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            target = root / "candidate-cache.tmp"
+            target.write_bytes(b"PowerShell 5.1 fixture")
+            label = "Temporary files (check for installers or builds in progress)"
+            results = {"categories": {
+                "high": {"name": "High", "items": [{
+                    "path": str(target), "name": label,
+                    "size": target.stat().st_size,
+                    "scan_logical_size": target.stat().st_size,
+                    "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+                }]},
+                "medium": {"name": "Medium", "items": []},
+                "low": {"name": "Low", "items": []},
+            }}
+            script_path = root / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-NoBackup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "Windows PowerShell 5.1 cleanup exceeded 180 seconds. "
+                    "The captured output identifies the last visible phase.\n"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn(
+                f"Checking selected item 1 of 1: File | {label} | {target}. Nothing has been removed yet.",
+                result.stdout,
+            )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_removes_unchanged_file_and_directory_named_streams(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
+            root = Path(temp_dir)
+            target = root / "candidate-cache"
+            nested = target / "nested"
+            nested.mkdir(parents=True)
+            payload = nested / "payload.bin"
+            payload.write_bytes(b"ordinary cached file")
+            streams = (
+                (str(target) + ":DriveCleanrRootTest:$DATA", b"R" * (2 * 1024 * 1024)),
+                (str(nested) + ":DriveCleanrNestedTest:$DATA", b"nested directory stream"),
+                (str(payload) + ":DriveCleanrFileTest:$DATA", b"file stream payload"),
+            )
+            try:
+                for stream_path, contents in streams:
+                    with open(stream_path, "wb") as stream:
+                        stream.write(contents)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams: {exc}")
+            if any(not backup._named_data_streams(stream_path.split(":DriveCleanr", 1)[0])
+                   for stream_path, _contents in streams):
+                self.skipTest("Temporary volume does not expose named data streams")
+
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": payload.stat().st_size,
+                "size_formatted": f"{payload.stat().st_size} B",
+                "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            expected_stream_progress = "selected folder 1 of 1: 2.0 MB of 2.0 MB checked (100%). Current item: "
+            self.assertIn(
+                f"Checking {expected_stream_progress}{target}", result.stdout,
+                "The initial folder stream check should show byte progress.",
+            )
+            self.assertIn(
+                f"Rechecking {expected_stream_progress}{target}", result.stdout,
+                "The final locked folder stream check should be labeled as a recheck.",
+            )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_preserves_file_when_named_stream_changes_after_review(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
+            root = Path(temp_dir)
+            target = root / "candidate-cache.bin"
+            target.write_bytes(b"ordinary file payload")
+            stream_path = str(target) + ":DriveCleanrMutationTest:$DATA"
+            original_stream = b"original ADS"
+            replacement_stream = b"changed ADS!"
+            self.assertEqual(len(original_stream), len(replacement_stream))
+            with open(stream_path, "wb") as stream:
+                stream.write(original_stream)
+            if not backup._named_data_streams(str(target)):
+                self.skipTest("Temporary volume does not expose named data streams")
+
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            self._install_mock_backup_that_changes_stream_on_verify(
+                root, stream_path, replacement_stream, target
+            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-Backup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "file named-stream mutation cleanup exceeded 180 seconds; "
+                    f"output so far:\n{stdout}\n{stderr}"
+                )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(target.exists(), result.stdout + result.stderr)
+            self.assertEqual(target.read_bytes(), b"ordinary file payload")
+            with open(stream_path, "rb") as stream:
+                self.assertEqual(stream.read(), replacement_stream)
+            self.assertIn("contents changed after backup verification", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_cleanup_preserves_folder_contents_when_folder_stream_changes(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
+            root = Path(temp_dir)
+            target = root / "candidate-cache"
+            target.mkdir()
+            payload = target / "payload.bin"
+            payload.write_bytes(b"preserve until review completes")
+            stream_path = str(target) + ":DriveCleanrDirectoryMutationTest:$DATA"
+            original_stream = b"original directory stream"
+            replacement_stream = b"changed directory stream!"
+            self.assertEqual(len(original_stream), len(replacement_stream))
+            with open(stream_path, "wb") as stream:
+                stream.write(original_stream)
+            if not backup._named_data_streams(str(target)):
+                self.skipTest("Temporary volume does not expose directory named streams")
+
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": payload.stat().st_size,
+                "size_formatted": f"{payload.stat().st_size} B",
+                "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            self._install_mock_backup_that_changes_stream_on_verify(
+                root, stream_path, replacement_stream, target
+            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-Backup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "directory named-stream mutation cleanup exceeded 180 seconds; "
+                    f"output so far:\n{stdout}\n{stderr}"
+                )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(target.is_dir(), result.stdout + result.stderr)
+            self.assertEqual(payload.read_bytes(), b"preserve until review completes")
+            with open(stream_path, "rb") as stream:
+                self.assertEqual(stream.read(), replacement_stream)
+            self.assertIn("named data streams changed after review", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_creates_and_verifies_backup_before_cleaning_selected_fixture(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"synthetic disposable cache")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+                "scan_logical_size": target.stat().st_size,
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("Files and folders already selected for this plan:", result.stdout)
+            self.assertIn("File | Temporary files", result.stdout)
+            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_handles_selected_child_inside_selected_folder(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            root = Path(target_temp)
+            selected_folder = root / "selected-folder"
+            selected_cache = selected_folder / "Cache"
+            selected_cache.mkdir(parents=True)
+            nested_file = selected_cache / "payload.bin"
+            nested_file.write_bytes(b"explicitly selected nested cache")
+            unrelated_file = root / "outside.bin"
+            unrelated_file.write_bytes(b"must stay in place")
+            results = {"categories": {
+                "high": {"name": "High", "items": [{
+                    "path": str(selected_folder) + "\\",
+                    "name": "Temporary files (check for installers or builds in progress)",
+                    "size": 32, "size_formatted": "32 B", "kind": "Directory",
+                }]},
+                "medium": {"name": "Medium", "items": [{
+                    "path": str(selected_cache) + "\\",
+                    "name": "Cache-named data (inspect its location and contents; the name alone does not prove it is disposable)",
+                    "size": 32, "size_formatted": "32 B", "kind": "Directory",
+                }]},
+                "low": {"name": "Low", "items": []},
+            }}
+            script_path = Path(plan_temp) / "clean.ps1"
+            analyze.generate_clean_script(
+                results, str(script_path), priority="all",
+                selected_paths=[str(selected_folder) + "\\", str(selected_cache) + "\\"],
+            )
+            backup_log = Path(plan_temp) / "backup-targets.txt"
+            (Path(plan_temp) / "backup.py").write_text(
+                "import json, ntpath, os, sys\n"
+                "start = sys.argv.index('--paths') + 1\n"
+                "end = sys.argv.index('--json') if '--json' in sys.argv else len(sys.argv)\n"
+                "paths = sys.argv[start:end]\n"
+                "with open(os.environ['CLEANR_TEST_BACKUP_LOG'], 'a', encoding='utf-8') as log:\n"
+                "    log.write(sys.argv[1] + '|' + '|'.join(paths) + '\\n')\n"
+                "if sys.argv[1] == 'verify': sys.exit(0)\n"
+                "keys = [ntpath.normcase(ntpath.normpath(path)).rstrip('\\\\') for path in paths]\n"
+                "for index, path in enumerate(keys):\n"
+                "    if any(path == earlier or path.startswith(earlier + '\\\\') or earlier.startswith(path + '\\\\') for earlier in keys[:index]):\n"
+                "        print('Backup paths must not duplicate or overlap', file=sys.stderr)\n"
+                "        sys.exit(2)\n"
+                "print(json.dumps({'status': 'completed', 'id': 'mock-backup', 'items': [{'path': path} for path in paths]}))\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=120, env=env,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(selected_folder.exists(), result.stdout + result.stderr)
+            self.assertFalse(nested_file.exists(), result.stdout + result.stderr)
+            self.assertEqual(unrelated_file.read_bytes(), b"must stay in place")
+            calls = backup_log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(calls), 2, result.stdout + result.stderr)
+            self.assertEqual(calls[0].rstrip("\\"), f"create|{selected_folder}")
+            self.assertEqual(calls[1].rstrip("\\"), f"verify|{selected_folder}")
+            self.assertIn("Explicitly selected nested items included with this folder:", result.stdout)
+            self.assertIn(str(selected_cache), result.stdout)
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            self.assertIn("higher-risk candidates you did not explicitly select", script_text)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_shows_progress_while_inventorying_large_fixture_folder(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        # Use a private temporary root so project checks do not scan the user's
+        # actual Temp directory. Empty child folders isolate inventory cost.
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            # Keep the fixture small and inject one deliberate delay after the
+            # first project-check update. This still exercises the 10-second
+            # heartbeat without creating thousands of files for every run.
+            entry_count = 120
+            for index in range(entry_count):
+                (target / f"item-{index:04d}.cache").write_bytes(b"")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": 0,
+                "size_formatted": "0 B",
+                "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            # Keep this progress-only fixture inside its synthetic temp root;
+            # production plans still check all real parent folders.
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_text = script_text.replace(
+                profile_scan_prefix,
+                "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                1,
+            )
+            project_progress_anchor = 'Write-Host "  Project check: $projectCheckStatus" -ForegroundColor Gray'
+            self.assertIn(project_progress_anchor, script_text)
+            delayed_heartbeat_hook = (
+                f"if ($entryCount -eq 1 -and $normalizedDirectory -eq {analyze._ps_literal(str(target))}) "
+                "{ Start-Sleep -Seconds 10 }"
+            )
+            script_text = script_text.replace(
+                project_progress_anchor,
+                project_progress_anchor + "\n                " + delayed_heartbeat_hook,
+                1,
+            )
+            inventory_complete = 'Write-Host "Folder review complete; $($entries.Count) files and folders found." -ForegroundColor Gray'
+            protected_content_complete = 'Write-Host "Protected-data check complete; $protectedContentCheckIndex items reviewed." -ForegroundColor Gray'
+            self.assertIn(inventory_complete, script_text)
+            self.assertIn(protected_content_complete, script_text)
+            self.assertIn("if ($entries.Count -eq 1 -or ($entries.Count % 100) -eq 0", script_text)
+            # Stop after both unbounded classification passes, before hashing
+            # files or reaching any removal code.
+            script_path.write_text(
+                script_text.replace(
+                    protected_content_complete,
+                    protected_content_complete + "\n            exit 0",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-NoBackup", "-Force"],
+                    capture_output=True, text=True, timeout=240,
+                )
+            except subprocess.TimeoutExpired as exc:
+                output = exc.stdout or ""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                self.fail(f"cleanup exceeded 240 seconds; output so far:\n{output}")
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Reviewing files and folders inside this selection", result.stdout)
+            self.assertIn("Project check: First entry checked for project files.", result.stdout)
+            self.assertIn(
+                f"Project check: First entry checked for project files. Current item: {target / 'item-0000.cache'}",
+                result.stdout,
+            )
+            self.assertIn("Project check: 100 entries checked for project files.", result.stdout)
+            self.assertIn("Project check: 2 entries checked for project files. Current item:", result.stdout)
+            self.assertIn(f"Project marker check complete; {entry_count} entries checked in this folder.", result.stdout)
+            self.assertIn("Folder review: First item listed; current item:", result.stdout)
+            self.assertIn("Folder review: 100 files and folders listed; current item:", result.stdout)
+            self.assertIn(f"Folder review complete; {entry_count} files and folders found.", result.stdout)
+            self.assertIn(
+                f"Folder safety check: 100 of {entry_count} items checked for links and project files; current item:",
+                result.stdout,
+            )
+            self.assertIn(f"Folder safety check complete; {entry_count} items reviewed.", result.stdout)
+            self.assertIn(
+                f"Protected-data check: 100 of {entry_count} items checked for protected data; current item:",
+                result.stdout,
+            )
+            self.assertIn(f"Protected-data check complete; {entry_count} items reviewed.", result.stdout)
+            self.assertNotIn("Checking the contents of", result.stdout)
+            self.assertTrue(target.is_dir(), result.stdout + result.stderr)
+            self.assertEqual(entry_count, sum(1 for _ in target.iterdir()))
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_lists_exact_file_and_never_creates_backup_or_deletes(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "selected-folder" / "payload.bin"
+            target.parent.mkdir()
+            target.write_bytes(b"preview only")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": "12 B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "preview.ps1"
+            backup_called = Path(plan_temp) / "backup-called.txt"
+            (Path(plan_temp) / "backup.py").write_text(
+                "from pathlib import Path\n"
+                f"Path({str(backup_called)!r}).write_text('called', encoding='utf-8')\n"
+                "raise SystemExit(9)\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target)]
+                )
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(target.is_file())
+            self.assertIn(f"Would remove | File | {target} | 12 bytes", result.stdout)
+            self.assertIn("Preview complete: 1 file and 0 folders would be removed", result.stdout)
+            self.assertIn("This is file size, not guaranteed free space recovered.", result.stdout)
+            self.assertIn("No recovery backup was created and nothing was removed", result.stdout)
+            self.assertNotIn("Type CLEAN", result.stdout)
+            self.assertNotIn("Type DELETE WITHOUT BACKUP", result.stdout)
+            self.assertFalse(backup_called.exists(), "preview mode must not invoke the backup helper")
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_refuses_to_report_a_stale_missing_selection_as_complete(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "payload.bin"
+            target.write_bytes(b"stale preview fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": "21 B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "preview-stale.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target)]
+                )
+            target.unlink()
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Force"],
+                capture_output=True, text=True, timeout=60,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("Preview incomplete: none of the selected files or folders still exist", result.stdout)
+            self.assertNotIn("Preview complete", result.stdout)
+            self.assertFalse(target.exists())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_preview_only_lists_eligible_folder_contents_and_keeps_protected_data(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "selected-folder"
+            target.mkdir()
+            eligible_file = target / "payload.bin"
+            eligible_file.write_bytes(b"eligible cache")
+            nested_folder = target / "child"
+            nested_folder.mkdir()
+            nested_file = nested_folder / "nested.bin"
+            nested_file.write_bytes(b"n" * (2 * 1024 * 1024))
+            protected_file = target / "Downloads" / "keep.bin"
+            protected_file.parent.mkdir()
+            protected_file.write_bytes(b"preserve this data")
+            eligible_file_bytes = eligible_file.stat().st_size
+            nested_file_bytes = nested_file.stat().st_size
+            protected_file_bytes = protected_file.stat().st_size
+            eligible_total_bytes = eligible_file_bytes + nested_file_bytes
+            scan_total_bytes = eligible_total_bytes + protected_file_bytes
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": scan_total_bytes,
+                "size_formatted": analyze.format_size(scan_total_bytes),
+                "kind": "Folder",
+            }]}}}
+            script_path = Path(plan_temp) / "preview-folder.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(
+                    results, str(script_path), selected_paths=[str(target) + "\\"]
+                )
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-PreviewOnly", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(eligible_file.exists())
+            self.assertTrue(nested_file.exists())
+            self.assertEqual(protected_file.read_bytes(), b"preserve this data")
+            self.assertIn(f"Would remove | File | {eligible_file}", result.stdout)
+            self.assertIn(
+                f"Would remove | Folder | {nested_folder} | 2.00 MB ({nested_file_bytes} bytes) of files this plan could remove (including subfolders)",
+                result.stdout,
+            )
+            self.assertNotIn(str(protected_file), result.stdout)
+            self.assertIn("current item: (protected item; path hidden)", result.stdout)
+            self.assertIn(
+                f"Keep selected folder | Protected data will remain inside it | 2.00 MB ({eligible_total_bytes} bytes) of files this plan could remove",
+                result.stdout,
+            )
+            self.assertIn(
+                "The same files can appear in more than one folder row because folder sizes include subfolders. The total counts each file once.",
+                result.stdout,
+            )
+            self.assertIn(
+                f"Preview complete: 2 files and 1 folder would be removed ({eligible_total_bytes} bytes of file data)",
+                result.stdout,
+            )
+            self.assertIn("nothing was removed", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_reports_byte_progress_while_hashing_a_large_file(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "large-cache.bin"
+            with target.open("wb") as stream:
+                stream.truncate(128 * 1024 * 1024)
+            named_stream_path = str(target) + ":DriveCleanrProgressTest:$DATA"
+            try:
+                with open(named_stream_path, "wb") as named_stream:
+                    named_stream.truncate(2 * 1024 * 1024)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams: {exc}")
+            if not backup._named_data_streams(str(target)):
+                self.skipTest("Temporary volume does not expose named data streams")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": "128.00 MB",
+                "kind": "File",
+                "scan_logical_size": target.stat().st_size,
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_text = script_text.replace(
+                profile_scan_prefix,
+                "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                1,
+            )
+            script_path.write_text(script_text, encoding="utf-8-sig")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+
+        expected_progress_path = f"Current item: {target}"
+        self.assertIn(f"Rechecking selected file 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}", result.stdout)
+        self.assertIn(f"Rechecking selected file 1 of 1: 128.0 MB of 128.0 MB checked (100%). {expected_progress_path}", result.stdout)
+        self.assertGreaterEqual(
+            result.stdout.count(f"Rechecking selected file 1 of 1: 64.0 MB of 128.0 MB checked (50%). {expected_progress_path}"), 2,
+            "The locked check immediately before deletion must also report byte progress.",
+        )
+        self.assertIn(f"Rechecking selected file 1 of 1: 2.0 MB of 2.0 MB checked (100%). {expected_progress_path}", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_cleanup_modes_still_reject_stale_and_project_targets(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, \
+             tempfile.TemporaryDirectory(dir=temp_root) as fixture_root:
+            root = Path(fixture_root)
+            for case in ("stale", "project"):
+                with self.subTest(case=case):
+                    case_root = root / case
+                    case_root.mkdir()
+                    project_root = case_root / "project"
+                    project_root.mkdir()
+                    target = project_root / "candidate.tmp"
+                    target.write_bytes(b"synthetic cleanup fixture")
+                    results = {"categories": {"high": {"name": "High", "items": [{
+                        "path": str(target),
+                        "name": "Temporary files (check for installers or builds in progress)",
+                        "size": target.stat().st_size,
+                        "scan_logical_size": target.stat().st_size,
+                        "size_formatted": f"{target.stat().st_size} B",
+                        "kind": "File",
+                    }]}}}
+                    script_path = case_root / "clean.ps1"
+                    with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                        analyze.generate_clean_script(results, str(script_path))
+                    self._stop_generated_plan_project_walk_at_temp(script_path)
+                    if case == "stale":
+                        target.unlink()
+                        target.mkdir()
+                        sentinel = target / "preserve.txt"
+                        sentinel.write_text("preserve", encoding="utf-8")
+                    else:
+                        (project_root / ".git").mkdir()
+                        sentinel = target
+
+                    result = subprocess.run(
+                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                         "-Select", "1", "-NoBackup", "-Force"],
+                        capture_output=True, text=True, timeout=180,
+                    )
+
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(sentinel.exists(), result.stdout + result.stderr)
+                    self.assertNotIn("Creating backup before cleanup", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_interactive_no_backup_requires_distinct_confirmation(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"synthetic cleanup fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    input="1\nn\nDELETE WITHOUT BACKUP\n", capture_output=True, text=True, timeout=120,
+                )
+            except subprocess.TimeoutExpired as exc:
+                output = exc.stdout or ""
+                error_output = exc.stderr or ""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                if isinstance(error_output, bytes):
+                    error_output = error_output.decode("utf-8", errors="replace")
+                self.fail(
+                    "interactive no-backup cleanup exceeded 120 seconds; "
+                    f"output so far:\n{output}\n{error_output}"
+                )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn(
+                "Loading cleanup safety checks. This may take a moment; nothing has been removed.",
+                result.stdout,
+            )
+            generated = script_path.read_text(encoding="utf-8-sig")
+            self.assertIn(
+                "Create a verified backup of these selected items first? [y/N] "
+                "(Y = create and verify a backup; Enter or N = continue without a backup)",
+                generated,
+            )
+            self.assertIn("Type DELETE WITHOUT BACKUP", generated)
+            self.assertIn("No backup will be created", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
+            self.assertNotIn("Creating backup before cleanup", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_interactive_user_can_choose_verified_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"synthetic cleanup fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            calls = Path(plan_temp) / "backup-calls.txt"
+            backup_helper = Path(plan_temp) / "backup.py"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            backup_helper.write_text(
+                "import json, sys\nfrom pathlib import Path\n"
+                f"calls = Path({str(calls)!r})\n"
+                "with calls.open('a', encoding='utf-8') as stream: stream.write(sys.argv[1] + '\\n')\n"
+                "if sys.argv[1] == 'verify': sys.exit(0)\n"
+                "start = sys.argv.index('--paths') + 1; end = sys.argv.index('--json')\n"
+                "print(json.dumps({'status':'completed','id':'mock-backup','items':[{} for _ in sys.argv[start:end]]}))\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                input="1\ny\nCLEAN\n", capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_blank_backup_choice_defaults_to_no_and_clean_phrase_cancels(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"must remain after wrong confirmation")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                input="1\n\nCLEAN\n", capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(target.is_file(), result.stdout + result.stderr)
+            self.assertIn("Cancelled; nothing was changed.", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_noninteractive_cleanup_creates_verified_backup_when_requested(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"temporary fixture selected without backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("A verified recovery backup will be created before cleanup.", result.stdout)
+            self.assertIn("Backup created: mock-backup", result.stdout)
+            self.assertEqual(backup_calls.read_text(encoding="utf-8").splitlines(), ["create", "verify"])
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_noninteractive_cleanup_defaults_to_no_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"temporary fixture selected without default backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("No backup will be created", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
+            self.assertNotIn("Creating backup before cleanup", result.stdout)
+            self.assertFalse(backup_calls.exists())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_noninteractive_cleanup_no_backup_switch_skips_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate.tmp"
+            target.write_bytes(b"temporary fixture selected without backup")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target), "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size, "scan_logical_size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B", "kind": "File",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            backup_calls = self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertIn("No backup will be created", result.stdout)
+            self.assertIn("No recovery backup was created", result.stdout)
+            self.assertNotIn("Creating backup before cleanup", result.stdout)
+            self.assertFalse(backup_calls.exists())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_file_checks_report_visible_progress_during_large_folder_cleanup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            for index in range(101):
+                (target / f"item-{index:04d}.bin").write_bytes(b"cache entry")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 101 * 11,
+                "size_formatted": "1.1 KB", "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-Force"],
+                    capture_output=True, text=True, timeout=240,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "Large-folder cleanup exceeded 240 seconds.\n"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(target.exists(), result.stdout + result.stderr)
+            self.assertRegex(
+                result.stdout,
+                r"Checking selected file 1 of 101; current file: .+item-\d{4}\.bin\. This check does not remove files\.",
+            )
+            self.assertIn("Checked 100 of 101 selected files; this check does not remove files.", result.stdout)
+            self.assertIn("Checked 101 of 101 selected files; this check does not remove files.", result.stdout)
+            self.assertIn("Initial checks passed. Each selected file will be rechecked immediately before removal; earlier files from this item may already be removed if a later check fails.", result.stdout)
+            self.assertIn("Removed 100 of 101 selected files from this item.", result.stdout)
+            self.assertIn("Removed 101 of 101 selected files from this item.", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_folder_cleanup_preserves_hidden_formatting_paths_and_sanitizes_preview(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            hidden_format_file = target / "cache-\u202e-payload.bin"
+            hidden_format_file.write_bytes(b"temporary test data")
+            hidden_format_folder = target / "profile-\u2066cache"
+            hidden_format_folder.mkdir()
+            hidden_format_nested_file = hidden_format_folder / "keep.bin"
+            hidden_format_nested_file.write_bytes(b"nested data stays")
+            visible_file = target / "ordinary-cache.bin"
+            visible_file.write_bytes(b"ordinary test data")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": hidden_format_file.stat().st_size + hidden_format_nested_file.stat().st_size + visible_file.stat().st_size,
+                "size_formatted": f"{hidden_format_file.stat().st_size + hidden_format_nested_file.stat().st_size + visible_file.stat().st_size} B",
+                "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            profile_scan_prefix = "if ($normalizedCurrent -match "
+            self.assertIn(profile_scan_prefix, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    profile_scan_prefix,
+                    "if ($normalizedCurrent -eq ([System.IO.Path]::GetFullPath($env:TEMP).TrimEnd('\\')) -or $normalizedCurrent -match ",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "[file] cache-?-payload.bin",
+                result.stdout,
+            )
+            self.assertIn("[folder] profile-?cache", result.stdout)
+            self.assertIn("Skipped 3 items with hidden formatting in their paths; those items will be kept.", result.stdout)
+            self.assertIn(f"Checking selected file 1 of 1; current file: {visible_file}", result.stdout)
+            self.assertNotIn("\u202e", result.stdout)
+            self.assertNotIn("\u2066", result.stdout)
+            self.assertTrue(target.is_dir(), result.stdout + result.stderr)
+            self.assertTrue(hidden_format_file.exists(), result.stdout + result.stderr)
+            self.assertTrue(hidden_format_nested_file.exists(), result.stdout + result.stderr)
+            self.assertFalse(visible_file.exists(), result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_partial_folder_failure_reports_only_files_successfully_removed(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            selected_files = [target / "cache-a.tmp", target / "cache-b.tmp"]
+            for selected_file in selected_files:
+                selected_file.write_bytes(b"fixture-9")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": sum(selected_file.stat().st_size for selected_file in selected_files),
+                "size_formatted": "18 B", "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+
+            lines = script_path.read_text(encoding="utf-8-sig").splitlines()
+            loop_index = next(
+                index for index, line in enumerate(lines)
+                if line.strip() == "foreach ($entry in $orderedDeletable) {"
+            )
+            loop_indent = lines[loop_index][:len(lines[loop_index]) - len(lines[loop_index].lstrip())]
+            lines.insert(loop_index, f"{loop_indent}$deleteAttempt = 0")
+            call_index = next(
+                index for index, line in enumerate(lines[:-1])
+                if "::DeleteFileIfUnchanged(" in line and "$entry.FullName" in lines[index + 1]
+            )
+            call_indent = lines[call_index][:len(lines[call_index]) - len(lines[call_index].lstrip())]
+            lines[call_index:call_index] = [
+                f"{call_indent}$deleteAttempt++",
+                f"{call_indent}if ($deleteAttempt -eq 2) {{ throw 'simulated failure after the first file' }}",
+            ]
+            script_path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertEqual(sum(not selected_file.exists() for selected_file in selected_files), 1)
+            self.assertIn("Cleanup finished with errors. Removed 1 file and 0 folders (9 bytes of file data; about 0.00 GB); some items may remain.", result.stdout)
+            self.assertIn("Removed 1 of 2 selected files and 0 folders from this item before the error (9 bytes of file data).", result.stdout)
+            self.assertIn("No backup was created", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_normalizes_unknown_runtime_errors_to_english(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
+            root = Path(temp_dir)
+            target = root / "candidate.tmp"
+            target.write_bytes(b"localized error fixture")
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target),
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": target.stat().st_size,
+                "size_formatted": f"{target.stat().st_size} B",
+                "kind": "File",
+                "scan_logical_size": target.stat().st_size,
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            insertion_point = "            $targetFilesPlanned = 1\n"
+            self.assertIn(insertion_point, script_text)
+            script_path.write_text(
+                script_text.replace(
+                    insertion_point,
+                    insertion_point + "            throw 'Zugriff verweigert'\n",
+                    1,
+                ),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=90,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertTrue(target.exists(), result.stdout + result.stderr)
+            self.assertIn("A cleanup check failed; no more files will be removed from this item.", result.stdout)
+            self.assertNotIn("Zugriff verweigert", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_selected_item_progress_uses_processing_order_and_tracks_prior_removals(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as target_temp,
+            tempfile.TemporaryDirectory(dir=isolated_temp) as plan_temp,
+        ):
+            targets = [Path(target_temp) / f"candidate-{index}.tmp" for index in range(3)]
+            for index, target in enumerate(targets):
+                target.write_bytes(f"fixture {index}".encode("ascii"))
+            label = "Temporary files (check for installers or builds in progress)"
+            results = {"categories": {"high": {"name": "High", "items": [
+                {"path": str(target), "name": label, "size": target.stat().st_size,
+                 "scan_logical_size": target.stat().st_size,
+                 "size_formatted": f"{target.stat().st_size} B", "kind": "File"}
+                for target in targets
+            ]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            self._install_complete_mock_backup(plan_temp)
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            command = f"& {analyze._ps_literal(str(script_path))} -Select 1,3 -Force"
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-Command", command],
+                capture_output=True, text=True, timeout=180,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"Checking selected item 1 of 2: File | {label} | {targets[0]}. Nothing has been removed yet.", result.stdout)
+            self.assertIn(f"Checking selected item 2 of 2: File | {label} | {targets[2]}. Files from earlier selected items may already have been removed.", result.stdout)
+            self.assertFalse(targets[0].exists(), result.stdout + result.stderr)
+            self.assertTrue(targets[1].exists(), "The unselected middle file must remain untouched")
+            self.assertFalse(targets[2].exists(), result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_rejects_changed_item_type_before_backup(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
         with (
-            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
-            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
         ):
             target = Path(target_temp) / "candidate.tmp"
             target.write_text("scanned as a file", encoding="utf-8")
@@ -1132,6 +5284,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             sentinel = Path(plan_temp) / "backup_called.txt"
@@ -1150,7 +5303,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             target.mkdir()
             (target / "keep.txt").write_text("preserve", encoding="utf-8")
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -1164,10 +5317,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
         with (
-            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
-            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
         ):
             target = Path(target_temp) / "candidate.tmp"
             target.write_text("scanned as a file", encoding="utf-8")
@@ -1177,6 +5334,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "size": target.stat().st_size,
                 "size_formatted": f"{target.stat().st_size} B",
                 "kind": "File",
+                "scan_logical_size": target.stat().st_size,
             }]}}}
             script_path = Path(plan_temp) / "clean.ps1"
             call_log = Path(plan_temp) / "backup_calls.txt"
@@ -1196,7 +5354,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_helper.write_text(helper_contents, encoding="utf-8")
 
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -1210,10 +5368,14 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
         with (
-            tempfile.TemporaryDirectory(dir=temp_root) as target_temp,
-            tempfile.TemporaryDirectory(dir=temp_root) as plan_temp,
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
         ):
             target = Path(target_temp) / "candidate.tmp"
             target.write_bytes(b"synthetic cache data")
@@ -1240,7 +5402,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             with (
                 mock.patch.object(scan, "DATA_DIR", str(scan_data)),
                 mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"),
-                mock.patch.object(scan, "check_admin", return_value=False),
+                mock.patch.object(scan, "check_admin_status", return_value=False),
                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False),
                 mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_scan_export),
                 mock.patch.object(scan.time, "sleep", return_value=None),
@@ -1280,7 +5442,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_helper.write_text(helper_contents, encoding="utf-8")
 
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
 
@@ -1288,6 +5450,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse(target.exists(), result.stdout + result.stderr)
             self.assertIn("Backup created:", result.stdout)
             self.assertIn("Cleanup complete!", result.stdout)
+            self.assertIn("Copying backup file complete.", result.stderr)
             backup_dirs = list(backup_root.glob("backup_*"))
             self.assertEqual(len(backup_dirs), 1)
             backup_id = backup_dirs[0].name
@@ -1298,15 +5461,110 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 self.assertTrue(backup.restore_backup(backup_id))
             self.assertEqual(target.read_bytes(), b"synthetic cache data")
 
+    @unittest.skipUnless(os.name == "nt", "WinDirStat scan/review flow targets Windows")
+    def test_mocked_windirstat_scan_flows_through_review_and_plan_generation(self):
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target_root = Path(target_temp) / "app-cache"
+            target_root.mkdir()
+            target = target_root / "candidate.tmp"
+            target.write_bytes(b"synthetic WinDirStat candidate")
+            scan_data = Path(plan_temp) / "scan-data"
+            plan_path = Path(plan_temp) / "reviewed-windirstat-cleanup.ps1"
+            command = []
+
+            class CompletedMockScanner:
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+            def write_mock_scan_export(arguments, **_kwargs):
+                command.extend(arguments)
+                export_path = Path(arguments[2])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                with export_path.open("w", newline="", encoding="utf-8") as export:
+                    writer = csv.writer(export)
+                    writer.writerow([
+                        "Name", "Files", "Folders", "Logical Size", "Physical Size",
+                        "Attributes", "WinDirStat Attributes",
+                    ])
+                    writer.writerow([
+                        str(target), "0", "0", str(target.stat().st_size),
+                        str(target.stat().st_size), "Archive", "0x20000008",
+                    ])
+                return CompletedMockScanner()
+
+            clock = [0.0]
+
+            def advance_scan_clock(seconds):
+                clock[0] += seconds
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(scan, "DATA_DIR", str(scan_data)),
+                mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"),
+                mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0, 0)),
+                mock.patch.object(scan, "_path_has_reparse_component", return_value=False),
+                mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_scan_export),
+                mock.patch.object(analyze, "_directory_has_project_marker", return_value=False),
+                mock.patch.object(analyze.shutil, "disk_usage", return_value=SimpleNamespace(
+                    total=10**9, used=5 * 10**8, free=5 * 10**8,
+                )),
+                mock.patch.object(scan, "check_admin_status", return_value=False),
+                mock.patch.object(analyze, "clear_screen"),
+                redirect_stdout(output),
+            ):
+                with (
+                    mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]),
+                    mock.patch.object(scan.time, "sleep", side_effect=advance_scan_clock),
+                ):
+                    csv_path = scan.scan(
+                        drive=str(target_root), app="windirstat", timeout=30,
+                    )
+
+                self.assertTrue(csv_path)
+                self.assertTrue(scan.validate_scan_export(csv_path)[0])
+                self.assertEqual(command[:2], ["mock-WinDirStat.exe", "/SaveTo"])
+                self.assertEqual(command[-1], str(target_root))
+                self.assertEqual(Path(command[2]).parent.name, ".incomplete")
+                self.assertTrue(Path(csv_path).is_file())
+                self.assertNotEqual(Path(csv_path).parent.name, ".incomplete")
+
+                with mock.patch("builtins.input", side_effect=[
+                        "3", "", "1", "", str(plan_path), "", "0"]), \
+                     mock.patch.object(analyze, "offer_to_preview_cleanup_script") as preview:
+                    analyze.run_tui(initial_csv=csv_path, min_size_mb=0)
+                preview.assert_called_once_with(str(plan_path))
+
+            self.assertTrue(plan_path.is_file(), output.getvalue())
+            self.assertIn(str(target), plan_path.read_text(encoding="utf-8-sig"))
+            self.assertTrue(target.is_file(), "The generated plan must not be executed by this test")
+            self.assertIn("Starting WinDirStat scan", output.getvalue())
+            self.assertIn("File |", output.getvalue())
+            self.assertIn(str(target), output.getvalue())
+            self.assertIn("Cleanup plan saved to:", output.getvalue())
+            self.assertNotIn("Starting the cleanup plan", output.getvalue())
+
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_folder_cleanup_preserves_candidates_from_more_cautious_tiers(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "Temp"
             nested_cache = selected / "Cache"
@@ -1336,7 +5594,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 }]},
             }}
             script_path = root / "clean.ps1"
-            analyze.generate_clean_script(results, str(script_path), priority="high")
+            with mock.patch.dict(
+                    os.environ,
+                    {"GRADLE_USER_HOME": str(nested_gradle_cache.parent)},
+            ):
+                analyze.generate_clean_script(results, str(script_path), priority="high")
             (root / "backup.py").write_text(
                 "import json, sys\n"
                 "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
@@ -1344,7 +5606,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             all_script = root / "clean-all.ps1"
-            analyze.generate_clean_script(results, str(all_script), priority="all")
+            with mock.patch.dict(
+                    os.environ,
+                    {"GRADLE_USER_HOME": str(nested_gradle_cache.parent)},
+            ):
+                analyze.generate_clean_script(results, str(all_script), priority="all")
             all_result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(all_script), "-Select", "1", "-Force"],
                 capture_output=True, text=True, timeout=90,
@@ -1353,7 +5619,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertTrue(cache_file.exists(), all_result.stdout + all_result.stderr)
             self.assertEqual(cache_file.read_bytes(), b"caution fixture")
             self.assertFalse((selected / "ordinary.tmp").exists(), all_result.stdout + all_result.stderr)
-            self.assertIn("Nested candidates from more cautious tiers will be preserved", all_result.stdout)
+            self.assertIn("Higher-risk files and folders inside this folder will be kept", all_result.stdout)
 
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
@@ -1365,7 +5631,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertFalse((selected / "ordinary.tmp").exists(), result.stdout + result.stderr)
 
             medium_script = root / "clean-medium.ps1"
-            analyze.generate_clean_script(results, str(medium_script), priority="medium")
+            with mock.patch.dict(
+                    os.environ,
+                    {"GRADLE_USER_HOME": str(nested_gradle_cache.parent)},
+            ):
+                analyze.generate_clean_script(results, str(medium_script), priority="medium")
             medium_result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(medium_script), "-Select", "1", "-Force"],
                 capture_output=True, text=True, timeout=90,
@@ -1374,7 +5644,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.assertTrue(gradle_file.exists(), medium_result.stdout + medium_result.stderr)
             self.assertEqual(gradle_file.read_bytes(), b"confirm-first fixture")
             self.assertFalse((nested_cache / "ordinary-cache.tmp").exists(), medium_result.stdout + medium_result.stderr)
-            self.assertIn("Nested candidates from more cautious tiers will be preserved", medium_result.stdout)
+            self.assertIn("Higher-risk files and folders inside this folder will be kept", medium_result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_nested_protected_and_project_data(self):
@@ -1383,17 +5653,29 @@ class AnalyzeSafetyTests(unittest.TestCase):
             self.skipTest("PowerShell is not installed")
         # Use the long profile path explicitly: Windows' default temp path can
         # use an 8.3 alias that PowerShell expands while enumerating children.
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
+            configured_temp_root = root / "configured-temp"
+            configured_temp_root.mkdir()
             selected = root / "selected"
             unselected = root / "unselected"
-            (selected / "nested" / "claude-session").mkdir(parents=True)
+            outside_temp_claude = selected / "nested" / "claude-session"
+            outside_temp_claude.mkdir(parents=True)
+            temp_selected = configured_temp_root / "selected"
+            temp_claude = temp_selected / "nested" / "claude-session"
+            temp_claude.mkdir(parents=True)
             (selected / "nested" / ".codex" / "extensions").mkdir(parents=True)
             codex_old_cache = selected / "nested" / ".codex-old" / "plugins" / "cache"
             codex_old_cache.mkdir(parents=True)
             onedrive_cache = selected / "nested" / "OneDrive - Contoso" / "Cache"
             onedrive_cache.mkdir(parents=True)
+            onedrive_backup_cache = selected / "nested" / "OneDriveBackup" / "Cache"
+            onedrive_backup_cache.mkdir(parents=True)
             codex_package_cache = (
                 selected / "nested" / "Packages" / "OpenAI.Codex_2p2nqsd0c76g0"
                 / "LocalCache" / "Local" / "npm-cache"
@@ -1405,27 +5687,97 @@ class AnalyzeSafetyTests(unittest.TestCase):
             personal_music.mkdir(parents=True)
             project_cache = selected / "nested" / "my-project" / ".cache"
             project_cache.mkdir(parents=True)
+            requirements_project = selected / "nested" / "requirements-project"
+            requirements_project_cache = requirements_project / "pip" / "cache"
+            requirements_project_cache.mkdir(parents=True)
+            (requirements_project / "requirements-dev.txt").write_text("pytest", encoding="utf-8")
+            vscode_project = selected / "nested" / "vscode-project"
+            vscode_project_cache = vscode_project / "Cache"
+            (vscode_project / ".vscode").mkdir(parents=True)
+            vscode_project_cache.mkdir()
+            workspace_project = selected / "nested" / "workspace-file-project"
+            workspace_project_cache = workspace_project / "Cache"
+            workspace_project.mkdir(parents=True)
+            workspace_project_cache.mkdir()
+            (workspace_project / "DriveCleanr.code-workspace").touch()
             visual_project_cache = selected / "nested" / "visual-studio-project" / "packages" / "cache"
             visual_project_cache.mkdir(parents=True)
             (visual_project_cache.parents[1] / "DriveCleanrSample.csproj").touch()
+            cross_platform_kept_files = []
+            for project_name, marker in (
+                    ("swift-package", "Package.swift"),
+                    ("bazel-workspace", "WORKSPACE.bazel"),
+                    ("nix-flake", "flake.nix"),
+                    ("terraform", "terraform.tfvars"),
+                    ("zig-build", "build.zig"),
+                    ("haskell-stack", "stack.yaml"),
+                    ("cabal-package", "Sample.cabal"),
+                    ("ocaml-dune", "dune-project"),
+                    ("ocaml-package", "Sample.opam"),
+                    ("dotnet-sdk-pin", "global.json"),
+                    ("dotnet-build-props", "Directory.Build.props"),
+                    ("dotnet-build-targets", "Directory.Build.targets"),
+                    ("dotnet-solution-props", "Directory.Solution.props"),
+                    ("dotnet-solution-targets", "Directory.Solution.targets"),
+                    ("node-npm-shrinkwrap", "npm-shrinkwrap.json"),
+                    ("clojure-tools-deps", "deps.edn"),
+                     ("leiningen-project", "project.clj"),
+                    ("rstudio-project", "Sample.Rproj"),
+                    ("r-package", "DESCRIPTION"),
+                    ("r-renv", "renv.lock"),
+                    ("julia-project", "Project.toml"),
+                    ("julia-explicit-project", "JuliaProject.toml"),
+                    ("julia-manifest", "Manifest.toml"),
+                    ("julia-explicit-manifest", "JuliaManifest.toml"),
+                    ("python-venv-folder", ".venv"),
+                    ("python-venv-folder-name", "venv"),
+                    ("python-venv-config", "pyvenv.cfg"),
+                    ("conda-environment", "conda-meta"),
+                     ("windows-sandbox-config", "Acceptance.wsb")):
+                cross_project = selected / "nested" / project_name
+                cross_cache = cross_project / "Cache"
+                cross_cache.mkdir(parents=True)
+                marker_path = cross_project / marker
+                if marker in {".venv", "venv", "conda-meta"}:
+                    marker_path.mkdir()
+                else:
+                    marker_path.touch()
+                kept_file = cross_cache / "keep.bin"
+                kept_file.write_bytes(b"project data")
+                cross_platform_kept_files.append(kept_file)
+            xcode_project = selected / "nested" / "xcode-project"
+            (xcode_project / "Example.xcodeproj").mkdir(parents=True)
+            xcode_cache_file = xcode_project / "Cache" / "keep.bin"
+            xcode_cache_file.parent.mkdir()
+            xcode_cache_file.write_bytes(b"Xcode project data")
             unselected.mkdir()
             (selected / "remove-me.bin").write_bytes(b"remove")
-            (selected / "nested" / "claude-session" / "keep.bin").write_bytes(b"keep")
+            (outside_temp_claude / "keep.bin").write_bytes(b"remove")
+            (temp_selected / "remove-me.bin").write_bytes(b"remove")
+            (temp_claude / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / ".codex" / "extensions" / "keep.bin").write_bytes(b"keep")
             (codex_old_cache / "keep.bin").write_bytes(b"keep")
             (onedrive_cache / "keep.bin").write_bytes(b"keep")
+            (onedrive_backup_cache / "remove.bin").write_bytes(b"remove")
             (codex_package_cache / "keep.bin").write_bytes(b"keep")
             (codex_roaming_cache / "keep.bin").write_bytes(b"keep")
             (personal_music / "keep.bin").write_bytes(b"keep")
             (selected / "nested" / "my-project" / "package.json").write_text("{}", encoding="utf-8")
             (project_cache / "keep.bin").write_bytes(b"keep")
+            (requirements_project_cache / "keep.bin").write_bytes(b"keep")
+            (vscode_project_cache / "keep.bin").write_bytes(b"keep")
+            (workspace_project_cache / "keep.bin").write_bytes(b"keep")
             (visual_project_cache / "keep.bin").write_bytes(b"keep")
+            for kept_file in cross_platform_kept_files:
+                self.assertEqual(kept_file.read_bytes(), b"project data")
+            self.assertEqual(xcode_cache_file.read_bytes(), b"Xcode project data")
             (selected / "nested" / "regular-cache").mkdir()
             (selected / "nested" / "regular-cache" / "remove.bin").write_bytes(b"remove")
             (unselected / "keep.bin").write_bytes(b"untouched")
             results = {"categories": {"high": {"name": "High", "items": [
                 {"path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
                 {"path": str(unselected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 9, "size_formatted": "9 B", "kind": "Directory"},
+                {"path": str(temp_selected) + "\\", "name": "Temporary files (check for installers or builds in progress)", "size": 6, "size_formatted": "6 B", "kind": "Directory"},
             ]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -1441,25 +5793,42 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
                 encoding="utf-8",
             )
-            env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
+            env = dict(
+                os.environ,
+                CLEANR_TEST_BACKUP_LOG=str(backup_log),
+                TEMP=str(configured_temp_root),
+                TMP=str(configured_temp_root),
+            )
+            command = f"& {analyze._ps_literal(str(script_path))} -Select 2,3 -Backup -Force"
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
+                [powershell, "-NoProfile", "-Command", command],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertFalse((selected / "remove-me.bin").exists(), result.stdout + result.stderr)
-            self.assertEqual((selected / "nested" / "claude-session" / "keep.bin").read_bytes(), b"keep")
+            self.assertFalse(outside_temp_claude.exists(), result.stdout + result.stderr)
+            self.assertFalse((temp_selected / "remove-me.bin").exists(), result.stdout + result.stderr)
+            self.assertEqual((temp_claude / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((selected / "nested" / ".codex" / "extensions" / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_old_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((onedrive_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertFalse(onedrive_backup_cache.exists(), result.stdout + result.stderr)
             self.assertEqual((codex_package_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((codex_roaming_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((personal_music / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((project_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((requirements_project_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((vscode_project_cache / "keep.bin").read_bytes(), b"keep")
+            self.assertEqual((workspace_project_cache / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((visual_project_cache / "keep.bin").read_bytes(), b"keep")
+            for kept_file in cross_platform_kept_files:
+                self.assertEqual(kept_file.read_bytes(), b"project data")
             self.assertFalse((selected / "nested" / "regular-cache" / "remove.bin").exists())
             self.assertEqual((unselected / "keep.bin").read_bytes(), b"untouched")
-            self.assertEqual(backup_log.read_text(encoding="utf-8"), str(selected) + "\\")
+            self.assertEqual(
+                backup_log.read_text(encoding="utf-8"),
+                str(selected) + "\\\n" + str(temp_selected) + "\\",
+            )
             self.assertIn("protected data was preserved", result.stdout)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
@@ -1467,7 +5836,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected-cache"
             selected.mkdir()
@@ -1478,6 +5852,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             fake_backup = root / "backup.py"
             fake_backup.write_text(
                 "import json, sys\n"
@@ -1488,7 +5863,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -1499,10 +5874,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
             root = Path(temp_dir)
             selected = root / "readonly-cache.bin"
             selected.write_bytes(b"read only fixture")
@@ -1511,9 +5883,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(selected),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "17 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
-            analyze.generate_clean_script(results, str(script_path))
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             (root / "backup.py").write_text(
                 "import json, sys\n"
                 "if len(sys.argv) > 1 and sys.argv[1] == 'verify': sys.exit(0)\n"
@@ -1521,10 +5896,16 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             try:
-                result = subprocess.run(
-                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                    capture_output=True, text=True, timeout=90,
-                )
+                try:
+                    result = subprocess.run(
+                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                        capture_output=True, text=True, timeout=90,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output = exc.stdout or ""
+                    if isinstance(output, bytes):
+                        output = output.decode("utf-8", errors="replace")
+                    self.fail(f"read-only cleanup exceeded 90 seconds; output so far:\n{output}")
                 self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
                 self.assertFalse(selected.exists(), result.stdout + result.stderr)
             finally:
@@ -1536,10 +5917,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "locked-cache.bin"
             selected.write_bytes(b"locked fixture")
@@ -1547,6 +5930,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(selected),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "14 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -1623,7 +6007,15 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected-cache"
             selected.mkdir()
@@ -1636,6 +6028,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             fake_backup = root / "backup.py"
             fake_backup.write_text(
                 "import json, sys\nfrom pathlib import Path\n"
@@ -1651,13 +6044,30 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
                 encoding="utf-8",
             )
-            result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=90,
-            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                output = exc.stdout or ""
+                if isinstance(output, bytes):
+                    output = output.decode("utf-8", errors="replace")
+                errors = exc.stderr or ""
+                if isinstance(errors, bytes):
+                    errors = errors.decode("utf-8", errors="replace")
+                self.fail(
+                    "generated cleanup did not finish its mutation-safety check within "
+                    f"{exc.timeout} seconds; PowerShell output so far:\n{output}\n{errors}"
+                )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertTrue(new_project.is_dir(), result.stdout + result.stderr)
             self.assertEqual(keep_file.read_bytes(), b"created after backup verification")
+            self.assertIn(
+                "Checking the selected path and its parent folders for links or type changes",
+                result.stdout,
+            )
+            self.assertIn("Selected path and parent-folder check complete.", result.stdout)
             self.assertIn("Cleanup finished with errors", result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
@@ -1674,7 +6084,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             (selected / "keep.bin").write_bytes(b"keep")
             (outside / "keep.bin").write_bytes(b"outside")
             try:
-                (selected / "linked-outside").symlink_to(outside, target_is_directory=True)
+                (selected / "linked-\u202e-outside").symlink_to(outside, target_is_directory=True)
             except OSError as exc:
                 self.skipTest(f"Could not create a temporary directory symlink: {exc}")
             results = {"categories": {"high": {"name": "High", "items": [{
@@ -1689,23 +6099,28 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertEqual((selected / "keep.bin").read_bytes(), b"keep")
             self.assertEqual((outside / "keep.bin").read_bytes(), b"outside")
-            self.assertTrue((selected / "linked-outside").exists())
+            self.assertTrue((selected / "linked-\u202e-outside").exists())
             self.assertIn("containing a reparse point", result.stdout)
+            self.assertIn("linked-?-outside", result.stdout)
+            self.assertNotIn("\u202e", result.stdout + result.stderr)
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_rechecks_nested_paths_after_backup_verification(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected"
             nested = selected / "nested"
@@ -1742,7 +6157,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertTrue(outside_sentinel.exists(), result.stdout + result.stderr)
@@ -1756,10 +6171,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected"
             nested = selected / "nested"
@@ -1821,10 +6238,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected"
             selected.mkdir()
@@ -1850,23 +6269,94 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "print(json.dumps({'status':'completed','items':[{}],'id':'mock-backup'}))\n",
                 encoding="utf-8",
             )
-            result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=90,
-            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                     "-Select", "1", "-Backup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "Generated cleanup did not finish checking the selected file after "
+                    f"backup verification. Captured output: stdout={stdout}; stderr={stderr}"
+                )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(changed_file.read_bytes(), replacement)
             self.assertIn("changed after", result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_native_delete_rechecks_file_metadata_after_path_guard(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target = Path(target_temp) / "candidate-cache"
+            target.mkdir()
+            selected_file = target / "cache.tmp"
+            selected_file.write_bytes(b"metadata-only change fixture")
+            original_contents = selected_file.read_bytes()
+            original_mtime_ns = selected_file.stat().st_mtime_ns
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(target) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": len(original_contents),
+                "size_formatted": f"{len(original_contents)} B",
+                "kind": "Directory",
+            }]}}}
+            script_path = Path(plan_temp) / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            path_guard = (
+                "                Assert-CleanupEntryPathWithinSelection $target $entry\n"
+                "                if (-not $entry.PSIsContainer -and\n"
+            )
+            self.assertIn(path_guard, script_text)
+            script_text = script_text.replace(
+                path_guard,
+                "                Assert-CleanupEntryPathWithinSelection $target $entry\n"
+                "                [System.IO.File]::SetLastWriteTimeUtc($entry.FullName, $entry.LastWriteTimeUtc.AddSeconds(5))\n"
+                "                if (-not $entry.PSIsContainer -and\n",
+                1,
+            )
+            script_path.write_text(script_text, encoding="utf-8-sig")
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(selected_file.read_bytes(), original_contents)
+            self.assertGreater(selected_file.stat().st_mtime_ns, original_mtime_ns)
+            self.assertIn("file or folder is unavailable, in use, or changed", result.stdout.lower())
 
     @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
     def test_generated_script_preserves_single_file_changed_with_timestamp_after_backup_verification(self):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        if not temp_root.is_dir():
-            self.skipTest("Windows temporary folder is unavailable")
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             changed_file = root / "cache.tmp"
             original = b"original file payload"
@@ -1877,6 +6367,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 "path": str(changed_file),
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": len(original), "size_formatted": f"{len(original)} B", "kind": "File",
+                "scan_logical_size": len(original),
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -1892,7 +6383,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1926,7 +6417,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1938,7 +6429,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             project = root / "new-project"
             project.mkdir()
@@ -1948,6 +6444,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             results = {"categories": {"high": {"name": "High", "items": [{
                 "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
                 "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
@@ -1963,12 +6460,164 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_PROJECT_MARKER=str(marker))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertTrue(marker.exists(), result.stdout + result.stderr)
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(selected.read_bytes(), b"keep once project marker appears")
+            self.assertIn("inside a project", result.stdout + result.stderr)
+            self.assertIn("Cleanup finished with errors", result.stdout)
+            self.assertIn("Backup mock-backup is retained for recovery", result.stdout)
+            self.assertNotIn("Cleanup complete!", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_stops_if_project_marker_appears_inside_selected_folder_after_inventory(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as isolated_temp,
+            mock.patch.dict(os.environ, {"TEMP": isolated_temp, "TMP": isolated_temp}),
+            mock.patch.object(tempfile, "tempdir", isolated_temp),
+            tempfile.TemporaryDirectory(dir=isolated_temp) as temp_dir,
+        ):
+            root = Path(temp_dir)
+            selected = root / "selected-cache"
+            nested = selected / "existing-subfolder"
+            nested.mkdir(parents=True)
+            cached_file = nested / "cache.bin"
+            cached_file.write_bytes(b"preserve after the folder becomes a project")
+            marker = nested / "package.json"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\", "name": "Temporary files (check for installers or builds in progress)",
+                "size": cached_file.stat().st_size, "size_formatted": "42 B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            (root / "backup.py").write_text(
+                "import json, pathlib, sys\n"
+                f"marker = pathlib.Path({str(marker)!r})\n"
+                "if len(sys.argv) > 1 and sys.argv[1] == 'verify':\n"
+                "    marker.write_text('{}', encoding='utf-8')\n"
+                "    sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
+                    capture_output=True, text=True, timeout=180,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "Folder project-marker recheck exceeded 180 seconds.\n"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                )
+            self.assertTrue(marker.exists(), result.stdout + result.stderr)
+            self.assertEqual(cached_file.read_bytes(), b"preserve after the folder becomes a project")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("project", result.stdout.lower() + result.stderr.lower())
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_rechecks_project_markers_before_removing_folder_files(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+            root = Path(temp_dir)
+            selected = root / "selected-cache"
+            nested = selected / "existing-subfolder"
+            nested.mkdir(parents=True)
+            cached_file = nested / "cache.bin"
+            payload = b"preserve after the project marker appears"
+            cached_file.write_bytes(payload)
+            marker = nested / "package.json"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected) + "\\",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "size": len(payload), "size_formatted": f"{len(payload)} B", "kind": "Directory",
+            }]}}}
+            script_path = root / "clean.ps1"
+            with mock.patch.object(analyze, "_directory_has_project_marker", return_value=False):
+                analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
+            script_text = script_path.read_text(encoding="utf-8-sig")
+            final_project_check = (
+                'Write-Host "Final project check complete; $freshProjectCheckIndex items rechecked." '
+                '-ForegroundColor Gray'
+            )
+            self.assertIn(final_project_check, script_text)
+            marker_creation = (
+                f"[System.IO.File]::WriteAllText({analyze._ps_literal(str(marker))}, '{{}}')"
+            )
+            script_path.write_text(
+                script_text.replace(final_project_check, final_project_check + "\n" + marker_creation, 1),
+                encoding="utf-8-sig",
+            )
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
+                 "-Select", "1", "-NoBackup", "-Force"],
+                capture_output=True, text=True, timeout=180,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(marker.is_file(), result.stdout + result.stderr)
+            self.assertEqual(cached_file.read_bytes(), payload, result.stdout + result.stderr)
+            self.assertIn("Final project check complete", result.stdout)
+            self.assertIn("inside a project", result.stdout.lower() + result.stderr.lower())
+            self.assertNotIn("Removed 1 of 1 selected files", result.stdout)
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_script_rechecks_agent_settings_folder_after_backup(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is not installed")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "new-project"
+            project.mkdir()
+            selected = project / "build.tmp"
+            selected.write_bytes(b"keep once project guidance appears")
+            marker = project / ".cursor"
+            results = {"categories": {"high": {"name": "High", "items": [{
+                "path": str(selected), "name": "Temporary files (check for installers or builds in progress)",
+                "size": selected.stat().st_size, "size_formatted": "32 B", "kind": "File",
+                "scan_logical_size": selected.stat().st_size,
+            }]}}}
+            script_path = root / "clean.ps1"
+            analyze.generate_clean_script(results, str(script_path))
+            (root / "backup.py").write_text(
+                "import json, os, pathlib, sys\n"
+                "if sys.argv[1] == 'verify':\n"
+                "    pathlib.Path(os.environ['CLEANR_TEST_PROJECT_MARKER']).mkdir()\n"
+                "    sys.exit(0)\n"
+                "start=sys.argv.index('--paths')+1; end=sys.argv.index('--json')\n"
+                "paths=sys.argv[start:end]\n"
+                "print(json.dumps({'status':'completed','items':[{} for _ in paths],'id':'mock-backup'}))\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ, CLEANR_TEST_PROJECT_MARKER=str(marker))
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
+                capture_output=True, text=True, timeout=90, env=env,
+            )
+            self.assertTrue(marker.exists(), result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(selected.read_bytes(), b"keep once project guidance appears")
             self.assertIn("inside a project", result.stdout + result.stderr)
             self.assertIn("Cleanup finished with errors", result.stdout)
             self.assertIn("Backup mock-backup is retained for recovery", result.stdout)
@@ -1980,7 +6629,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._isolated_windows_profile() as isolated_profile, tempfile.TemporaryDirectory(
+            dir=isolated_profile / "AppData" / "Local" / "Temp"
+        ) as temp_dir:
             root = Path(temp_dir)
             missing = root / "missing"
             selected = root / "selected"
@@ -1996,6 +6647,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             ]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             backup_log = root / "backup-targets.txt"
             (root / "backup.py").write_text(
                 "import json, os, sys\n"
@@ -2009,7 +6661,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
             result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Force"],
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "2", "-Backup", "-Force"],
                 capture_output=True, text=True, timeout=90, env=env,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
@@ -2022,8 +6674,12 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        temp_root = Path.home() / "AppData" / "Local" / "Temp"
-        with tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
+        with (
+            self._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as temp_dir,
+        ):
             root = Path(temp_dir)
             selected = root / "selected[1]"
             selected.mkdir()
@@ -2045,7 +6701,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             )
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                capture_output=True, text=True, timeout=90,
+                capture_output=True, text=True, timeout=180,
             )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertFalse(marker.exists(), result.stdout + result.stderr)
@@ -2074,15 +6730,27 @@ class AnalyzeSafetyTests(unittest.TestCase):
             backup_log = root / "backup-targets.txt"
             (root / "backup.py").write_text("raise SystemExit('backup must not run after cancel')\n", encoding="utf-8")
             env = dict(os.environ, CLEANR_TEST_BACKUP_LOG=str(backup_log))
-            result = subprocess.run(
-                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
-                input="1\nQ\n", capture_output=True, text=True, timeout=90, env=env,
-            )
+            try:
+                result = subprocess.run(
+                    [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+                    input="1\nQ\n", capture_output=True, text=True, timeout=180, env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
+                self.fail(
+                    "Cancelled cleanup preview exceeded 180 seconds.\n"
+                    f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             self.assertTrue(marker.exists())
-            self.assertIn("Folder contents preview (direct children only", result.stdout)
+            self.assertIn("Preview of files and folders inside each selected folder", result.stdout)
             self.assertIn("keep.bin", result.stdout)
-            self.assertIn("Additional direct contents are not shown.", result.stdout)
+            self.assertIn("Preview limited to 12 direct items. Other contents may also be removed unless they are protected, project data, or higher-risk candidates.", result.stdout)
             preview_rows = [line for line in result.stdout.splitlines() if "preview-" in line or "visible-cache.bin" in line]
             self.assertLessEqual(len(preview_rows), 12)
             self.assertFalse(backup_log.exists())
@@ -2092,7 +6760,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         powershell = shutil.which("pwsh") or shutil.which("powershell")
         if not powershell:
             self.skipTest("PowerShell is not installed")
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._isolated_windows_temp_root() as temp_root, tempfile.TemporaryDirectory(dir=temp_root) as temp_dir:
             root = Path(temp_dir)
             target = root / "target"
             target.mkdir()
@@ -2104,6 +6772,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             }]}}}
             script_path = root / "clean.ps1"
             analyze.generate_clean_script(results, str(script_path))
+            self._stop_generated_plan_project_walk_at_temp(script_path)
             backup_helper = root / "backup.py"
             for status, items in (("partial", "[]"), ("completed", "[]")):
                 with self.subTest(status=status, items=items):
@@ -2112,10 +6781,22 @@ class AnalyzeSafetyTests(unittest.TestCase):
                         f"print(json.dumps({{'status': {status!r}, 'items': {items}, 'id': 'mock-backup'}}))\n",
                         encoding="utf-8",
                     )
-                    result = subprocess.run(
-                        [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Force"],
-                        capture_output=True, text=True, timeout=90,
-                    )
+                    try:
+                        result = subprocess.run(
+                            [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path), "-Select", "1", "-Backup", "-Force"],
+                            capture_output=True, text=True, timeout=180,
+                        )
+                    except subprocess.TimeoutExpired as exc:
+                        stdout = exc.stdout or ""
+                        stderr = exc.stderr or ""
+                        if isinstance(stdout, bytes):
+                            stdout = stdout.decode("utf-8", errors="replace")
+                        if isinstance(stderr, bytes):
+                            stderr = stderr.decode("utf-8", errors="replace")
+                        self.fail(
+                            f"Backup-failure cleanup exceeded 180 seconds for status {status}.\n"
+                            f"stdout:\n{stdout}\nstderr:\n{stderr}"
+                        )
                     self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertIn("Backup was incomplete. No cleanup was performed.", result.stderr + result.stdout)
                     self.assertNotIn("Starting cleanup...", result.stdout)
@@ -2129,7 +6810,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
 
     def test_generated_plan_rejects_protected_downloads_even_from_imported_data(self):
         results = {"categories": {"high": {"name": "High", "items": [{
-            "path": "C:\\Users\\Jordan\\Downloads\\PhoenixPE\\Temp\\dotnet\\",
+            "path": "C:\\Users\\ExampleUser\\Downloads\\ExampleProject\\Temp\\dotnet\\",
             "name": "Temporary files (check for installers or builds in progress)", "size": 100, "size_formatted": "100 B", "kind": "Directory",
         }]}}}
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2139,17 +6820,17 @@ class AnalyzeSafetyTests(unittest.TestCase):
     def test_generated_plan_rejects_unmatched_or_mislabeled_candidates(self):
         invalid_items = [
             {
-                "path": r"C:\Users\Jordan\OneDriveBackup\Important",
+                "path": r"C:\Users\ExampleUser\OneDriveBackup\Important",
                 "name": "Temporary files (check for installers or builds in progress)",
                 "size": 100, "size_formatted": "100 B", "kind": "File",
             },
             {
-                "path": r"C:\Users\Jordan\AppData\Local\Temp\ordinary.tmp",
+                "path": r"C:\Users\ExampleUser\AppData\Local\Temp\ordinary.tmp",
                 "name": "Crash dumps",
                 "size": 100, "size_formatted": "100 B", "kind": "File",
             },
             {
-                "path": r"C:\Users\Jordan\.gradle\caches\modules",
+                "path": r"C:\Users\ExampleUser\.gradle\caches\modules",
                 "name": "Gradle cache",
                 "size": 100, "size_formatted": "100 B", "kind": "Directory",
             },
@@ -2197,7 +6878,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
             "path": path, "name": "Gradle cache", "size": 100,
             "size_formatted": "100 B", "kind": "Directory",
         }]
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
+                os.environ, {"GRADLE_USER_HOME": r"Z:\DriveCleanrTest\.gradle"}), \
+             mock.patch.object(scan, "_windows_drive_type", return_value=3):
             output = Path(temp_dir) / "clean-all.ps1"
             analyze.generate_clean_script({"categories": categories}, str(output), priority="all")
             self.assertIn(path, output.read_text(encoding="utf-8-sig"))
@@ -2242,8 +6925,9 @@ class AnalyzeSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "existing.ps1"
             output_path.write_text("keep this existing file", encoding="utf-8")
-            with self.assertRaises(FileExistsError):
-                analyze.generate_clean_script(results, str(output_path))
+            with mock.patch.object(analyze, "_live_file_size_matches_scan", return_value=True):
+                with self.assertRaises(FileExistsError):
+                    analyze.generate_clean_script(results, str(output_path))
             self.assertEqual(output_path.read_text(encoding="utf-8"), "keep this existing file")
             list_path = Path(temp_dir) / "existing.txt"
             list_path.write_text("keep this list", encoding="utf-8")
@@ -2289,7 +6973,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
                  mock.patch("builtins.input", side_effect=["2", str(target / "items.txt"), "", "0"]), \
                  mock.patch("builtins.print") as output:
                 analyze.run_tui(initial_csv=str(csv_path))
-        self.assertIn("Could not write candidate list", " ".join(str(call) for call in output.call_args_list))
+        self.assertIn("Could not save the review list", " ".join(str(call) for call in output.call_args_list))
         self.assertFalse((target / "items.txt").exists())
 
     def test_negative_minimum_size_is_rejected(self):
@@ -2302,7 +6986,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         finally:
             os.unlink(csv_path)
 
-    def test_analyzer_reports_progress_for_large_exports(self):
+    def test_analyzer_reports_csv_byte_percentage_progress(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             csv_path = Path(temp_dir) / "scan.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -2315,7 +6999,11 @@ class AnalyzeSafetyTests(unittest.TestCase):
             progress = []
             with mock.patch.object(analyze, "ANALYSIS_PROGRESS_INTERVAL", 1):
                 analyze.analyze_csv(str(csv_path), min_size_mb=0, progress_callback=progress.append)
-        self.assertEqual(progress, [1, 2])
+        self.assertGreater(progress[0], 0)
+        self.assertLess(progress[0], 100)
+        self.assertEqual(progress[-1], 100)
+        self.assertEqual(progress, sorted(progress))
+        self.assertTrue(all(0 <= value <= 100 for value in progress))
 
     def test_analyzer_skips_paths_missing_since_the_scan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2332,8 +7020,165 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(results["stale_candidate_count"], 1)
         self.assertTrue(all(not category["items"] for category in results["categories"].values()))
 
+    def test_analyzer_skips_temp_file_whose_size_changed_since_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"current file contents")
+            csv_path = Path(temp_dir) / "scan.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["File Name", "Size"])
+                writer.writeheader()
+                writer.writerow({"File Name": str(candidate), "Size": str(candidate.stat().st_size + 1)})
+
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+        self.assertEqual(results["changed_candidate_count"], 1)
+        self.assertTrue(all(not category["items"] for category in results["categories"].values()))
+
+    def test_live_file_size_check_fails_closed_when_stat_is_denied(self):
+        with mock.patch.object(analyze.os, "stat", side_effect=PermissionError("access denied")):
+            self.assertFalse(analyze._live_file_size_matches_scan(
+                r"C:\Users\A\AppData\Local\Temp\candidate.tmp", 20,
+            ))
+
+    def test_cleanup_plan_generation_rejects_file_size_changed_after_analysis(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"changed after analysis")
+            item = {
+                "path": str(candidate),
+                "size": 10,
+                "scan_logical_size": 10,
+                "size_formatted": "10 B",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "safe": True,
+                "kind": "File",
+            }
+            results = {"categories": {
+                "high": {"name": "High priority", "items": [item]},
+                "medium": {"name": "Medium priority", "items": []},
+                "low": {"name": "Low priority", "items": []},
+            }}
+
+            with self.assertRaisesRegex(ValueError, "file size changed since the scan"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "stale.clean.ps1"),
+                    priority="high", selected_paths=[str(candidate)],
+                )
+
+    def test_cleanup_plan_generation_rejects_file_without_scanned_logical_size(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            candidate = Path(temp_dir) / "candidate.tmp"
+            candidate.write_bytes(b"current file contents")
+            item = {
+                "path": str(candidate),
+                "size": candidate.stat().st_size,
+                "size_formatted": f"{candidate.stat().st_size} B",
+                "name": "Temporary files (check for installers or builds in progress)",
+                "safe": True,
+                "kind": "File",
+            }
+            results = {"categories": {
+                "high": {"name": "High priority", "items": [item]},
+                "medium": {"name": "Medium priority", "items": []},
+                "low": {"name": "Low priority", "items": []},
+            }}
+
+            with self.assertRaisesRegex(ValueError, "missing the scanned file size"):
+                analyze.generate_clean_script(
+                    results, str(Path(temp_dir) / "missing-scan-size.clean.ps1"),
+                    priority="high", selected_paths=[str(candidate)],
+                )
+
+    @unittest.skipUnless(os.name == "nt", "generated cleanup scripts target Windows")
+    def test_generated_plan_refuses_file_resized_after_plan_creation(self):
+        powershell = shutil.which("pwsh") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("PowerShell is required")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir) / "work"
+            work_dir.mkdir()
+            candidate = work_dir / "candidate.tmp"
+            candidate.write_bytes(b"original scanned contents")
+            csv_path = Path(temp_dir) / "scan.csv"
+            with csv_path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["File Name", "Size"])
+                writer.writeheader()
+                writer.writerow({"File Name": str(candidate), "Size": str(candidate.stat().st_size)})
+            results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+            selected = results["categories"]["high"]["items"]
+            self.assertEqual(len(selected), 1)
+            plan_path = Path(temp_dir) / "stale.clean.ps1"
+            analyze.generate_clean_script(
+                results, str(plan_path), priority="high", selected_paths=[str(candidate)]
+            )
+            candidate.write_bytes(candidate.read_bytes() + b" changed")
+
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(plan_path),
+                 "-Force", "-NoBackup"],
+                capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("size changed since the scan", result.stdout + result.stderr)
+            self.assertEqual(candidate.read_bytes(), b"original scanned contents changed")
+
+
+    def test_analysis_skips_mapped_network_entries_and_reports_the_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            csv_path = Path(temp_dir) / "synthetic-scan.csv"
+            csv_path.write_text(
+                "File Name,Size\nZ:\\Users\\Example\\AppData\\Local\\Temp\\cache.tmp,104857600\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(analyze.os, "name", "nt"), \
+                 mock.patch.object(scan, "_windows_drive_type", return_value=4):
+                results = analyze.analyze_csv(str(csv_path), min_size_mb=0)
+
+        self.assertEqual(results["non_local_drive_path_count"], 1)
+        self.assertEqual(
+            sum(len(category["items"]) for category in results["categories"].values()), 0
+        )
+        output = io.StringIO()
+        with redirect_stdout(output):
+            analyze.print_report(results)
+        self.assertIn("Skipped 1 scan entries on network, optical, unavailable, or unrecognized drives", output.getvalue())
+
 
 class ScanSafetyTests(unittest.TestCase):
+    def _capture_wiztree_command(self, version, max_depth=0):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            captured = {}
+
+            def fake_popen(command, **kwargs):
+                captured["command"] = command
+                export_arg = next(arg for arg in command if arg.startswith("/export="))
+                export_path = Path(export_arg.split("=", 1)[1])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
+                return object()
+
+            try:
+                with mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
+                     mock.patch.object(scan, "_get_windows_file_version", return_value=version), \
+                     mock.patch.object(scan, "check_admin", return_value=False), \
+                     mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                     mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                     mock.patch("builtins.print"):
+                    result = scan.scan(
+                        "C:", max_depth=max_depth, app="wiztree", wiztree_mode="standard"
+                    )
+            finally:
+                scan.DATA_DIR = old_data_dir
+        return result, captured["command"]
+
     def test_scan_reparse_checks_fail_closed_when_metadata_is_unreadable(self):
         with mock.patch.object(scan.os.path, "islink", return_value=False), \
              mock.patch.object(scan.os.path, "isjunction", return_value=False, create=True), \
@@ -2357,13 +7202,75 @@ class ScanSafetyTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"WIZTREE_PATH": str(launcher)}):
                 self.assertEqual(scan.find_wiztree(), str(worker))
 
+    def test_custom_executable_paths_support_portable_scanners(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            portable_dir = Path(temp_dir) / "portable tools"
+            portable_dir.mkdir()
+            wiztree = portable_dir / "WizTree64.exe"
+            windirstat = portable_dir / "WinDirStat.exe"
+            wiztree.touch()
+            windirstat.touch()
+
+            with mock.patch.dict(os.environ, {"WIZTREE_PATH": str(wiztree)}):
+                self.assertEqual(scan.find_wiztree(), str(wiztree))
+            with mock.patch.dict(os.environ, {"WINDIRSTAT_PATH": str(windirstat)}):
+                self.assertEqual(scan.find_windirstat(), str(windirstat))
+
+    def test_scanner_discovery_accepts_quoted_environment_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            portable_dir = Path(temp_dir) / "portable scanner tools"
+            portable_dir.mkdir()
+            wiztree = portable_dir / "WizTree64.exe"
+            windirstat = portable_dir / "WinDirStat.exe"
+            wiztree.touch()
+            windirstat.touch()
+
+            with mock.patch.dict(os.environ, {"WIZTREE_PATH": f'"{wiztree}"'}):
+                self.assertEqual(scan.find_wiztree(), str(wiztree))
+            with mock.patch.dict(os.environ, {"WINDIRSTAT_PATH": f'"{windirstat}"'}):
+                self.assertEqual(scan.find_windirstat(), str(windirstat))
+
+    def test_manual_scanner_path_requires_an_existing_absolute_exe(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            text_file = executable.with_suffix(".txt")
+            text_file.touch()
+
+            self.assertEqual(scan.normalize_scanner_executable_path(f'"{executable}"'), str(executable))
+            self.assertIsNone(scan.normalize_scanner_executable_path("relative\\WizTree64.exe"))
+            self.assertIsNone(scan.normalize_scanner_executable_path(str(text_file)))
+            self.assertIsNone(scan.normalize_scanner_executable_path(str(executable.with_name("missing.exe"))))
+            self.assertIsNone(scan.normalize_scanner_executable_path(None))
+
+    def test_manual_wiztree_launcher_path_prefers_paired_64_bit_worker(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher = Path(temp_dir) / "WizTree.exe"
+            worker = Path(temp_dir) / "WizTree64.exe"
+            launcher.touch()
+            worker.touch()
+            self.assertEqual(
+                scan.normalize_scanner_executable_path(str(launcher), app="wiztree"),
+                str(worker),
+            )
+
     def test_scan_target_accepts_drive_roots_and_existing_local_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            self.assertEqual(scan._normalize_scan_target("d:"), "D:")
+            self.assertEqual(scan._normalize_scan_target("c:"), "C:")
             self.assertEqual(scan._normalize_scan_target("C:\\"), "C:\\")
             self.assertTrue(scan._is_whole_drive_target("C:\\"))
             self.assertEqual(scan._normalize_scan_target(temp_dir), os.path.normpath(temp_dir))
             self.assertFalse(scan._is_whole_drive_target(temp_dir))
+
+    def test_scan_target_rejects_mapped_network_drives(self):
+        with mock.patch.object(scan, "_windows_drive_type", return_value=4):
+            with self.assertRaisesRegex(ValueError, "mapped network"):
+                scan._normalize_scan_target("Z:")
+            if os.name == "nt":
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    with self.assertRaisesRegex(ValueError, "mapped network"):
+                        scan._normalize_scan_target(temp_dir)
 
     def test_scan_target_rejects_missing_relative_and_network_folders(self):
         for target in ("relative\\folder", r"\\server\share", "Z:\\missing\\folder"):
@@ -2371,8 +7278,13 @@ class ScanSafetyTests(unittest.TestCase):
                 scan._normalize_scan_target(target)
 
     def test_scanner_choice_accepts_windirstat_alias(self):
-        with mock.patch("builtins.input", side_effect=["x", "2"]):
-            self.assertEqual(scan.choose_scanner(), "windirstat")
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["x", "2"]) as input_mock:
+            with redirect_stdout(output):
+                self.assertEqual(scan.choose_scanner(), "windirstat")
+
+        self.assertIn("Both apps can scan a drive or folder", output.getvalue())
+        self.assertIn("1 = WizTree; 2 = WinDirStat; Q = cancel", input_mock.call_args_list[-1].args[0])
 
     def test_scanner_and_mode_prompts_accept_explicit_cancellation(self):
         with mock.patch("builtins.input", return_value="q"), redirect_stdout(io.StringIO()):
@@ -2384,12 +7296,33 @@ class ScanSafetyTests(unittest.TestCase):
             with self.subTest(answer=answer), mock.patch("builtins.input", return_value=answer):
                 self.assertEqual(scan.choose_wiztree_mode(), expected)
 
+    def test_wiztree_mode_prompt_explains_access_and_each_choice(self):
+        output = io.StringIO()
+        with mock.patch("builtins.input", return_value="3") as input_mock, redirect_stdout(output):
+            scan.choose_wiztree_mode()
+
+        prompt = output.getvalue()
+        self.assertIn("opened with 'Run as administrator'", prompt)
+        self.assertIn("NTFS is a common Windows file system", prompt)
+        self.assertIn("Automatic (recommended)", prompt)
+        self.assertIn("Drive Cleanr chooses Fast for a whole drive", prompt)
+        self.assertIn("Fast reads the file table directly", prompt)
+        self.assertIn("other file systems use normal Windows scanning", prompt)
+        self.assertIn("Requires a whole drive and Administrator access", prompt)
+        self.assertIn("needs no Administrator access", prompt)
+        self.assertIn("works on drives or folders", prompt)
+        self.assertIn(
+            "1 = Automatic; 2 = Fast full-drive; 3 = Standard; Enter = 1; Q = cancel",
+            input_mock.call_args.args[0],
+        )
+
     def test_wiztree_auto_mode_uses_mft_only_for_elevated_drive_scans(self):
         for elevated, expected_flag in ((False, "/admin=0"), (True, "/admin=1")):
             with self.subTest(elevated=elevated), tempfile.TemporaryDirectory() as temp_dir:
                 old_data_dir = scan.DATA_DIR
                 scan.DATA_DIR = str(Path(temp_dir) / "data")
                 captured = {}
+                output = io.StringIO()
 
                 def fake_popen(command, **_kwargs):
                     captured["command"] = command
@@ -2404,14 +7337,64 @@ class ScanSafetyTests(unittest.TestCase):
                          mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
                          mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                          mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
-                         mock.patch("builtins.print"):
-                        result = scan.scan("D:", app="wiztree")
+                         redirect_stdout(output):
+                        result = scan.scan("C:", app="wiztree")
                 finally:
                     scan.DATA_DIR = old_data_dir
                 self.assertTrue(result.endswith(".csv"))
                 self.assertIn(expected_flag, captured["command"])
                 expected_mode = "standard" if expected_flag == "/admin=0" else "fast"
                 self.assertTrue(Path(result).name.startswith(f"scan_wiztree_{expected_mode}_"))
+                if elevated:
+                    self.assertIn("NTFS uses direct file-table scanning", output.getvalue())
+                    self.assertIn("other file systems use normal Windows scanning", output.getvalue())
+
+    def test_scan_uses_a_manually_selected_scanner_executable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            executable = root / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            data_dir = root / "scan-data"
+            captured = {}
+
+            def write_mock_export(command, **_kwargs):
+                captured["command"] = command
+                export_path = Path(next(
+                    argument.split("=", 1)[1] for argument in command
+                    if argument.startswith("/export=")
+                ))
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
+                return object()
+
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "check_admin", return_value=False), \
+                 mock.patch.object(scan, "find_wiztree", side_effect=AssertionError("auto-discovery should not run")), \
+                 mock.patch.object(scan, "_path_has_reparse_component", return_value=False), \
+                 mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=write_mock_export), \
+                 redirect_stdout(io.StringIO()):
+                result = scan.scan(
+                    "C:", app="wiztree", wiztree_mode="standard",
+                    scanner_executable_path=str(executable),
+                )
+
+            self.assertTrue(result and Path(result).is_file())
+            self.assertEqual(captured["command"][0], str(executable))
+
+    def test_scan_does_not_launch_an_invalid_manual_scanner_path(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "check_admin", return_value=False), \
+             mock.patch.object(scan, "find_wiztree", side_effect=AssertionError("manual path must not fall back")), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             redirect_stdout(output):
+            result = scan.scan(
+                "C:", app="wiztree", wiztree_mode="standard",
+                scanner_executable_path="relative\\missing.exe",
+            )
+        self.assertIsNone(result)
+        launch.assert_not_called()
+        self.assertIn("full path to an existing .exe file", output.getvalue())
 
     def test_wiztree_auto_mode_uses_standard_for_folders_even_when_elevated(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as temp_dir:
@@ -2444,9 +7427,9 @@ class ScanSafetyTests(unittest.TestCase):
         with mock.patch.object(scan, "check_admin", return_value=False), \
              mock.patch.object(scan.subprocess, "Popen") as launch, \
              mock.patch("builtins.print") as output:
-            self.assertIsNone(scan.scan("D:", app="wiztree", wiztree_mode="fast"))
+            self.assertIsNone(scan.scan("C:", app="wiztree", wiztree_mode="fast"))
         launch.assert_not_called()
-        self.assertIn("requires administrator privileges", " ".join(str(c) for c in output.call_args_list))
+        self.assertIn("requires an Administrator terminal", " ".join(str(c) for c in output.call_args_list))
 
     def test_wiztree_fast_mode_refuses_folder_targets_before_launch(self):
         with tempfile.TemporaryDirectory() as folder, \
@@ -2455,7 +7438,56 @@ class ScanSafetyTests(unittest.TestCase):
              mock.patch("builtins.print") as output:
             self.assertIsNone(scan.scan(folder, app="wiztree", wiztree_mode="fast"))
         launch.assert_not_called()
-        self.assertIn("only available for whole-drive targets", " ".join(str(c) for c in output.call_args_list))
+        self.assertIn("only for whole drives", " ".join(str(c) for c in output.call_args_list))
+
+    @unittest.skipUnless(os.name == "nt", "WinDirStat version checks target Windows")
+    def test_windirstat_old_version_is_rejected_before_launch(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_windirstat", return_value="/mock/WinDirStat.exe"), \
+             mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 5, 9, 0)), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             redirect_stdout(output):
+            self.assertIsNone(scan.scan("C:", app="windirstat"))
+
+        self.assertIn("WinDirStat 2.5.9.0 is too old", output.getvalue())
+        self.assertIn("Update to WinDirStat 2.6.0 or newer", output.getvalue())
+        launch.assert_not_called()
+
+    def test_wiztree_old_version_is_rejected_before_launch(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
+             mock.patch.object(scan, "_get_windows_file_version", return_value=(3, 17, 9, 0)), \
+             mock.patch.object(scan, "check_admin", return_value=False), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             redirect_stdout(output):
+            self.assertIsNone(scan.scan("C:", app="wiztree", wiztree_mode="standard"))
+
+        self.assertIn("WizTree 3.17.9.0 is too old", output.getvalue())
+        self.assertIn("Update to WizTree 3.18.0 or newer", output.getvalue())
+        launch.assert_not_called()
+
+    def test_wiztree_refuses_unsupported_depth_limit_before_launch(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_wiztree", return_value="/mock/WizTree64.exe"), \
+             mock.patch.object(scan, "_get_windows_file_version", return_value=(4, 1, 0, 0)), \
+             mock.patch.object(scan, "check_admin", return_value=False), \
+             mock.patch.object(scan.subprocess, "Popen") as launch, \
+             redirect_stdout(output):
+            self.assertIsNone(
+                scan.scan("C:", max_depth=3, app="wiztree", wiztree_mode="standard")
+            )
+
+        self.assertIn("cannot limit how many folder levels", output.getvalue())
+        self.assertIn("Choose unlimited depth", output.getvalue())
+        self.assertIn("WizTree 4.02 or newer", output.getvalue())
+        launch.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows executable version resources are platform-specific")
+    def test_windows_executable_version_reader_returns_four_numeric_parts(self):
+        version = scan._get_windows_file_version(sys.executable)
+        self.assertIsNotNone(version)
+        self.assertEqual(len(version), 4)
+        self.assertTrue(all(isinstance(part, int) and part >= 0 for part in version))
 
     def test_windirstat_launches_documented_save_to_csv_command(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2472,103 +7504,360 @@ class ScanSafetyTests(unittest.TestCase):
 
             try:
                 with mock.patch.object(scan, "find_windirstat", return_value="/mock/WinDirStat.exe"), \
+                     mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0, 0)), \
                      mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                      mock.patch.object(scan, "wait_for_scan_process", return_value=True), \
                      mock.patch("builtins.print") as output:
-                    result = scan.scan("D:", app="windirstat")
+                    result = scan.scan("C:", app="windirstat")
                     output_text = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
             finally:
                 scan.DATA_DIR = old_data_dir
         self.assertTrue(result.endswith(".csv"))
         self.assertEqual(captured["command"][:2], ["/mock/WinDirStat.exe", "/SaveTo"])
-        self.assertEqual(captured["command"][-1], "D:")
+        self.assertEqual(captured["command"][-1], "C:")
         self.assertNotEqual(captured["command"][2], result)
         self.assertEqual(Path(captured["command"][2]).name, Path(result).name)
         self.assertEqual(Path(captured["command"][2]).parent.name, ".incomplete")
         self.assertNotIn("Command:", output_text)
         self.assertNotIn("python scan.py --cleanup", output_text)
-        self.assertIn("applies its saved filters and scan exclusions", output_text)
-        self.assertIn("Previous scans and cleanup plans were kept.", output_text)
+        self.assertIn("follows its saved filters, exclusions, and other scan settings", output_text)
+        self.assertIn("can leave files out of the results", output_text)
+        self.assertIn("Earlier scans and cleanup plans were kept.", output_text)
+
+    def test_wiztree_318_scans_with_version_independent_export_options(self):
+        result, command = self._capture_wiztree_command((3, 18, 0, 0))
+        self.assertTrue(result.endswith(".csv"))
+        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "C:"])
+        self.assertIn("/admin=0", command)
+        self.assertIn("/exportfolders=1", command)
+        self.assertIn("/exportfiles=1", command)
+        self.assertNotIn("/sortby=2", command)
+        self.assertNotIn("/exportdrivecapacity=1", command)
+        self.assertFalse(any(arg.startswith("/exportmaxdepth=") for arg in command))
+
+    def test_wiztree_402_supports_depth_limit_before_sort_option(self):
+        result, command = self._capture_wiztree_command((4, 2, 0, 0), max_depth=3)
+        self.assertTrue(result.endswith(".csv"))
+        self.assertIn("/exportmaxdepth=3", command)
+        self.assertNotIn("/sortby=2", command)
+        self.assertNotIn("/exportdrivecapacity=1", command)
+
+    def test_wiztree_unreadable_version_attempts_requested_depth(self):
+        result, command = self._capture_wiztree_command(None, max_depth=3)
+        self.assertTrue(result.endswith(".csv"))
+        self.assertIn("/exportmaxdepth=3", command)
+        self.assertNotIn("/sortby=2", command)
+        self.assertNotIn("/exportdrivecapacity=1", command)
+
+    def test_wiztree_424_uses_supported_optional_export_options(self):
+        result, command = self._capture_wiztree_command((4, 24, 9, 0), max_depth=3)
+        self.assertTrue(result.endswith(".csv"))
+        self.assertIn("/sortby=2", command)
+        self.assertNotIn("/exportdrivecapacity=1", command)
+        self.assertIn("/exportmaxdepth=3", command)
+
+    def test_wiztree_425_launches_documented_csv_export_options(self):
+        result, command = self._capture_wiztree_command((4, 25, 0, 0), max_depth=3)
+        self.assertTrue(result.endswith(".csv"))
+        self.assertEqual(command[:2], ["/mock/WizTree64.exe", "C:"])
+        self.assertIn("/admin=0", command)
+        self.assertIn("/exportfolders=1", command)
+        self.assertIn("/exportfiles=1", command)
+        self.assertIn("/sortby=2", command)
+        self.assertIn("/exportdrivecapacity=1", command)
+        self.assertIn("/exportmaxdepth=3", command)
 
     def test_windirstat_rejects_wiztree_only_export_options(self):
         for options in ({"max_depth": 3}, {"include_files": False}, {"wiztree_mode": "standard"}):
             with self.subTest(options=options), mock.patch("builtins.print") as output, \
                  mock.patch.object(scan.subprocess, "Popen") as launch:
-                self.assertIsNone(scan.scan("D:", app="windirstat", **options))
+                self.assertIsNone(scan.scan("C:", app="windirstat", **options))
                 launch.assert_not_called()
-                self.assertIn("supported only by WizTree", " ".join(str(c) for c in output.call_args_list))
+                message = " ".join(str(c) for c in output.call_args_list)
+                if not options.get("include_files", True):
+                    self.assertIn("use WizTree to scan folders only", message)
+                else:
+                    self.assertIn("supported only by WizTree", message)
 
     def test_guided_scan_runs_chosen_scanner_then_opens_review(self):
         output = io.StringIO()
+        detected_scanner = r"C:\Program Files\WinDirStat\WinDirStat.exe"
         with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value=detected_scanner) as find_scanner, \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui") as run_review, \
-             mock.patch("builtins.input", side_effect=["D:", "", ""]) as input_mock, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", ""]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=True, max_depth=0, timeout=1800, app="windirstat")
+        run_scan.assert_called_once_with(
+            drive="C:", include_files=True, max_depth=0, timeout=1800,
+            app="windirstat", scanner_executable_path=detected_scanner,
+        )
+        find_scanner.assert_called_once_with()
         run_review.assert_called_once_with(initial_csv="data/scan_test.csv")
         prompts = [call.args[0] for call in input_mock.call_args_list]
         self.assertFalse(any("individual files" in prompt for prompt in prompts))
         self.assertNotIn("python scan.py", output.getvalue())
         self.assertNotIn("python analyze.py", output.getvalue())
 
+    def test_guided_scan_retries_invalid_post_scan_review_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
+             mock.patch.object(analyze, "run_tui") as run_review, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", "maybe", "n"]) as input_mock, \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+
+        run_review.assert_not_called()
+        self.assertIn("Enter Y for Yes or N for No.", output.getvalue())
+        self.assertIn("Choose Review a previous scan from the main menu", output.getvalue())
+        self.assertIn(
+            "Enter = Yes; N = No)",
+            input_mock.call_args_list[3].args[0],
+        )
+
+    def test_post_scan_review_prompt_does_not_offer_duplicate_cancel_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value="mock-WinDirStat.exe"), \
+             mock.patch.object(scan, "scan", return_value="data/scan_test.csv"), \
+             mock.patch.object(analyze, "run_tui") as run_review, \
+             mock.patch("builtins.input", side_effect=["", "C:", "", "q", "n"]) as input_mock, \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+
+        run_review.assert_not_called()
+        self.assertIn("Enter Y for Yes or N for No.", output.getvalue())
+        self.assertIn("Scan saved. Choose Review a previous scan from the main menu", output.getvalue())
+        self.assertNotIn("Q = cancel", input_mock.call_args_list[3].args[0])
+
+    def test_main_menu_has_one_explained_exit_choice(self):
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["q", "0"]) as input_mock, \
+             redirect_stdout(output):
+            drive_cleaner.main_menu()
+
+        self.assertIn("Choose 1, 2, 3, or 4, or enter 0 to exit.", output.getvalue())
+        self.assertIn("Goodbye.", output.getvalue())
+        self.assertNotIn("Q = exit", input_mock.call_args_list[0].args[0])
+
+    def test_backup_menu_has_one_explained_return_choice(self):
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["q", "0"]) as input_mock, \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        self.assertIn("Choose 0, 1, 2, 3, or 4.", output.getvalue())
+        self.assertNotIn("Q = back", input_mock.call_args_list[0].args[0])
+
+    def test_guided_scan_can_locate_a_portable_scanner_when_discovery_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            output = io.StringIO()
+            with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+                 mock.patch.object(scan, "find_wiztree", return_value=None), \
+                 mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+                 mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "relative\\missing.exe", f'"{executable}"', "C:", "y", "0", "30",
+                 ]), \
+                 redirect_stdout(output):
+                drive_cleaner._scan_flow()
+
+            run_scan.assert_called_once_with(
+                drive="C:", include_files=True, max_depth=0, timeout=1800,
+                app="wiztree", wiztree_mode="auto",
+                scanner_executable_path=str(executable),
+            )
+            self.assertIn("could not find WizTree automatically", output.getvalue())
+            self.assertIn("That is not an existing .exe file", output.getvalue())
+            self.assertIn("full path to the scanner's .exe file", output.getvalue())
+
+    def test_guided_scan_can_choose_an_alternate_scanner_when_one_is_found(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WizTree64.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+                 mock.patch.object(scan, "find_wiztree", return_value=r"C:\Program Files\WizTree\WizTree64.exe"), \
+                 mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+                 mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 mock.patch("builtins.input", side_effect=[
+                     "n", str(executable), "C:", "y", "0", "30",
+                 ]), \
+                 redirect_stdout(io.StringIO()):
+                drive_cleaner._scan_flow()
+
+            run_scan.assert_called_once_with(
+                drive="C:", include_files=True, max_depth=0, timeout=1800,
+                app="wiztree", wiztree_mode="auto",
+                scanner_executable_path=str(executable),
+            )
+
+    def test_guided_scan_uses_the_detected_scanner_when_alternate_is_not_requested(self):
+        with mock.patch.object(
+                scan, "find_windirstat", return_value=r"C:\Program Files\WinDirStat\WinDirStat.exe"), \
+             mock.patch("builtins.input", return_value="") as input_mock:
+            executable = drive_cleaner._prompt_scanner_executable_path("windirstat")
+
+        self.assertEqual(executable, r"C:\Program Files\WinDirStat\WinDirStat.exe")
+        input_mock.assert_called_once()
+        self.assertIn(
+            "Enter or Y = use it; N = choose another .exe; Q = cancel scan setup",
+            input_mock.call_args.args[0],
+        )
+
+    def test_guided_scan_retries_invalid_detected_scanner_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_wiztree", return_value=r"C:\Program Files\WizTree\WizTree64.exe"), \
+             mock.patch("builtins.input", side_effect=["maybe", ""]), \
+             redirect_stdout(output):
+            executable = drive_cleaner._prompt_scanner_executable_path("wiztree")
+
+        self.assertEqual(executable, r"C:\Program Files\WizTree\WizTree64.exe")
+        self.assertIn("Enter Y to use this scanner, N to choose a different .exe file, or Q to cancel scan setup.", output.getvalue())
+
+    def test_guided_scan_can_cancel_after_a_scanner_is_found(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_wiztree", return_value=r"C:\Program Files\WizTree\WizTree64.exe"), \
+             mock.patch("builtins.input", return_value="q"), \
+             redirect_stdout(output):
+            executable = drive_cleaner._prompt_scanner_executable_path("wiztree")
+
+        self.assertIsNone(executable)
+        self.assertIn("Scan setup cancelled.", output.getvalue())
+
+    def test_guided_scan_escapes_controls_in_detected_scanner_path(self):
+        detected_path = "C:\\Tools\\WizTree64.exe\x1b[2J\nspoofed output"
+        output = io.StringIO()
+        with mock.patch.object(scan, "find_wiztree", return_value=detected_path), \
+             mock.patch("builtins.input", return_value=""), \
+             redirect_stdout(output):
+            drive_cleaner._prompt_scanner_executable_path("wiztree")
+
+        text = output.getvalue()
+        self.assertIn(r"\x1b[2J\x0aspoofed output", text)
+        self.assertNotIn("\x1b", text)
+        self.assertEqual(text.count("\n"), 1)
+
+    def test_guided_scan_can_locate_windirstat_when_discovery_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "portable tools" / "WinDirStat.exe"
+            executable.parent.mkdir()
+            executable.touch()
+            with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+                 mock.patch.object(scan, "find_windirstat", return_value=None), \
+                 mock.patch.object(scan, "scan", return_value=None) as run_scan, \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 mock.patch("builtins.input", side_effect=[str(executable), "C:", "", "n"]):
+                drive_cleaner._scan_flow()
+        run_scan.assert_called_once_with(
+            drive="C:", include_files=True, max_depth=0, timeout=1800,
+            app="windirstat", scanner_executable_path=str(executable),
+        )
+
+    def test_guided_scanner_path_prompt_can_be_cancelled(self):
+        output = io.StringIO()
+        with mock.patch.object(scan, "choose_scanner", return_value="windirstat"), \
+             mock.patch.object(scan, "find_windirstat", return_value=None), \
+             mock.patch.object(scan, "scan") as run_scan, \
+             mock.patch("builtins.input", side_effect=["q", ""]), \
+             redirect_stdout(output):
+            drive_cleaner._scan_flow()
+        run_scan.assert_not_called()
+        self.assertIn("That is not an existing .exe file at a full path.", output.getvalue())
+        self.assertIn("Scan setup cancelled.", output.getvalue())
+
+    def test_direct_scan_cli_points_back_to_review_menu_without_extra_command(self):
+        output = io.StringIO()
+        with mock.patch.object(sys, "argv", [
+                "scan.py", "C:", "--app", "wiztree", "--wiztree-mode", "standard"]), \
+             mock.patch.object(scan, "scan", return_value=r"C:\Drive Cleanr\data\scan_example.csv"), \
+             redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exit_result:
+                scan.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertIn("Review a previous scan", output.getvalue())
+        self.assertNotIn("python analyze.py", output.getvalue())
+
     def test_guided_wiztree_scan_keeps_the_file_rows_choice(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["D:", "1", "n", "0", "30", "n"]) as input_mock:
+             mock.patch("builtins.input", side_effect=["", "C:", "1", "n", "0", "30", "n"]) as input_mock:
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=False, max_depth=0, timeout=1800,
-                                         app="wiztree", wiztree_mode="auto")
+        run_scan.assert_called_once_with(drive="C:", include_files=False, max_depth=0, timeout=1800,
+                                         app="wiztree", wiztree_mode="auto",
+                                         scanner_executable_path="mock-WizTree64.exe")
         self.assertTrue(any("individual files" in call.args[0] for call in input_mock.call_args_list))
 
     def test_guided_wiztree_scan_passes_requested_export_depth(self):
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["C:", "", "", "4", "30", "n"]):
+             mock.patch("builtins.input", side_effect=["", "C:", "", "", "4", "30", "n"]):
             drive_cleaner._scan_flow()
         run_scan.assert_called_once_with(drive="C:", include_files=True, max_depth=4,
-                                         timeout=1800, app="wiztree", wiztree_mode="auto")
+                                         timeout=1800, app="wiztree", wiztree_mode="auto",
+                                         scanner_executable_path="mock-WizTree64.exe")
 
     def test_guided_folder_scan_skips_fast_mft_mode_picker(self):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode") as choose_mode, \
              mock.patch.object(scan, "scan", return_value=None) as run_scan, \
              mock.patch.object(drive_cleaner, "_pause"), \
-             mock.patch("builtins.input", side_effect=[folder, "n", "0", "30"]), \
+             mock.patch("builtins.input", side_effect=["", folder, "n", "0", "30"]), \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
         choose_mode.assert_not_called()
         run_scan.assert_called_once_with(drive=folder, include_files=False, max_depth=0,
-                                         timeout=1800, app="wiztree", wiztree_mode="standard")
-        self.assertIn("Folder scans use standard mode", output.getvalue())
+                                         timeout=1800, app="wiztree", wiztree_mode="standard",
+                                         scanner_executable_path="mock-WizTree64.exe")
+        self.assertIn("this folder will use standard scanning", output.getvalue())
 
     def test_guided_wiztree_prompts_retry_invalid_values(self):
         output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan", return_value="data/scan_test.csv") as run_scan, \
              mock.patch.object(analyze, "run_tui"), \
-             mock.patch("builtins.input", side_effect=["D:", "maybe", "y", "-1", "2", "oops", "0", "30", "n"]), \
+             mock.patch("builtins.input", side_effect=["", "C:", "maybe", "y", "-1", "2", "oops", "0", "30", "n"]) as input_mock, \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
-        run_scan.assert_called_once_with(drive="D:", include_files=True, max_depth=2,
-                                         timeout=1800, app="wiztree", wiztree_mode="auto")
-        self.assertIn("Enter Y or N, or Q to cancel.", output.getvalue())
+        run_scan.assert_called_once_with(drive="C:", include_files=True, max_depth=2,
+                                         timeout=1800, app="wiztree", wiztree_mode="auto",
+                                         scanner_executable_path="mock-WizTree64.exe")
+        self.assertIn("Enter Y for Yes, N for No, or Q to cancel.", output.getvalue())
         self.assertIn("Enter a whole number, or Q to cancel.", output.getvalue())
-        self.assertIn("Export depth must be zero or greater.", output.getvalue())
+        self.assertIn("Folder depth cannot be negative.", output.getvalue())
         self.assertIn("Enter a positive number of minutes.", output.getvalue())
+        prompts = [call.args[0] for call in input_mock.call_args_list]
+        self.assertIn("Enter or Y = use it; N = choose another .exe; Q = cancel scan setup", prompts[0])
+        self.assertIn("Enter = C:; Q = cancel", prompts[1])
+        self.assertIn("Enter = Yes; N = No; Q = cancel", prompts[3])
+        self.assertIn("Enter = 0; Q = cancel", prompts[4])
+        self.assertIn("Enter = 30; Q = cancel", prompts[8])
 
     def test_guided_scan_can_cancel_during_option_prompts(self):
         output = io.StringIO()
         with mock.patch.object(scan, "choose_scanner", return_value="wiztree"), \
+             mock.patch.object(scan, "find_wiztree", return_value="mock-WizTree64.exe"), \
              mock.patch.object(scan, "choose_wiztree_mode", return_value="auto"), \
              mock.patch.object(scan, "scan") as run_scan, \
-             mock.patch("builtins.input", side_effect=["D:", "q"]), \
+             mock.patch("builtins.input", side_effect=["", "C:", "q"]), \
              redirect_stdout(output):
             drive_cleaner._scan_flow()
         run_scan.assert_not_called()
@@ -2576,12 +7865,24 @@ class ScanSafetyTests(unittest.TestCase):
 
     def test_guided_entry_point_has_simple_exit(self):
         output = io.StringIO()
-        with mock.patch("builtins.input", return_value="0"), redirect_stdout(output):
+        with mock.patch("builtins.input", return_value="0") as input_mock, redirect_stdout(output):
             drive_cleaner.main_menu()
+        self.assertEqual("Select an option [0-4] (0 = exit): ", input_mock.call_args.args[0])
         welcome = output.getvalue()
         self.assertIn("FIND SPACE. KEEP CONTROL.", welcome)
-        self.assertIn("Scan -> Review -> Select -> Back up -> Clean", welcome)
-        self.assertIn("Scans and reviews never delete files.", welcome)
+        self.assertNotRegex(welcome, r"[\u3400-\u9fff]")
+        self.assertIn("Scan -> Review -> Choose files/folders -> Optional full preview -> Optional backup -> Confirm -> Clean", welcome)
+        self.assertIn("Scanning and review never remove anything.", welcome)
+        self.assertIn("Choose individual files, folders, or both from the review list.", welcome)
+        self.assertIn("Choosing a folder includes files and subfolders, even if they are not listed separately.", welcome)
+        self.assertIn("Protected items and data in detected projects stay in place.", welcome)
+        self.assertIn("Higher-risk items inside a folder stay unless you select them too.", welcome)
+        self.assertIn("A full read-only preview can show every file and folder the plan could remove after its safety checks.", welcome)
+        self.assertIn(
+            "The saved plan shows your selected items again, then asks about an optional backup and final confirmation.",
+            welcome,
+        )
+        self.assertIn("Without a backup, removed items cannot be restored by Drive Cleanr.", welcome)
         self.assertLess(welcome.index("FIND SPACE."), welcome.index("1) Scan a drive"))
 
     def test_main_menu_opens_the_previous_scan_picker(self):
@@ -2593,19 +7894,210 @@ class ScanSafetyTests(unittest.TestCase):
         review_scan.assert_called_once_with()
         self.assertEqual(output.getvalue().count("FIND SPACE. KEEP CONTROL."), 1)
 
+    def test_main_menu_opens_the_saved_scan_manager(self):
+        with mock.patch("builtins.input", side_effect=["3", "0"]), \
+             mock.patch.object(drive_cleaner, "_saved_scans_menu") as manage_scans, \
+             redirect_stdout(io.StringIO()):
+            drive_cleaner.main_menu()
+        manage_scans.assert_called_once_with()
+
+    def test_saved_scan_manager_removes_only_older_exports_after_reviewed_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_scan = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_scan = data / "scan_wiztree_standard_20260928120000000000.csv"
+            unrelated_csv = data / "user-notes.csv"
+            for path in (old_scan, new_scan):
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            unrelated_csv.write_text("notes\n", encoding="utf-8")
+            os.utime(old_scan, (1, 1))
+            os.utime(new_scan, (2, 2))
+            paired_plan = Path(temp_dir) / f"{old_scan.stem}.clean.ps1"
+            unrelated_plan = Path(temp_dir) / "custom-review.ps1"
+            paired_plan.write_text(_paired_cleanup_plan_header(old_scan), encoding="utf-8")
+            unrelated_plan.write_text("user-authored script", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data)), \
+                 mock.patch("builtins.input", side_effect=["1", "DELETE OLD SCANS"]) as user_input, \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 redirect_stdout(output):
+                drive_cleaner._saved_scans_menu()
+
+            self.assertFalse(old_scan.exists())
+            self.assertTrue(new_scan.exists())
+            self.assertTrue(unrelated_csv.exists())
+            self.assertFalse(paired_plan.exists())
+            self.assertTrue(unrelated_plan.exists())
+            self.assertIn("Removing an export does not remove any files or folders listed", output.getvalue())
+            self.assertIn("Scan export file", output.getvalue())
+            self.assertIn(f"Paired Drive Cleanr cleanup plan | {paired_plan}", output.getvalue())
+            self.assertIn("header verifies it was generated for that exact scan", output.getvalue())
+            self.assertIn("DELETE OLD SCANS", user_input.call_args_list[-1].args[0])
+
+    def test_saved_scan_manager_keeps_all_exports_when_user_cancels_confirmation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            older_scan = data / "scan_windirstat_20260927120000000000.csv"
+            newest_scan = data / "scan_windirstat_20260928120000000000.csv"
+            for path in (older_scan, newest_scan):
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(older_scan, (1, 1))
+            os.utime(newest_scan, (2, 2))
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data)), \
+                 mock.patch("builtins.input", side_effect=["1", "DELETE"]), \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 redirect_stdout(output):
+                drive_cleaner._saved_scans_menu()
+
+            self.assertTrue(older_scan.exists())
+            self.assertTrue(newest_scan.exists())
+            self.assertIn("Scan history removal cancelled.", output.getvalue())
+
+    @unittest.skipUnless(os.name == "nt", "saved WinDirStat review flow targets Windows")
+    def test_main_menu_reviews_saved_windirstat_export_and_saves_exact_selection(self):
+        with (
+            AnalyzeSafetyTests._isolated_windows_profile() as isolated_profile,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as target_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as scan_temp,
+            tempfile.TemporaryDirectory(
+                dir=isolated_profile / "AppData" / "Local" / "Temp"
+            ) as plan_temp,
+        ):
+            target_root = Path(target_temp) / "app-cache"
+            target_root.mkdir()
+            target = target_root / "candidate.tmp"
+            target_size = 60 * 1024 * 1024
+            with target.open("wb") as handle:
+                handle.truncate(target_size)
+
+            scan_data = Path(scan_temp) / "data"
+            scan_data.mkdir()
+            scan_path = scan_data / "scan_windirstat_20261005120000000000.csv"
+            with scan_path.open("w", newline="", encoding="utf-8") as export:
+                writer = csv.writer(export)
+                writer.writerow([
+                    "Name", "Files", "Folders", "Logical Size", "Physical Size",
+                    "Attributes", "WinDirStat Attributes",
+                ])
+                writer.writerow([
+                    str(target), "0", "0", str(target_size), str(target_size),
+                    "Archive", "0x20000008",
+                ])
+
+            plan_path = Path(plan_temp) / "reviewed-windirstat-cleanup.ps1"
+            output = io.StringIO()
+            with (
+                mock.patch.object(scan, "DATA_DIR", str(scan_data)),
+                mock.patch.object(scan, "_path_has_reparse_component", return_value=False),
+                mock.patch.object(analyze, "_directory_has_project_marker", return_value=False),
+                mock.patch.object(analyze.shutil, "disk_usage", return_value=SimpleNamespace(
+                    total=10**9, used=5 * 10**8, free=5 * 10**8,
+                )),
+                mock.patch.object(analyze, "clear_screen"),
+                mock.patch.object(analyze, "offer_to_preview_cleanup_script", return_value=None) as preview,
+                mock.patch.object(analyze, "offer_to_run_cleanup_script") as run_plan,
+                mock.patch("builtins.input", side_effect=[
+                    "2", "1", "3", "", "1", "", str(plan_path), "", "0", "0",
+                ]),
+                redirect_stdout(output),
+            ):
+                drive_cleaner.main_menu()
+
+            self.assertTrue(plan_path.is_file(), output.getvalue())
+            plan_text = plan_path.read_text(encoding="utf-8-sig")
+            self.assertIn(str(target), plan_text)
+            self.assertIn("WinDirStat scan |", output.getvalue())
+            self.assertIn("File |", output.getvalue())
+            self.assertIn(str(target), output.getvalue())
+            self.assertIn("Cleanup plan saved to:", output.getvalue())
+            self.assertTrue(target.is_file(), "The reviewed plan must not run cleanup in this test")
+            preview.assert_called_once_with(str(plan_path))
+            run_plan.assert_called_once_with(str(plan_path))
+
     def test_backup_menu_can_merge_without_overwriting(self):
-        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\Jordan\cache.bin"}]}]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "MERGE", "0"]), \
+        manifests = [{"id": "backup_test", "version": 1, "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\cache.bin", "format": "file", "size": 1}]}]
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]) as user_input, \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
-             mock.patch.object(drive_cleaner, "_pause"):
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(io.StringIO()) as output:
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=False)
+        self.assertIn("Original items saved in this backup", output.getvalue())
+        self.assertIn("File |", output.getvalue())
+        self.assertIn(r"C:\Users\ExampleUser\cache.bin", output.getvalue())
+        self.assertIn("MERGE restores missing files", output.getvalue())
+        self.assertIn("Choose a backup by number", user_input.call_args_list[1].args[0])
+        self.assertIn("OVERWRITE, MERGE", user_input.call_args_list[2].args[0])
+
+    def test_backup_menu_selects_by_number_and_retries_invalid_choices(self):
+        first_id = "backup_20261007_120002_000001"
+        second_id = "backup_20261007_120001_000002"
+        manifests = [
+            {"id": first_id, "timestamp": "2026-10-07T12:00:02", "status": "completed", "items": []},
+            {"id": second_id, "timestamp": "2026-10-07T12:00:01", "status": "completed", "items": []},
+        ]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", "not a number", "9" * 5000, "3", "2", "DELETE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "delete_backup", return_value=True) as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(second_id)
+        rendered = output.getvalue()
+        self.assertIn("No.", rendered)
+        self.assertIn(f"1     {first_id}", rendered)
+        self.assertIn(f"2     {second_id}", rendered)
+        self.assertIn("Enter one of the listed backup numbers", rendered)
+        self.assertIn("That number is not in the backup list", rendered)
+
+    def test_backup_menu_enter_cancels_backup_selection(self):
+        manifests = [{
+            "id": "backup_20261007_120000_000001",
+            "timestamp": "2026-10-07T12:00:00", "status": "completed", "items": [],
+        }]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", "", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "delete_backup") as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_not_called()
+        self.assertIn("Backup selection cancelled.", output.getvalue())
+
+    def test_backup_menu_labels_folder_restore_targets(self):
+        manifests = [{
+            "id": "backup_test", "version": 1, "status": "completed",
+            "items": [{
+                "original_path": r"C:\Users\ExampleUser\Documents\saved-folder",
+                "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.zip",
+                "format": "zip", "size": 1,
+            }],
+        }]
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True), \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(io.StringIO()) as output:
+            drive_cleaner._backup_menu()
+        self.assertIn(r"Folder | C:\Users\ExampleUser\Documents\saved-folder", output.getvalue())
 
     def test_backup_menu_requires_explicit_overwrite_choice(self):
-        manifests = [{"id": "backup_test", "items": [{"original_path": r"C:\Users\Jordan\cache.bin"}]}]
-        with mock.patch("builtins.input", side_effect=["3", "backup_test", "OVERWRITE", "0"]), \
+        manifests = [{"id": "backup_test", "version": 1, "status": "completed", "items": [{"original_path": r"C:\Users\ExampleUser\cache.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\cache.bin", "format": "file", "size": 1}]}]
+        with mock.patch("builtins.input", side_effect=["3", "1", "OVERWRITE", "0"]), \
              mock.patch.object(backup, "list_backups", return_value=manifests), \
              mock.patch.object(backup, "print_backups_table"), \
              mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
@@ -2613,40 +8105,465 @@ class ScanSafetyTests(unittest.TestCase):
             drive_cleaner._backup_menu()
         restore.assert_called_once_with("backup_test", overwrite=True)
 
+    def test_backup_menu_rejects_missing_integrity_or_invalid_size_before_approval(self):
+        backup_id = "backup_20261004_123456_000007"
+        valid_item = {
+            "original_path": r"C:\Users\ExampleUser\cache.bin",
+            "backup_path": r"D:\DriveCleanrBackups\backup_20261004_123456_000007\payload.bin",
+            "format": "file",
+            "size": 5,
+            "integrity_sha256": "a" * 64,
+        }
+        invalid_items = [
+            {key: value for key, value in valid_item.items() if key != "integrity_sha256"},
+            {**valid_item, "integrity_sha256": "not a SHA-256 digest"},
+            {**valid_item, "size": True},
+            {**valid_item, "size": 5.0},
+            {**valid_item, "size": -1},
+        ]
+        for item in invalid_items:
+            with self.subTest(item=item):
+                manifest = {
+                    "id": backup_id, "version": 2, "status": "completed",
+                    "timestamp": "2026-10-04T12:34:56", "items": [item],
+                }
+                output = io.StringIO()
+                with mock.patch("builtins.input", side_effect=["3", "1", "0"]) as user_input, \
+                     mock.patch.object(backup, "list_backups", return_value=[manifest]), \
+                     mock.patch.object(backup, "_existing_backup_roots", return_value=[r"D:\DriveCleanrBackups"]), \
+                     mock.patch.object(backup, "print_backups_table"), \
+                     mock.patch.object(backup, "restore_backup") as restore, \
+                     mock.patch.object(drive_cleaner, "_pause"), \
+                     redirect_stdout(output):
+                    drive_cleaner._backup_menu()
+
+                restore.assert_not_called()
+                prompts = " ".join(call.args[0] for call in user_input.call_args_list if call.args)
+                self.assertNotIn("Type OVERWRITE", prompts)
+                self.assertIn("invalid restore details", output.getvalue())
+
+    def test_backup_menu_rejects_restore_path_inside_backup_storage_before_approval(self):
+        backup_id = "backup_20261004_123456_000004"
+        backup_root = r"D:\CleanBackups"
+        manifests = [{
+            "id": backup_id,
+            "status": "completed",
+            "version": 1,
+            "items": [{"original_path": backup_root + r"\restore-target.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.bin", "format": "file", "size": 1}],
+        }]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["3", "1", "0"]) as user_input, \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "_existing_backup_roots", return_value=[backup_root]), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup") as restore, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        restore.assert_not_called()
+        prompts = " ".join(call.args[0] for call in user_input.call_args_list if call.args)
+        self.assertNotIn("Type OVERWRITE", prompts)
+        self.assertIn("invalid restore details", output.getvalue())
+
+    def test_backup_menu_keeps_unknown_status_backup_deletable(self):
+        backup_id = "backup_20261004_123456_000003"
+        manifest = {
+            "id": backup_id, "status": [], "items": ["malformed entry"],
+            "timestamp": "2026-10-04T12:34:56",
+        }
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / backup_id
+            backup_dir.mkdir()
+            (backup_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            with mock.patch("builtins.input", side_effect=["4", "1", "DELETE", "0"]), \
+                 mock.patch.object(backup, "_existing_backup_roots", return_value=[str(root)]), \
+                 mock.patch.object(backup, "delete_backup", return_value=True) as delete, \
+                 mock.patch.object(drive_cleaner, "_pause"), \
+                 redirect_stdout(output):
+                drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(backup_id)
+        self.assertIn("Unknown", output.getvalue())
+        self.assertIn("Backup deleted.", output.getvalue())
+
+    def test_backup_menu_reports_cancelled_backup_deletion(self):
+        backup_id = "backup_20261004_123456_000005"
+        manifests = [{"id": backup_id, "status": "completed", "items": []}]
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["4", "1", "DELETE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=manifests), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "delete_backup", return_value=None) as delete, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        delete.assert_called_once_with(backup_id)
+        self.assertIn("Backup deletion stopped.", output.getvalue())
+        self.assertNotIn("Backup deletion failed.", output.getvalue())
+
+    def test_backup_menu_rejects_malformed_or_terminal_control_restore_paths(self):
+        backup_id = "backup_20261004_123456_000001"
+        invalid_cases = (
+            ("completed", ["not a manifest entry"]),
+            ("completed", [{"original_path": "C:\\Users\\A\\cache.bin\x1b[2J"}]),
+            ("partial", [{"original_path": r"C:\Users\A\cache.bin"}]),
+            ("completed", [
+                {"original_path": r"C:\Users\A\cache", "backup_path": r"D:\DriveCleanrBackups\payload1", "format": "file", "size": 1},
+                {"original_path": r"C:\Users\A\cache\nested", "backup_path": r"D:\DriveCleanrBackups\payload2", "format": "file", "size": 1},
+            ]),
+        )
+        for status, items in invalid_cases:
+            with self.subTest(status=status, items=items):
+                manifests = [{
+                    "id": backup_id, "version": 1, "timestamp": "2026-10-04T12:34:56",
+                    "status": status, "items": items,
+                }]
+                output = io.StringIO()
+                with mock.patch("builtins.input", side_effect=["3", "1", "0"]), \
+                     mock.patch.object(backup, "list_backups", return_value=manifests), \
+                     mock.patch.object(backup, "print_backups_table"), \
+                     mock.patch.object(backup, "restore_backup") as restore, \
+                     mock.patch.object(drive_cleaner, "_pause"), \
+                     redirect_stdout(output):
+                    drive_cleaner._backup_menu()
+
+                restore.assert_not_called()
+                self.assertIn("cannot be restored safely", output.getvalue())
+                self.assertNotIn("\x1b", output.getvalue())
+
+    def test_backup_menu_escapes_terminal_controls_in_valid_restore_paths(self):
+        backup_id = "backup_20261004_123456_000002"
+        manifest = {
+            "id": backup_id, "version": 1, "status": "completed",
+            "items": [{"original_path": "C:\\Users\\A\\cache\\\u009b.bin", "backup_path": r"D:\DriveCleanrBackups\backup_test\payload.bin", "format": "file", "size": 1}],
+        }
+        output = io.StringIO()
+        with mock.patch("builtins.input", side_effect=["3", "1", "MERGE", "0"]), \
+             mock.patch.object(backup, "list_backups", return_value=[manifest]), \
+             mock.patch.object(backup, "print_backups_table"), \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             mock.patch.object(drive_cleaner, "_pause"), \
+             redirect_stdout(output):
+            drive_cleaner._backup_menu()
+
+        restore.assert_called_once_with(backup_id, overwrite=False)
+        self.assertNotIn("\u009b", output.getvalue())
+        self.assertIn(r"\x9b.bin", output.getvalue())
+
     def test_scan_cleanup_deletes_only_plans_paired_with_pruned_exports(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
             scan.DATA_DIR = str(Path(temp_dir) / "data")
             data = Path(scan.DATA_DIR)
             data.mkdir()
-            old_export = data / "scan_older.csv"
-            new_export = data / "scan_newer.csv"
-            old_export.write_text("old")
-            new_export.write_text("new")
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            flat_legacy_export = data / "scan_20260926120000000000.csv"
+            legacy_export = data / "scan" / "_20260927123000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            flat_legacy_export.write_text("File Name,Size\n", encoding="utf-8")
+            legacy_export.parent.mkdir()
+            legacy_export.write_text("File Name,Size\n", encoding="utf-8")
             os.utime(old_export, (1, 1))
             os.utime(new_export, (2, 2))
-            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
-            new_plan = Path(temp_dir) / "scan_newer.clean.ps1"
+            os.utime(flat_legacy_export, (1.25, 1.25))
+            os.utime(legacy_export, (1.5, 1.5))
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            new_plan = Path(temp_dir) / f"{new_export.stem}.clean.ps1"
+            flat_legacy_plan = Path(temp_dir) / f"{flat_legacy_export.stem}.clean.ps1"
+            legacy_plan = Path(temp_dir) / f"{legacy_export.stem}.clean.ps1"
             unrelated_plan = Path(temp_dir) / "clean_reviewed.ps1"
             custom_plan = Path(temp_dir) / "manual-review.ps1"
-            for script in (old_plan, new_plan, unrelated_plan, custom_plan):
-                script.write_text("reviewed")
+            for export, script in (
+                (old_export, old_plan),
+                (new_export, new_plan),
+                (flat_legacy_export, flat_legacy_plan),
+                (legacy_export, legacy_plan),
+            ):
+                script.write_text(_paired_cleanup_plan_header(export), encoding="utf-8")
+            unrelated_plan.write_text("user-authored script", encoding="utf-8")
+            custom_plan.write_text("user-authored script", encoding="utf-8")
             try:
                 scan.cleanup_old_scans(keep_latest=1)
                 self.assertTrue(old_plan.exists())
+                self.assertTrue(flat_legacy_plan.exists())
+                self.assertTrue(legacy_plan.exists())
                 self.assertTrue(unrelated_plan.exists())
                 # The default helper call does not delete plans. Restore its
                 # old CSV fixture to model the explicit CLI cleanup action,
                 # which prunes the export and its paired plan together.
-                old_export.write_text("old")
+                old_export.write_text("File Name,Size\n", encoding="utf-8")
                 os.utime(old_export, (1, 1))
+                flat_legacy_export.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(flat_legacy_export, (1.25, 1.25))
+                legacy_export.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(legacy_export, (1.5, 1.5))
                 scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
                 self.assertFalse(old_export.exists())
+                self.assertFalse(flat_legacy_export.exists())
+                self.assertFalse(legacy_export.exists())
                 self.assertFalse(old_plan.exists())
+                self.assertFalse(flat_legacy_plan.exists())
+                self.assertFalse(legacy_plan.exists())
                 self.assertTrue(new_export.exists())
                 self.assertTrue(new_plan.exists())
                 self.assertTrue(unrelated_plan.exists())
                 self.assertTrue(custom_plan.exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_cleanup_preserves_unrelated_csv_and_its_matching_plan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            scan.DATA_DIR = str(Path(temp_dir) / "data")
+            data = Path(scan.DATA_DIR)
+            data.mkdir()
+            old_export = data / "scan_windirstat_20260927120000000000.csv"
+            new_export = data / "scan_windirstat_20260928120000000000.csv"
+            unrelated_csv = data / "user-review.csv"
+            invalid_export = data / "scan_wiztree_fast_20260929120000000000.csv"
+            invalid_legacy_export = data / "scan_20260929120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            unrelated_csv.write_text("File Name,Size\n", encoding="utf-8")
+            invalid_export.write_text("not a scan export\n", encoding="utf-8")
+            invalid_legacy_export.write_text("not a scan export\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (3, 3))
+            os.utime(unrelated_csv, (2, 2))
+            os.utime(invalid_export, (4, 4))
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            unrelated_plan = Path(temp_dir) / "user-review.clean.ps1"
+            invalid_plan = Path(temp_dir) / f"{invalid_export.stem}.clean.ps1"
+            old_plan.write_text(_paired_cleanup_plan_header(old_export), encoding="utf-8")
+            unrelated_plan.write_text("user plan", encoding="utf-8")
+            invalid_plan.write_text("user plan", encoding="utf-8")
+            try:
+                scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
+                self.assertFalse(old_export.exists())
+                self.assertFalse(old_plan.exists())
+                self.assertTrue(new_export.exists())
+                self.assertTrue(unrelated_csv.exists())
+                self.assertTrue(invalid_legacy_export.exists())
+                self.assertTrue(unrelated_plan.exists())
+                self.assertTrue(invalid_export.exists())
+                self.assertTrue(invalid_plan.exists())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    @unittest.skipUnless(os.name == "nt", "scan retention safe deletion targets Windows")
+    def test_scan_retention_rejects_junction_swapped_after_export_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            scan_folder = data / "scan"
+            scan_folder.mkdir(parents=True)
+            old_export = scan_folder / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = scan_folder / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+
+            outside = Path(temp_dir) / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / old_export.name
+            outside_sentinel.write_bytes(b"outside data must remain")
+            moved_scan_folder = data / "scan-original"
+            original_remove = scan._remove_scan_file_safely
+
+            def swap_parent_then_remove(path, validator=None):
+                if Path(path) == old_export:
+                    scan_folder.rename(moved_scan_folder)
+                    result = subprocess.run(
+                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(scan_folder), str(outside)],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode:
+                        self.skipTest("Windows could not create a temporary junction fixture")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=swap_parent_then_remove),
+                ):
+                    self.assertEqual(0, scan.cleanup_old_scans(keep_latest=1))
+                self.assertTrue(outside_sentinel.is_file())
+                self.assertEqual(b"outside data must remain", outside_sentinel.read_bytes())
+                self.assertTrue((moved_scan_folder / old_export.name).is_file())
+                os.rmdir(scan_folder)  # Remove the junction itself, never its target.
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_retention_revalidates_the_open_export_before_removing_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            original_remove = scan._remove_scan_file_safely
+
+            def replace_with_unrelated_file(path, validator=None):
+                if Path(path) == old_export:
+                    old_export.write_text("User data,not a scan\n", encoding="utf-8")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=replace_with_unrelated_file),
+                ):
+                    self.assertEqual(0, scan.cleanup_old_scans(keep_latest=1))
+                self.assertEqual("User data,not a scan\n", old_export.read_text(encoding="utf-8"))
+                self.assertTrue(new_export.is_file())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_retention_preserves_plan_replaced_after_pairing_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            old_plan.write_text(_paired_cleanup_plan_header(old_export), encoding="utf-8")
+            original_remove = scan._remove_scan_file_safely
+
+            def replace_plan_after_initial_check(path, validator=None):
+                if Path(path) == old_plan:
+                    old_plan.write_text("User-authored script; keep this file.\n", encoding="utf-8")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=replace_plan_after_initial_check),
+                ):
+                    self.assertEqual(1, scan.cleanup_old_scans(keep_latest=1, include_scripts=True))
+                self.assertEqual(
+                    "User-authored script; keep this file.\n",
+                    old_plan.read_text(encoding="utf-8"),
+                )
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_cleanup_keeps_user_authored_script_with_matching_scan_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_export = data / "scan_windirstat_20260927120000000000.csv"
+            new_export = data / "scan_windirstat_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            same_name_user_script = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            same_name_user_script.write_text(
+                "# User-authored PowerShell script; preserve this file.\n",
+                encoding="utf-8",
+            )
+            try:
+                with mock.patch.object(scan, "DATA_DIR", str(data)):
+                    scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
+                self.assertFalse(old_export.exists())
+                self.assertTrue(new_export.exists())
+                self.assertEqual(
+                    same_name_user_script.read_text(encoding="utf-8"),
+                    "# User-authored PowerShell script; preserve this file.\n",
+                )
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_cleanup_plan_marker_must_match_exact_scan_export_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            first_export = Path(temp_dir) / "scan_wiztree_standard_20260927120000000000.csv"
+            second_export = Path(temp_dir) / "scan_wiztree_standard_20260928120000000000.csv"
+            plan = Path(temp_dir) / f"{first_export.stem}.clean.ps1"
+            plan.write_text(_paired_cleanup_plan_header(first_export), encoding="utf-8")
+
+            self.assertTrue(scan.is_paired_cleanup_plan(plan, first_export))
+            self.assertFalse(scan.is_paired_cleanup_plan(plan, second_export))
+            plan.write_text("# User-authored script\n", encoding="utf-8")
+            self.assertFalse(scan.is_paired_cleanup_plan(plan, first_export))
+
+    def test_cleanup_plan_verification_rejects_directories_and_linked_paths(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export = Path(temp_dir) / "scan_wiztree_standard_20260927120000000000.csv"
+            directory = Path(temp_dir) / f"{export.stem}.clean.ps1"
+            directory.mkdir()
+            self.assertFalse(scan.is_paired_cleanup_plan(directory, export))
+
+            plan = Path(temp_dir) / f"{export.stem}.linked.clean.ps1"
+            plan.write_text(_paired_cleanup_plan_header(export), encoding="utf-8")
+            with mock.patch.object(scan, "_path_has_reparse_component", return_value=True):
+                self.assertFalse(scan.is_paired_cleanup_plan(plan, export))
+
+    def test_scan_cleanup_aborts_if_history_changes_after_review(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            older = data / "scan_wiztree_standard_20260927120000000000.csv"
+            newer = data / "scan_wiztree_standard_20260928120000000000.csv"
+            for path in (older, newer):
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(older, (1, 1))
+            os.utime(newer, (2, 2))
+            with mock.patch.object(scan, "DATA_DIR", str(data)):
+                reviewed_scans = scan.get_saved_scans()
+                appeared_after_review = data / "scan_wiztree_standard_20260929120000000000.csv"
+                appeared_after_review.write_text("File Name,Size\n", encoding="utf-8")
+                os.utime(appeared_after_review, (3, 3))
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    deleted = scan.cleanup_old_scans(
+                        keep_latest=1,
+                        include_scripts=True,
+                        expected_scans=reviewed_scans,
+                    )
+
+            self.assertEqual(deleted, 0)
+            self.assertTrue(older.exists())
+            self.assertTrue(newer.exists())
+            self.assertTrue(appeared_after_review.exists())
+            self.assertIn("Saved scans changed after review. Nothing was removed", output.getvalue())
+
+    def test_latest_scan_ignores_unrelated_and_invalid_csv_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            older_scan = data / "scan_wiztree_standard_20260927120000000000.csv"
+            newest_scan = data / "scan_windirstat_20260928120000000000.csv"
+            unrelated_csv = data / "user-review.csv"
+            invalid_scan = data / "scan_wiztree_fast_20260929120000000000.csv"
+            for path in (older_scan, newest_scan, unrelated_csv):
+                path.write_text("File Name,Size\n", encoding="utf-8")
+            invalid_scan.write_text("not a scan export\n", encoding="utf-8")
+            os.utime(older_scan, (1, 1))
+            os.utime(newest_scan, (2, 2))
+            os.utime(unrelated_csv, (3, 3))
+            os.utime(invalid_scan, (4, 4))
+            try:
+                with mock.patch.object(scan, "DATA_DIR", str(data)):
+                    self.assertEqual(scan.get_latest_scan(), str(newest_scan))
             finally:
                 scan.DATA_DIR = old_data_dir
 
@@ -2656,23 +8573,23 @@ class ScanSafetyTests(unittest.TestCase):
             scan.DATA_DIR = str(Path(temp_dir) / "data")
             data = Path(scan.DATA_DIR)
             data.mkdir()
-            old_export = data / "scan_older.csv"
-            new_export = data / "scan_newer.csv"
-            old_export.write_text("old")
-            new_export.write_text("new")
+            old_export = data / "scan_wiztree_fast_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_fast_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
             os.utime(old_export, (1, 1))
             os.utime(new_export, (2, 2))
-            old_plan = Path(temp_dir) / "scan_older.clean.ps1"
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
             old_plan.write_text("reviewed")
-            original_unlink = Path.unlink
+            original_remove = scan._remove_scan_file_safely
 
-            def fail_old_export(path, *args, **kwargs):
-                if path == old_export:
+            def fail_old_export(path, validator=None):
+                if Path(path) == old_export:
                     raise OSError("simulated export deletion failure")
-                return original_unlink(path, *args, **kwargs)
+                return original_remove(path, validator=validator)
 
             try:
-                with mock.patch.object(Path, "unlink", autospec=True, side_effect=fail_old_export):
+                with mock.patch.object(scan, "_remove_scan_file_safely", side_effect=fail_old_export):
                     scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
                 self.assertTrue(old_export.exists())
                 self.assertTrue(old_plan.exists())
@@ -2694,7 +8611,8 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
                      mock.patch.object(scan.subprocess, "Popen") as launch, \
                      mock.patch("builtins.print"):
-                    self.assertIsNone(scan.scan("D:", app="windirstat"))
+                    self.assertIsNone(scan.scan("C:", app="windirstat"))
+                    self.assertIsNone(scan.get_latest_scan())
                     self.assertEqual(scan.cleanup_old_scans(keep_latest=1), 0)
                 launch.assert_not_called()
                 self.assertTrue(older.exists())
@@ -2723,7 +8641,7 @@ class ScanSafetyTests(unittest.TestCase):
                     return object()
 
                 launch.side_effect = write_export
-                output = scan.scan("D:", app="windirstat")
+                output = scan.scan("C:", app="windirstat")
 
             self.assertEqual(output, str(data_dir / "scan_windirstat_20260928120000000000_2.csv"))
             self.assertEqual(base.read_text(encoding="utf-8"), "keep original scan")
@@ -2736,17 +8654,26 @@ class ScanSafetyTests(unittest.TestCase):
             export_path.write_text("File Name,Size\n", encoding="utf-8")
 
             class QuietProcess:
-                calls = 0
-                returncode = 0
+                def __init__(self):
+                    self.calls = 0
+                    self.returncode = 0
+                    self.terminated = False
 
                 def poll(self):
                     self.calls += 1
                     return None if self.calls < 4 else 0
 
+                def terminate(self):
+                    self.terminated = True
+
                 def wait(self, timeout=None):
                     return 0
 
-            self.assertTrue(scan.wait_for_scan_process(QuietProcess(), str(export_path), timeout=10))
+            process = QuietProcess()
+            with mock.patch.object(scan.time, "monotonic", return_value=0), \
+                 mock.patch.object(scan.time, "sleep", return_value=None):
+                self.assertTrue(scan.wait_for_scan_process(process, str(export_path), timeout=10))
+            self.assertFalse(process.terminated)
 
     def test_transient_export_stat_error_does_not_abort_scan(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2779,7 +8706,7 @@ class ScanSafetyTests(unittest.TestCase):
                 self.assertTrue(scan.wait_for_scan_process(
                     FinishingProcess(), str(export_path), timeout=10
                 ))
-            self.assertIn("export size temporarily unavailable", output.getvalue())
+            self.assertIn("Checking scan file", output.getvalue())
             self.assertIn("Scan complete", output.getvalue())
 
     def test_wait_for_file_does_not_swallow_unexpected_errors_or_interrupts(self):
@@ -2793,18 +8720,209 @@ class ScanSafetyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "unexpected"):
                     scan.wait_for_file(str(export_path), timeout=1)
 
-    def test_scan_export_validation_accepts_supported_headers_and_wiztree_note(self):
-        cases = (
-            ("File Name,Size\n", True),
-            ("Name,Logical Size,Physical Size\n", True),
-            ("Generated by WizTree 4.x\nFile Name,Size\n", True),
-            ("Generated by WizTree 4.x\nnot-a-scan,columns\n", False),
-            ('"unterminated,header\n', False),
-        )
+    def test_wait_for_file_refuses_reparse_paths_before_checking_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "scan.csv"
-            for contents, expected in cases:
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+                 mock.patch.object(scan.os.path, "exists") as exists, \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_file(str(export_path), timeout=3))
+
+            exists.assert_not_called()
+            self.assertIn("refusing to read it", output.getvalue())
+
+    def test_scan_process_stops_if_export_becomes_a_reparse_path_during_progress(self):
+        class RunningProcess:
+            def __init__(self):
+                self.terminated = False
+
+            def poll(self):
+                return 0 if self.terminated else None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                self.terminated = True
+                return 0
+
+        process = RunningProcess()
+        output = io.StringIO()
+        with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+             mock.patch.object(scan.os.path, "getsize") as getsize, \
+             mock.patch.object(scan.time, "sleep", return_value=None), \
+             redirect_stdout(output):
+            self.assertFalse(scan.wait_for_scan_process(process, "partial.csv", timeout=10))
+
+        self.assertTrue(process.terminated)
+        getsize.assert_not_called()
+        self.assertIn("stopping scanner", output.getvalue())
+
+    def test_wait_for_file_separates_progress_from_completion_message(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_file(str(export_path), timeout=10, stable_time=2))
+
+            self.assertRegex(
+                output.getvalue(),
+                r"Saving results\.\.\. [0-9]+s \| Saved so far: [0-9.]+ MB\nScan complete! Results file size:",
+            )
+            self.assertNotIn("Scanning...", output.getvalue())
+
+    def test_wait_for_file_timeout_uses_monotonic_clock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_export = Path(temp_dir) / "not-created.csv"
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "time", side_effect=AssertionError("wall clock used for timeout")), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_file(str(missing_export), timeout=3))
+
+            self.assertIn("Scan results were not ready within 3 seconds", output.getvalue())
+
+    def test_finished_scanner_reports_results_file_timeout_accurately(self):
+        class FinishedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self, timeout=None):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_export = Path(temp_dir) / "not-created.csv"
+            clock = [0.0]
+
+            def advance_time(seconds):
+                clock[0] += seconds
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_scan_process(FinishedProcess(), str(missing_export)))
+
+            rendered = output.getvalue()
+            self.assertIn("Scan finished; checking the results file", rendered)
+            self.assertIn("Scan results were not ready within 30 seconds", rendered)
+            self.assertNotIn("The scan did not finish", rendered)
+
+    def test_wait_for_file_reports_periodic_progress_while_export_is_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            missing_export = Path(temp_dir) / "not-created.csv"
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_file(str(missing_export), timeout=12))
+
+            rendered = output.getvalue()
+            self.assertIn("Waiting for scan results to finish saving", rendered)
+            self.assertIn("Checking scan results... 0s | Waiting for results file", rendered)
+            self.assertIn("Checking scan results... 5s | Waiting for results file", rendered)
+            self.assertIn("Checking scan results... 10s | Waiting for results file", rendered)
+            self.assertNotIn("Waiting for the scan to finish", rendered)
+
+    def test_wait_for_file_reports_empty_export_until_data_arrives(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.touch()
+            clock = [0.0]
+
+            def advance_time(_seconds):
+                clock[0] += 1
+                if clock[0] == 7:
+                    export_path.write_text("File Name,Size\n", encoding="utf-8")
+
+            output = io.StringIO()
+            with mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_file(str(export_path), timeout=12, stable_time=2))
+
+            rendered = output.getvalue()
+            self.assertIn("Results file is still empty", rendered)
+            self.assertIn("Saved so far:", rendered)
+            self.assertIn("Scan complete! Results file size:", rendered)
+
+    def test_wait_for_file_restarts_stability_check_after_temporary_access_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            clock = [0.0]
+            sizes = iter([14, 14, PermissionError(13, "sharing violation"), 14, 14, 14])
+
+            def advance_time(_seconds):
+                clock[0] += 1
+
+            def getsize_with_transient_failure(_path):
+                result = next(sizes)
+                if isinstance(result, OSError):
+                    raise result
+                return result
+
+            output = io.StringIO()
+            with mock.patch.object(scan.os.path, "getsize", side_effect=getsize_with_transient_failure) as getsize, \
+                 mock.patch.object(scan.time, "monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch.object(scan.time, "sleep", side_effect=advance_time), \
+                 redirect_stdout(output):
+                self.assertTrue(scan.wait_for_file(str(export_path), timeout=10, stable_time=2))
+
+            self.assertEqual(getsize.call_count, 6)
+            self.assertIn("Checking results file access", output.getvalue())
+            self.assertIn("Scan complete! Results file size:", output.getvalue())
+
+    def test_scan_export_validation_accepts_supported_headers_and_wiztree_note(self):
+        localized_windirstat_header = ",".join((
+            "\u540d\u79f0", "\u6587\u4ef6\u6570", "\u6587\u4ef6\u5939\u6570",
+            "\u903b\u8f91\u5927\u5c0f", "\u7269\u7406\u5927\u5c0f", "\u5c5e\u6027",
+            "\u6700\u540e\u4fee\u6539", "\u5185\u90e8\u5c5e\u6027", "\u7d22\u5f15",
+        ))
+        localized_windirstat_row = (
+            r"C:\Users\A\Temp\cache.bin,0,0,125000000,120000000,Archive,,"
+            "0x20000008,00000002\n"
+        )
+        cases = (
+            ("File Name,Size\n", True, "scan.csv"),
+            ("Name,Logical Size,Physical Size\n", True, "scan.csv"),
+            ("Generated by WizTree 4.x\nFile Name,Size\n", True, "scan.csv"),
+            ("Generated by WizTree 4.x\nnot-a-scan,columns\n", False, "scan.csv"),
+            ('"unterminated,header\n', False, "scan.csv"),
+            (f"{localized_windirstat_header}\n{localized_windirstat_row}", True,
+             "scan_windirstat_fixture.csv"),
+            (f"WinDirStat export\n{localized_windirstat_header}\n{localized_windirstat_row}", True,
+             "scan_windirstat_fixture.csv"),
+            (f"{localized_windirstat_header}\n", True, "scan_windirstat_fixture.csv"),
+            (f"{localized_windirstat_header}\n"
+             r"C:\Users\A\Temp\cache.bin,0,0,125000000,120000000,Archive,,0x20000001,not-an-index\n",
+             False, "unrecognized.csv"),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for contents, expected, filename in cases:
                 with self.subTest(contents=contents):
+                    export_path = Path(temp_dir) / filename
                     export_path.write_text(contents, encoding="utf-8")
                     valid, _reason = scan.validate_scan_export(str(export_path))
                     self.assertEqual(valid, expected)
@@ -2824,12 +8942,78 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch("builtins.print"):
                 self.assertFalse(scan.wait_for_scan_process(FinishedProcess(), str(export_path)))
 
+    def test_scan_process_refuses_reparse_export_before_reading_it(self):
+        class FinishedProcess:
+            def poll(self):
+                return 0
+
+            def wait(self):
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            export_path = Path(temp_dir) / "scan.csv"
+            export_path.write_text("File Name,Size\n", encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(scan, "_path_has_reparse_component", return_value=True), \
+                 mock.patch.object(scan, "wait_for_file") as wait_for_file, \
+                 mock.patch.object(scan, "validate_scan_export") as validate_export, \
+                 redirect_stdout(output):
+                self.assertFalse(scan.wait_for_scan_process(FinishedProcess(), str(export_path)))
+
+            wait_for_file.assert_not_called()
+            validate_export.assert_not_called()
+            self.assertIn("reparse point or junction", output.getvalue())
+
+    def test_scan_refuses_to_promote_export_that_becomes_a_reparse_path(self):
+        fixed_time = datetime(2026, 9, 28, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            partial_export = data_dir / ".incomplete" / "scan_windirstat_20260928120000000000.csv"
+
+            class FinishedProcess:
+                def poll(self):
+                    return 0
+
+                def wait(self):
+                    return 0
+
+            def fake_popen(command, **_kwargs):
+                export_path = Path(command[2])
+                export_path.parent.mkdir(parents=True, exist_ok=True)
+                export_path.write_text("File Name,Size\n", encoding="utf-8")
+                return FinishedProcess()
+
+            def reports_partial_export_as_reparse(path):
+                return os.path.normpath(os.fspath(path)) == os.path.normpath(str(partial_export))
+
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
+                 mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                 mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0)), \
+                 mock.patch.object(
+                     scan, "_path_has_reparse_component",
+                     side_effect=reports_partial_export_as_reparse,
+                 ), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen) as launch, \
+                 mock.patch.object(scan, "wait_for_scan_process", return_value=True) as wait_for_scan, \
+                 redirect_stdout(output):
+                result = scan.scan("C:", app="windirstat")
+                self.assertIsNone(scan.get_latest_scan())
+
+            self.assertIsNone(result)
+            self.assertTrue(partial_export.is_file())
+            self.assertFalse((data_dir / "scan_windirstat_20260928120000000000.csv").exists())
+            launch.assert_called_once()
+            wait_for_scan.assert_called_once()
+            self.assertIn("refusing to save it", output.getvalue())
+
     def test_timeout_terminates_a_stuck_scan(self):
         class StuckProcess:
             terminated = False
 
             def poll(self):
-                return None
+                return 0 if self.terminated else None
 
             def terminate(self):
                 self.terminated = True
@@ -2839,10 +9023,21 @@ class ScanSafetyTests(unittest.TestCase):
 
         process = StuckProcess()
         ticks = iter([0.0, 2.0])
+        output = io.StringIO()
         with mock.patch.object(scan.time, "monotonic", side_effect=lambda: next(ticks)), \
-             mock.patch.object(scan.time, "sleep", return_value=None):
+             mock.patch.object(scan.time, "sleep", return_value=None), \
+             redirect_stdout(output):
             self.assertFalse(scan.wait_for_scan_process(process, "missing.csv", timeout=1))
         self.assertTrue(process.terminated)
+        self.assertIn("time limit: 1 second", output.getvalue())
+        self.assertIn("time limit reached after 1 second", output.getvalue())
+        self.assertNotIn("0 minutes", output.getvalue())
+
+    def test_scan_timeout_formats_long_durations_without_losing_units(self):
+        self.assertEqual(scan._format_duration(0.5), "1 second")
+        self.assertEqual(scan._format_duration(61), "1 minute 1 second")
+        self.assertEqual(scan._format_duration(3600), "1 hour")
+        self.assertEqual(scan._format_duration(7325), "2 hours 2 minutes 5 seconds")
 
     def test_timeout_escalates_to_kill_when_scanner_ignores_terminate(self):
         class UnstoppableProcess:
@@ -2903,7 +9098,7 @@ class ScanSafetyTests(unittest.TestCase):
                      mock.patch.object(scan.time, "monotonic", side_effect=lambda: next(ticks)), \
                      mock.patch.object(scan.time, "sleep", return_value=None), \
                      redirect_stdout(output):
-                    self.assertIsNone(scan.scan("D:", app="windirstat", timeout=1))
+                    self.assertIsNone(scan.scan("C:", app="windirstat", timeout=1))
 
                 partial_exports = list((data_dir / ".incomplete").glob("*.csv"))
                 self.assertEqual(len(partial_exports), 1)
@@ -2949,14 +9144,117 @@ class ScanSafetyTests(unittest.TestCase):
                          mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                          mock.patch.object(scan, "wait_for_scan_process", side_effect=failure), \
                          mock.patch("builtins.print"):
-                        self.assertIsNone(scan.scan("D:", app="windirstat"))
+                        self.assertIsNone(scan.scan("C:", app="windirstat"))
                     self.assertTrue(process.terminated)
                     self.assertEqual(list(Path(scan.DATA_DIR).rglob("*.csv")), [])
                 finally:
                     scan.DATA_DIR = old_data_dir
 
+    def test_cancelled_scan_reports_partial_export_when_removal_fails(self):
+        fixed_time = datetime(2026, 9, 28, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / "data"
+            partial_export = data_dir / ".incomplete" / "scan_windirstat_20260928120000000000.csv"
+
+            class StoppableProcess:
+                exited = False
+
+                def poll(self):
+                    return 0 if self.exited else None
+
+                def terminate(self):
+                    self.exited = True
+
+                def wait(self, timeout=None):
+                    self.exited = True
+                    return 0
+
+                def kill(self):
+                    self.exited = True
+
+            process = StoppableProcess()
+
+            def fake_popen(command, **_kwargs):
+                Path(command[2]).write_text("partial scan", encoding="utf-8")
+                return process
+
+            def refuse_partial_removal(path, validator=None):
+                if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(partial_export)):
+                    raise PermissionError(5, "mocked access denied")
+                return original_remove(path, validator=validator)
+
+            original_remove = scan._remove_scan_file_safely
+            output = io.StringIO()
+            with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
+                 mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
+                 mock.patch.object(scan, "find_windirstat", return_value="WinDirStat.exe"), \
+                 mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0)), \
+                 mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
+                 mock.patch.object(scan, "wait_for_scan_process", side_effect=KeyboardInterrupt()), \
+                 mock.patch.object(scan, "_remove_scan_file_safely", side_effect=refuse_partial_removal), \
+                 redirect_stdout(output):
+                self.assertIsNone(scan.scan("C:", app="windirstat"))
+
+            self.assertTrue(process.exited)
+            self.assertEqual(partial_export.read_text(encoding="utf-8"), "partial scan")
+            self.assertIn("Could not remove the incomplete scan export; it was preserved.", output.getvalue())
+            self.assertIn(str(partial_export), output.getvalue())
+            self.assertIn("scanner was stopped, but its incomplete export could not be removed and was preserved", output.getvalue())
+            self.assertNotIn("because the scanner may still be running", output.getvalue())
+
 
 class BackupSafetyTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "backup verification uses Windows paths")
+    def test_verify_escapes_terminal_controls_in_manifest_paths(self):
+        backup_id = "backup_20261004_123456_000003"
+        source_path = r"C:\Users\A\cache" + chr(0x009B) + ".bin"
+        manifest = {
+            "version": 2,
+            "id": backup_id,
+            "status": "completed",
+            "timestamp": "2026-10-04T12:34:56",
+            "items": [{
+                "original_path": source_path,
+                "backup_path": r"D:\CleanBackups\payload.bin",
+                "format": "file",
+                "size": 1,
+                "source_integrity_sha256": "invalid",
+                "integrity_sha256": "a" * 64,
+            }],
+        }
+        output = io.StringIO()
+        with mock.patch.object(backup, "get_backup", return_value=manifest), \
+             mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\" + backup_id), \
+             mock.patch.object(backup, "_path_has_reparse_component", return_value=False), \
+             redirect_stdout(output):
+            self.assertFalse(backup.verify_backup(backup_id))
+
+        rendered = output.getvalue()
+        self.assertNotIn(chr(0x009B), rendered)
+        self.assertIn(r"\x9b.bin", rendered)
+        self.assertIn("Backup lacks verifiable integrity data", rendered)
+
+    def test_backup_json_mode_keeps_progress_off_json_stdout(self):
+        manifest = {"status": "completed", "id": "backup_20261003_123456", "items": []}
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def create_with_progress(_paths, _priority, progress_stream=None):
+            print("Copying backup file: payload.bin (50%).", file=progress_stream)
+            return manifest
+
+        with mock.patch.object(
+                backup.sys, "argv",
+                ["backup.py", "create", "--paths", r"C:\Temp\payload.bin", "--json"]), \
+             mock.patch.object(backup, "create_backup", side_effect=create_with_progress) as create, \
+             redirect_stdout(stdout), redirect_stderr(stderr):
+            backup.main()
+
+        create.assert_called_once()
+        self.assertIs(create.call_args.kwargs["progress_stream"], stderr)
+        self.assertEqual(json.loads(stdout.getvalue()), manifest)
+        self.assertIn("payload.bin (50%)", stderr.getvalue())
+
     def test_backup_cleanup_requires_exact_confirmation(self):
         backups = [{
             "id": "backup_20260928_123456_000001",
@@ -3039,6 +9337,46 @@ class BackupSafetyTests(unittest.TestCase):
                 backup.main()
             run_operation.assert_not_called()
             self.assertIn(expected_message, output.getvalue())
+
+    def test_backup_restore_cli_retries_invalid_conflict_choice(self):
+        output = io.StringIO()
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "restore", "--id", "backup_test"]), \
+             mock.patch("builtins.input", side_effect=["unknown", "o"]) as user_input, \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exit_result:
+                backup.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        self.assertEqual(user_input.call_count, 2)
+        self.assertIn(
+            "Enter O to replace existing files, M or Enter to restore only missing files and keep existing ones, or Q to cancel.",
+            output.getvalue(),
+        )
+        restore.assert_called_once_with("backup_test", overwrite=True)
+
+    def test_backup_restore_cli_enter_keeps_existing_files(self):
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "restore", "--id", "backup_test"]), \
+             mock.patch("builtins.input", return_value="") as user_input, \
+             mock.patch.object(backup, "restore_backup", return_value=True) as restore, \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as exit_result:
+                backup.main()
+
+        self.assertEqual(exit_result.exception.code, 0)
+        user_input.assert_called_once()
+        restore.assert_called_once_with("backup_test", overwrite=False)
+
+    def test_backup_restore_cli_q_cancels_without_restoring(self):
+        output = io.StringIO()
+        with mock.patch.object(backup.sys, "argv", ["backup.py", "restore", "--id", "backup_test"]), \
+             mock.patch("builtins.input", return_value="q"), \
+             mock.patch.object(backup, "restore_backup") as restore, \
+             redirect_stdout(output):
+            backup.main()
+
+        restore.assert_not_called()
+        self.assertIn("Restore cancelled", output.getvalue())
 
     def test_backup_list_skips_malformed_manifest_shapes(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3135,15 +9473,253 @@ class BackupSafetyTests(unittest.TestCase):
         self.assertIn(r"\x1b[31m", rendered)
         self.assertIn(r"\x0aInjected output", rendered)
 
+    def test_restore_escapes_control_characters_in_manifest_timestamp(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "CleanBackups"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"saved fixture")
+            destination = root / "restored.bin"
+            destination.write_bytes(b"preserve existing fixture")
+            manifest = {
+                "version": 2,
+                "id": backup_id,
+                "status": "completed",
+                "timestamp": "2026-09-28T12:34:56\x1b[2J\nInjected",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                    "integrity_sha256": backup._file_integrity_sha256(str(payload)),
+                }],
+            }
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)),
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(backup_id))
+
+            rendered = output.getvalue()
+            self.assertNotIn("\x1b", rendered)
+            self.assertNotIn("\nInjected", rendered)
+            self.assertIn(r"\x1b[2J\x0aInjected", rendered)
+            self.assertEqual(destination.read_bytes(), b"preserve existing fixture")
+
     def test_delete_refuses_backup_tree_with_reparse_point(self):
         output = io.StringIO()
         with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\backup_20260928_123456_123456"), \
              mock.patch.object(backup, "_tree_has_reparse_point", return_value=True), \
-             mock.patch.object(backup.shutil, "rmtree") as remove_tree, \
+             mock.patch.object(backup, "_remove_backup_tree") as remove_tree, \
              redirect_stdout(output):
             self.assertFalse(backup.delete_backup("backup_20260928_123456_123456"))
         remove_tree.assert_not_called()
         self.assertIn("containing a reparse point or junction", output.getvalue())
+
+    def test_delete_backup_can_be_cancelled_during_safety_check(self):
+        output = io.StringIO()
+        backup_id = "backup_20260928_123456_123456"
+        with mock.patch.object(backup, "_find_backup_dir", return_value="D:\\CleanBackups\\" + backup_id), \
+             mock.patch.object(backup, "_tree_has_reparse_point", side_effect=KeyboardInterrupt), \
+             mock.patch.object(backup, "_remove_backup_tree") as remove_tree, \
+             redirect_stdout(output):
+            self.assertIsNone(backup.delete_backup(backup_id))
+
+        remove_tree.assert_not_called()
+        self.assertIn("cancelled while checking its contents; nothing was removed", output.getvalue())
+
+    def test_delete_backup_reports_interruption_during_removal(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            removed_before_interrupt = backup_dir / "first.bin"
+            remaining_after_interrupt = backup_dir / "second.bin"
+            removed_before_interrupt.write_bytes(b"removed fixture")
+            remaining_after_interrupt.write_bytes(b"remaining fixture")
+
+            def interrupt_after_one_removal(path, on_removed=None, on_removal_started=None):
+                first = Path(path) / "first.bin"
+                first.unlink()
+                if on_removed is not None:
+                    on_removed(str(first))
+                raise KeyboardInterrupt
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=interrupt_after_one_removal), \
+                 redirect_stdout(output):
+                self.assertIsNone(backup.delete_backup(backup_id))
+
+            self.assertFalse(removed_before_interrupt.exists())
+            self.assertTrue(remaining_after_interrupt.is_file())
+            self.assertIn("Backup deletion interrupted; the saved backup may be incomplete", output.getvalue())
+
+    def test_delete_backup_reports_no_removal_when_interrupted_before_first_entry(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            saved_file = backup_dir / "payload.bin"
+            saved_file.write_bytes(b"backup fixture")
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=KeyboardInterrupt), \
+                 redirect_stdout(output):
+                self.assertIsNone(backup.delete_backup(backup_id))
+
+            self.assertTrue(saved_file.is_file())
+            self.assertIn("before removing any contents; Drive Cleanr removed nothing", output.getvalue())
+
+    def test_delete_backup_reports_possible_partial_removal_on_failure(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            removed_before_failure = backup_dir / "first.bin"
+            remaining_after_failure = backup_dir / "second.bin"
+            removed_before_failure.write_bytes(b"removed fixture")
+            remaining_after_failure.write_bytes(b"remaining fixture")
+
+            def fail_after_one_removal(path, on_removed=None, on_removal_started=None):
+                first = Path(path) / "first.bin"
+                first.unlink()
+                if on_removed is not None:
+                    on_removed(str(first))
+                raise OSError("mock deletion failure")
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=fail_after_one_removal), \
+                 redirect_stdout(output):
+                self.assertFalse(backup.delete_backup(backup_id))
+
+            self.assertFalse(removed_before_failure.exists())
+            self.assertTrue(remaining_after_failure.is_file())
+            self.assertIn("Backup deletion failed; the saved backup may be incomplete", output.getvalue())
+
+    def test_delete_backup_reports_tree_check_progress_and_deletion_heartbeat(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / backup_id
+            backup_dir.mkdir()
+            for index in range(101):
+                (backup_dir / f"payload-{index:03}.bin").write_bytes(b"fixture")
+
+            real_remove_tree = backup._remove_backup_tree
+
+            def delayed_remove_tree(path, on_removed=None, on_removal_started=None):
+                time.sleep(0.2)
+                real_remove_tree(
+                    path, on_removed=on_removed,
+                    on_removal_started=on_removal_started,
+                )
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "BACKUP_DELETE_PROGRESS_INTERVAL_SECONDS", 0.1), \
+                 mock.patch.object(backup, "_remove_backup_tree", side_effect=delayed_remove_tree), \
+                 redirect_stdout(output):
+                self.assertTrue(backup.delete_backup(backup_id))
+
+            rendered = output.getvalue()
+            self.assertIn("Checking saved backup contents for linked files and folders", rendered)
+            self.assertIn("Checking backup contents: 1 entry examined", rendered)
+            self.assertIn("Checking backup contents: 100 entries examined", rendered)
+            self.assertIn("Backup contents check complete: 101 entries examined", rendered)
+            self.assertIn("Deleting the saved backup now. This cannot be undone.", rendered)
+            self.assertIn("Still working after", rendered)
+            self.assertIn("Backup deletion complete: 102 items removed.", rendered)
+            self.assertFalse(backup_dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "handle-based backup deletion targets Windows")
+    def test_windows_backup_deletion_removes_nested_and_read_only_entries_by_handle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            backup_dir = Path(temp_dir) / "backup-fixture"
+            nested = backup_dir / "nested"
+            nested.mkdir(parents=True)
+            readonly_file = nested / "readonly.bin"
+            readonly_file.write_bytes(b"synthetic backup data")
+            readonly_file.chmod(0o444)
+            (backup_dir / "ordinary.bin").write_bytes(b"more synthetic data")
+
+            removed_entries = backup._windows_delete_tree_no_follow(str(backup_dir))
+
+            self.assertEqual(4, removed_entries)
+            self.assertFalse(backup_dir.exists())
+
+    @unittest.skipUnless(os.name == "nt", "handle-based backup deletion targets Windows")
+    def test_windows_backup_deletion_rejects_junction_swapped_after_enumeration(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_dir = root / "backup-fixture"
+            backup_dir.mkdir()
+            child = backup_dir / "cache"
+            child.mkdir()
+            moved_child = backup_dir / "original-cache"
+            outside = root / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / "keep.bin"
+            outside_sentinel.write_bytes(b"must remain untouched")
+
+            def create_junction(link, target):
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode:
+                    self.skipTest("Windows could not create a temporary junction fixture")
+
+            real_scandir = os.scandir
+            swapped = {"done": False}
+
+            class EnumeratedBeforeSwap:
+                def __init__(self, path):
+                    self.path = path
+                    self.iterator = real_scandir(path)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    self.iterator.close()
+
+                def __iter__(self):
+                    entries = list(self.iterator)
+                    if (not swapped["done"] and
+                            ntpath.normcase(ntpath.normpath(str(self.path))) ==
+                            ntpath.normcase(ntpath.normpath(str(backup_dir)))):
+                        swapped["done"] = True
+                        child.rename(moved_child)
+                        create_junction(child, outside)
+                    return iter(entries)
+
+            with mock.patch.object(backup.os, "scandir", side_effect=lambda path: EnumeratedBeforeSwap(path)):
+                with self.assertRaisesRegex(OSError, "reparse point or junction"):
+                    backup._windows_delete_tree_no_follow(str(backup_dir))
+
+            self.assertTrue(swapped["done"])
+            self.assertTrue(moved_child.is_dir())
+            self.assertTrue(outside_sentinel.is_file())
+            os.rmdir(child)  # Remove the junction itself, never its target.
+
+    def test_bulk_backup_cleanup_stops_after_deletion_cancellation(self):
+        backups = [{"id": "first"}, {"id": "second"}, {"id": "third"}]
+        output = io.StringIO()
+        with mock.patch.object(backup, "delete_backup", side_effect=[True, None, True]) as delete, \
+             redirect_stdout(output):
+            deleted = backup.cleanup_all_backups(backups)
+
+        self.assertEqual(1, deleted)
+        self.assertEqual([mock.call("first"), mock.call("second")], delete.call_args_list)
+        self.assertIn("Backup cleanup stopped; no additional backups will be deleted", output.getvalue())
 
     def test_reparse_point_lookup_fails_closed_but_allows_missing_paths(self):
         with mock.patch.object(backup.os, "lstat", side_effect=PermissionError("access denied")):
@@ -3176,8 +9752,8 @@ class BackupSafetyTests(unittest.TestCase):
             manifest = {
                 "status": "completed",
                 "items": [
-                    {"original_path": parent},
-                    {"original_path": str(Path(parent) / "nested" / "cache.bin")},
+                    {"original_path": parent, "size": 1},
+                    {"original_path": str(Path(parent) / "nested" / "cache.bin"), "size": 1},
                 ],
             }
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
@@ -3186,6 +9762,75 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertFalse(backup.verify_backup("backup_test"))
             message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
             self.assertIn("duplicate or overlapping source paths", message)
+
+    def test_backup_verification_rejects_invalid_source_path_without_filesystem_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            invalid_source = "C:\\Users\\ExampleUser\\cache.bin\x00"
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": invalid_source,
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir), \
+                 redirect_stdout(output):
+                self.assertFalse(backup.verify_backup("backup_20261004_123456_000004"))
+
+            self.assertIn("malformed or unsafe backup manifest", output.getvalue())
+
+    def test_backup_manifest_rejects_unhashable_format_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": str(Path(temp_dir) / "source.bin"),
+                    "backup_path": str(payload),
+                    "format": ["file"],
+                    "size": payload.stat().st_size,
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            for operation in (backup.verify_backup, backup.restore_backup):
+                with self.subTest(operation=operation.__name__), redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir):
+                    self.assertFalse(operation("backup_20261004_123456_000005"))
+
+    def test_backup_and_verification_reject_nul_payload_path_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            payload = Path(temp_dir) / "payload.bin"
+            payload.write_bytes(b"verified backup payload")
+            manifest = {
+                "version": 2,
+                "status": "completed",
+                "items": [{
+                    "original_path": str(Path(temp_dir) / "source.bin"),
+                    "backup_path": str(payload) + "\x00",
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                    "source_integrity_sha256": "a" * 64,
+                    "integrity_sha256": "b" * 64,
+                }],
+            }
+            for operation in (backup.verify_backup, backup.restore_backup):
+                with self.subTest(operation=operation.__name__), redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=temp_dir):
+                    self.assertFalse(operation("backup_20261004_123456_000006"))
 
     def test_backup_source_beneath_a_reparse_parent_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3208,6 +9853,97 @@ class BackupSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "reparse point or junction"):
                 backup.get_backup_root()
         make_directory.assert_not_called()
+
+    def test_backup_drive_skips_the_windows_volume_sources_and_nonlocal_volumes(self):
+        drive_types = {"C": 3, "D": 3, "E": 3, "F": 4, "G": 2, "H": 5}
+        free_space = {
+            "C": 8 * 1024**3,
+            "D": 100 * 1024**3,
+            "E": 20 * 1024**3,
+            "F": 30 * 1024**3,
+            "G": 6 * 1024**3,
+            "H": 200 * 1024**3,
+        }
+        present_drives = set(drive_types)
+        with mock.patch.object(backup, "_windows_system_drive_letter", return_value="D"), \
+             mock.patch.object(
+                 backup.os.path, "exists",
+                 side_effect=lambda path: path[0].upper() in present_drives,
+             ), \
+             mock.patch.object(
+                 backup, "_get_backup_drive_type",
+                 side_effect=lambda path: drive_types[path[0].upper()],
+             ) as drive_type_check, \
+             mock.patch.object(
+                 backup, "_get_drive_free_space",
+                 side_effect=lambda path: free_space[path[0].upper()],
+             ) as free_space_check:
+            result = backup.find_backup_drive(exclude_drives={"E:\\"})
+
+        self.assertEqual(result, "C:\\CleanBackups")
+        checked_for_space = {call.args[0][0] for call in free_space_check.call_args_list}
+        self.assertEqual(checked_for_space, {"C", "G"})
+        self.assertIn(mock.call("F:\\"), drive_type_check.call_args_list)
+        self.assertIn(mock.call("H:\\"), drive_type_check.call_args_list)
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_uses_windows_directory_not_stale_environment(self):
+        import ctypes
+
+        windows_directory = r"D:\Windows"
+
+        def populate_windows_directory(buffer, _buffer_length):
+            buffer.value = windows_directory
+            return len(windows_directory)
+
+        with mock.patch.object(
+            ctypes.windll.kernel32,
+            "GetWindowsDirectoryW",
+            side_effect=populate_windows_directory,
+        ) as get_windows_directory, mock.patch.dict(
+            os.environ, {"SystemRoot": r"C:\Windows"}
+        ):
+            self.assertEqual(backup._windows_system_drive_letter(), "D")
+
+        get_windows_directory.assert_called_once()
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_uses_systemroot_if_api_fails(self):
+        import ctypes
+
+        with mock.patch.object(
+            ctypes.windll.kernel32, "GetWindowsDirectoryW", return_value=0
+        ), mock.patch.dict(
+            os.environ,
+            {"SystemRoot": r"F:\Windows", "WINDIR": "", "SystemDrive": "C:"},
+        ):
+            self.assertEqual(backup._windows_system_drive_letter(), "F")
+
+    @unittest.skipUnless(os.name == "nt", "Windows volume detection uses Windows APIs")
+    def test_windows_system_drive_detection_fails_closed_without_api_or_environment_path(self):
+        import ctypes
+
+        with mock.patch.object(
+            ctypes.windll.kernel32, "GetWindowsDirectoryW", return_value=0
+        ), mock.patch.dict(
+            os.environ,
+            {"SystemRoot": "", "WINDIR": "", "SystemDrive": ""},
+        ):
+            self.assertIsNone(backup._windows_system_drive_letter())
+
+    def test_backup_drive_fails_closed_when_windows_volume_cannot_be_detected(self):
+        with mock.patch.object(backup, "_windows_system_drive_letter", return_value=None), \
+             mock.patch.object(backup.os.path, "exists") as path_exists:
+            self.assertIsNone(backup.find_backup_drive())
+        path_exists.assert_not_called()
+
+    def test_existing_backup_roots_include_c_when_windows_is_installed_elsewhere(self):
+        existing = {"C:\\CleanBackups", "E:\\CleanBackups"}
+        with mock.patch.object(backup.os.path, "isdir", side_effect=lambda path: path in existing):
+            self.assertEqual(
+                backup._existing_backup_roots(),
+                ["C:\\CleanBackups", "E:\\CleanBackups"],
+            )
 
     def test_backup_id_collision_never_reuses_an_existing_backup_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3245,7 +9981,7 @@ class BackupSafetyTests(unittest.TestCase):
             (source / "payload.bin").write_bytes(b"mock data")
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=RuntimeError("mock robocopy failure")):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=RuntimeError("mock robocopy failure")):
                 result = backup.create_backup([str(source)])
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["items"], [])
@@ -3259,7 +9995,8 @@ class BackupSafetyTests(unittest.TestCase):
             (source / "payload.bin").write_bytes(b"mock data")
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup, "get_dir_size", return_value=backup.SIZE_THRESHOLD), \
+                 mock.patch.object(backup, "_path_size_and_named_streams",
+                                   return_value=(backup.SIZE_THRESHOLD, False)), \
                  mock.patch.object(backup, "_create_zip_backup", side_effect=OSError("mock archive failure")):
                 result = backup.create_backup([str(source)])
         self.assertEqual(result["status"], "partial")
@@ -3311,6 +10048,367 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertEqual(item["format"], "file")
             self.assertEqual(Path(item["backup_path"]).read_bytes(), b"mock cache data")
 
+    def test_file_backup_reports_progress_during_copy_and_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            with source.open("wb") as stream:
+                stream.truncate(128 * 1024 * 1024)
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Checking backup contents", output.getvalue())
+        self.assertIn("Copying backup file", output.getvalue())
+        self.assertIn("Verifying backup contents", output.getvalue())
+        self.assertIn("64.00 MB of 128.00 MB copied (50%).", output.getvalue())
+        self.assertIn("64.00 MB of 128.00 MB checked (50%).", output.getvalue())
+
+    def test_zip_backup_reports_progress_while_compressing_and_checking(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "large-directory"
+            source.mkdir()
+            with (source / "payload.bin").open("wb") as stream:
+                stream.truncate(2 * 1024 * 1024)
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Compressing backup folder: payload.bin: 1.00 MB of 2.00 MB added to archive (50%).", output.getvalue())
+        self.assertIn("Verifying compressed backup: payload.bin: 1.00 MB of 2.00 MB verified (50%).", output.getvalue())
+
+    def test_folder_backup_size_scan_reports_periodic_item_progress(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "many-files"
+            source.mkdir()
+            for index in range(105):
+                (source / f"item-{index:03}.bin").write_bytes(b"temporary")
+
+            def mock_copy(command, **_kwargs):
+                shutil.copytree(command[1], command[2])
+                return 1
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_copy), \
+                 redirect_stdout(output):
+                result = backup.create_backup([str(source)])
+
+        self.assertEqual(result["status"], "completed")
+        self.assertIn("Checking backup contents: 100 items checked", output.getvalue())
+        self.assertIn("1 item checked", output.getvalue())
+        self.assertNotIn("1 items checked", output.getvalue())
+        self.assertIn("Verifying backup contents", output.getvalue())
+
+    def test_reparse_tree_check_emits_heartbeat_during_one_slow_item(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "restore-destination"
+            source.mkdir()
+            slow_item = source / "slow-item.bin"
+            slow_item.write_bytes(b"fixture")
+            slow_item_key = os.path.normcase(os.path.abspath(slow_item))
+            check_reparse_point = backup._is_reparse_point
+
+            def slow_reparse_check(path):
+                if os.path.normcase(os.path.abspath(path)) == slow_item_key:
+                    time.sleep(0.08)
+                return check_reparse_point(path)
+
+            output = io.StringIO()
+            with mock.patch.object(backup, "_is_reparse_point", side_effect=slow_reparse_check), \
+                 mock.patch.object(backup, "BACKUP_PROGRESS_TIME_INTERVAL_SECONDS", 0.02), \
+                 redirect_stdout(output):
+                contains_link = backup._tree_has_reparse_point_with_progress(
+                    str(source), "restore destination"
+                )
+
+        self.assertFalse(contains_link)
+        self.assertIn("Checking restore destination for links and junctions...", output.getvalue())
+        self.assertIn("Still checking links and junctions after", output.getvalue())
+        self.assertIn("0 entries checked so far. Current item: slow-item.bin.", output.getvalue())
+        self.assertIn("Checking restore destination: 1 item checked", output.getvalue())
+
+    def test_robocopy_backup_emits_a_progress_heartbeat(self):
+        command = ["robocopy", "source", "destination"]
+
+        class MockProcess:
+            def __init__(self):
+                self.wait_calls = 0
+
+            def wait(self, timeout=None):
+                self.wait_calls += 1
+                if self.wait_calls == 1:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                return 1
+
+        process = MockProcess()
+        output = io.StringIO()
+        with mock.patch.object(backup.subprocess, "Popen", return_value=process) as launch, \
+             redirect_stdout(output):
+            return_code = backup._run_robocopy_with_progress(
+                command, progress=backup._BackupProgress("Copying backup folder")
+            )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("Still working after", output.getvalue())
+        launch.assert_called_once_with(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
+    def test_large_directory_with_named_streams_uses_verified_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large-directory"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"fixture")
+            backup_root = root / "backups"
+            backup_root.mkdir()
+            fingerprint = {
+                "payload.bin": ("file", 7, "a" * 64),
+                "payload.bin\0:metadata:$DATA": ("stream", 12, "b" * 64),
+            }
+
+            def mock_robocopy(command, **_kwargs):
+                Path(command[2]).mkdir()
+                return 1
+
+            with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(backup, "_path_size_and_named_streams", return_value=(19, True)), \
+                 mock.patch.object(backup, "get_dir_size", return_value=19), \
+                 mock.patch.object(backup, "_directory_fingerprint", return_value=fingerprint), \
+                 mock.patch.object(backup, "_create_zip_backup") as create_zip, \
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["items"][0]["format"], "copy")
+            create_zip.assert_not_called()
+
+    def test_directory_backup_fails_if_named_stream_is_missing_from_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large-directory"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"fixture")
+            backup_root = root / "backups"
+            backup_root.mkdir()
+            source_fingerprint = {
+                "payload.bin": ("file", 7, "a" * 64),
+                "payload.bin\0:metadata:$DATA": ("stream", 12, "b" * 64),
+            }
+            copied_without_stream = {"payload.bin": ("file", 7, "a" * 64)}
+
+            def fingerprint(path, include_named_streams=True, **_kwargs):
+                return source_fingerprint if os.path.normcase(path) == os.path.normcase(str(source)) else copied_without_stream
+
+            def mock_robocopy(command, **_kwargs):
+                Path(command[2]).mkdir()
+                return 1
+
+            with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(backup, "_path_size_and_named_streams", return_value=(19, True)), \
+                 mock.patch.object(backup, "get_dir_size", return_value=19), \
+                 mock.patch.object(backup, "_directory_fingerprint", side_effect=fingerprint), \
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["status"], "partial")
+            self.assertEqual(manifest["items"], [])
+            self.assertTrue(any("different file contents" in error for error in manifest["errors"]))
+
+    @unittest.skipUnless(os.name == "nt", "named data stream backup requires Windows")
+    def test_file_backup_verifies_and_restores_named_ntfs_stream(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "cache-file.bin"
+            source.write_bytes(b"main file data")
+            stream_suffix = ":DriveCleanrTest:$DATA"
+            stream_path = str(source) + stream_suffix
+            expected_stream = b"restore the named stream"
+            try:
+                with open(stream_path, "wb") as stream:
+                    stream.write(expected_stream)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams: {exc}")
+            if not any(name.casefold() == stream_suffix.casefold()
+                       for name, _size in backup._named_data_streams(str(source))):
+                self.skipTest("Temporary volume does not expose NTFS named streams")
+
+            backup_root = root / "backups"
+            backup_root.mkdir()
+
+            def copy_default_stream_only(source_path, backup_path, **_kwargs):
+                # Reproduce the Windows copy behavior used by Python 3.10,
+                # which does not include NTFS named streams in shutil.copy2.
+                with open(source_path, "rb") as source_file, \
+                     open(backup_path, "wb") as backup_file:
+                    shutil.copyfileobj(source_file, backup_file)
+                return backup_path
+
+            with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_default_stream_only):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["status"], "completed")
+            item = manifest["items"][0]
+            self.assertEqual(item["size"], len(b"main file data") + len(expected_stream))
+            self.assertEqual(Path(item["backup_path"]).read_bytes(), b"main file data")
+            with open(item["backup_path"] + stream_suffix, "rb") as stream:
+                self.assertEqual(stream.read(), expected_stream)
+
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]):
+                self.assertTrue(backup.verify_backup(manifest["id"], [str(source)]))
+                with open(stream_path, "wb") as stream:
+                    stream.write(b"X" * len(expected_stream))
+                self.assertFalse(backup.verify_backup(manifest["id"], [str(source)]))
+
+                source.unlink()
+                with redirect_stdout(io.StringIO()), \
+                     mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_default_stream_only):
+                    self.assertTrue(backup.restore_backup(manifest["id"]))
+            with open(stream_path, "rb") as stream:
+                self.assertEqual(stream.read(), expected_stream)
+
+    @unittest.skipUnless(os.name == "nt", "named data stream backup requires Windows")
+    def test_large_directory_named_stream_survives_mocked_direct_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large-directory"
+            source.mkdir()
+            payload = source / "payload.bin"
+            payload.write_bytes(b"directory data")
+            stream_suffix = ":DriveCleanrFolderTest:$DATA"
+            stream_path = str(payload) + stream_suffix
+            expected_stream = b"folder stream data"
+            try:
+                with open(stream_path, "wb") as stream:
+                    stream.write(expected_stream)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams: {exc}")
+            if not backup._named_data_streams(str(payload)):
+                self.skipTest("Temporary volume does not expose NTFS named streams")
+
+            backup_root = root / "backups"
+            backup_root.mkdir()
+
+            def copy_file_with_named_streams(source_file, backup_file):
+                result = shutil.copy2(source_file, backup_file)
+                backup._copy_named_data_streams(source_file, backup_file)
+                return result
+
+            def mock_robocopy(command, **_kwargs):
+                # Model Robocopy's /COPY:DAT behavior independently of the
+                # Python version running the test.
+                shutil.copytree(command[1], command[2], copy_function=copy_file_with_named_streams)
+                return 1
+
+            with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1), \
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["status"], "completed")
+            self.assertEqual(manifest["items"][0]["format"], "copy")
+            saved_stream = manifest["items"][0]["backup_path"] + "\\payload.bin" + stream_suffix
+            with open(saved_stream, "rb") as stream:
+                self.assertEqual(stream.read(), expected_stream)
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]):
+                self.assertTrue(backup.verify_backup(manifest["id"]))
+
+    @unittest.skipUnless(os.name == "nt", "Robocopy named-stream integration requires Windows")
+    def test_large_directory_backup_and_restore_preserve_directory_named_stream(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "large-directory"
+            nested = source / "nested"
+            nested.mkdir(parents=True)
+            (nested / "payload.bin").write_bytes(b"directory file data")
+            stream_suffix = ":DriveCleanrDirectoryTest:$DATA"
+            stream_path = str(nested) + stream_suffix
+            expected_stream = b"directory stream payload"
+            try:
+                with open(stream_path, "wb") as stream:
+                    stream.write(expected_stream)
+            except OSError as exc:
+                self.skipTest(f"Temporary volume does not support named streams on directories: {exc}")
+            if not backup._named_data_streams(str(nested)):
+                self.skipTest("Temporary volume does not expose directory named streams")
+
+            backup_root = root / "backups"
+            backup_root.mkdir()
+            with mock.patch.object(backup, "get_backup_root", return_value=str(backup_root)), \
+                 mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
+                 mock.patch.object(backup, "SIZE_THRESHOLD", 1):
+                manifest = backup.create_backup([str(source)])
+
+            self.assertEqual(manifest["status"], "completed")
+            item = manifest["items"][0]
+            self.assertEqual(item["format"], "copy")
+            self.assertEqual(
+                item["size"], len(b"directory file data") + len(expected_stream)
+            )
+            saved_nested = Path(item["backup_path"]) / "nested"
+            with open(str(saved_nested) + stream_suffix, "rb") as stream:
+                self.assertEqual(stream.read(), expected_stream)
+
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]):
+                self.assertTrue(backup.verify_backup(manifest["id"]))
+                shutil.rmtree(source)
+                with redirect_stdout(io.StringIO()):
+                    self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            with open(stream_path, "rb") as stream:
+                self.assertEqual(stream.read(), expected_stream)
+
+    @unittest.skipUnless(os.name == "nt", "backup manifests use Windows local paths")
+    def test_legacy_backup_cannot_claim_verification_for_unrecorded_named_streams(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_id = "backup_20261003_123456_000001"
+            backup_dir = root / backup_id
+            backup_dir.mkdir()
+            source = root / "cache-file.bin"
+            saved = backup_dir / "cache-file.bin"
+            source.write_bytes(b"same main data")
+            saved.write_bytes(b"same main data")
+            digest = backup._sha256_file(str(source))
+            manifest = {
+                "id": backup_id,
+                "timestamp": "2026-10-03T12:34:56",
+                "status": "completed",
+                "items": [{
+                    "original_path": str(source),
+                    "backup_path": str(saved),
+                    "format": "file",
+                    "size": source.stat().st_size,
+                    "source_integrity_sha256": digest,
+                    "integrity_sha256": digest,
+                }],
+            }
+            (backup_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            output = io.StringIO()
+            with mock.patch.object(backup, "_existing_backup_roots", return_value=[str(root)]), \
+                 mock.patch.object(backup, "_path_size_and_named_streams",
+                                   return_value=(source.stat().st_size + 4, True)), \
+                 redirect_stdout(output):
+                self.assertFalse(backup.verify_backup(backup_id))
+            self.assertIn("cannot verify the named data streams", output.getvalue())
+
     def test_backup_verification_detects_source_changes_after_backup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-file.bin"
@@ -3329,12 +10427,12 @@ class BackupSafetyTests(unittest.TestCase):
             source = Path(temp_dir) / "cache-file.bin"
             source.write_bytes(b"original payload")
 
-            def corrupt_copy(_source, destination):
+            def corrupt_copy(_source, destination, **_kwargs):
                 Path(destination).write_bytes(b"X" * source.stat().st_size)
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.shutil, "copy2", side_effect=corrupt_copy):
+                 mock.patch.object(backup, "_copy_file_with_progress", side_effect=corrupt_copy):
                 result = backup.create_backup([str(source)])
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["items"], [])
@@ -3352,11 +10450,11 @@ class BackupSafetyTests(unittest.TestCase):
                 destination.mkdir(parents=True)
                 relative_file = Path("payload.bin")
                 (destination / relative_file).write_bytes(b"X" * (copy_source / relative_file).stat().st_size)
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=corrupt_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=corrupt_robocopy):
                 result = backup.create_backup([str(source)])
             self.assertEqual(result["status"], "partial")
             self.assertEqual(result["items"], [])
@@ -3370,14 +10468,15 @@ class BackupSafetyTests(unittest.TestCase):
             source_snapshot = {"payload.bin": ("file", 4, "a" * 64)}
             archived_snapshot = {"payload.bin": ("file", 4, "b" * 64)}
 
-            def write_changed_archive(source_path, archive_path):
+            def write_changed_archive(source_path, archive_path, **_kwargs):
                 with zipfile.ZipFile(archive_path, "w") as archive:
                     archive.write(Path(source_path) / "payload.bin", "payload.bin")
                 return archived_snapshot
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup, "get_dir_size", return_value=backup.SIZE_THRESHOLD), \
+                 mock.patch.object(backup, "_path_size_and_named_streams",
+                                   return_value=(backup.SIZE_THRESHOLD, False)), \
                  mock.patch.object(backup, "_directory_fingerprint", return_value=source_snapshot), \
                  mock.patch.object(backup, "_create_zip_backup", side_effect=write_changed_archive):
                 result = backup.create_backup([str(source)])
@@ -3397,6 +10496,64 @@ class BackupSafetyTests(unittest.TestCase):
             with mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]):
                 self.assertTrue(backup.restore_backup(manifest["id"]))
             self.assertEqual(source.read_bytes(), b"recoverable data")
+
+    def test_file_restore_reports_progress_while_copying_and_verifying(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-file.bin"
+            source.write_bytes(b"0123456789abcdef" * (128 * 1024))
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+            ):
+                manifest = backup.create_backup([str(source)])
+            source.unlink()
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024),
+                mock.patch.object(backup, "BACKUP_COPY_CHUNK_BYTES", 1024 * 1024),
+                redirect_stdout(output),
+            ):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual(source.stat().st_size, 2 * 1024 * 1024)
+        self.assertIn(
+            "Restoring backup: cache-file.bin: 1.00 MB of 2.00 MB copied (50%).",
+            output.getvalue(),
+        )
+        self.assertIn("Restoring backup complete: 1 item processed.", output.getvalue())
+
+    def test_zip_restore_reports_progress_while_checking_and_extracting_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "cache-folder"
+            source.mkdir()
+            (source / "payload.bin").write_bytes(b"0123456789abcdef" * (128 * 1024))
+            with (
+                mock.patch.object(backup, "get_backup_root", return_value=temp_dir),
+                mock.patch.object(backup, "_get_drive_free_space", return_value=10**10),
+                mock.patch.object(backup, "SIZE_THRESHOLD", 1),
+            ):
+                manifest = backup.create_backup([str(source)])
+            shutil.rmtree(source)
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
+                mock.patch.object(backup, "BACKUP_PROGRESS_BYTES_INTERVAL", 1024 * 1024),
+                redirect_stdout(output),
+            ):
+                self.assertTrue(backup.restore_backup(manifest["id"]))
+
+            self.assertEqual((source / "payload.bin").stat().st_size, 2 * 1024 * 1024)
+        self.assertIn(
+            "Restoring backup: payload.bin: 1.00 MB of 2.00 MB verified (50%).",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "Restoring backup: payload.bin: 1.00 MB of 2.00 MB copied (50%).",
+            output.getvalue(),
+        )
 
     def test_file_restore_preserves_existing_destination_without_explicit_overwrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3425,7 +10582,7 @@ class BackupSafetyTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=OSError("simulated disk full")),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=OSError("simulated disk full")),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"], overwrite=True))
@@ -3445,14 +10602,14 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def write_partial_then_fail(_backup_path, staged_path):
+            def write_partial_then_fail(_backup_path, staged_path, **_kwargs):
                 Path(staged_path).write_bytes(b"partial")
                 raise OSError("simulated interrupted copy")
 
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=write_partial_then_fail),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=write_partial_then_fail),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -3472,12 +10629,12 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def copy_corrupt_data(_backup_path, staged_path):
+            def copy_corrupt_data(_backup_path, staged_path, **_kwargs):
                 Path(staged_path).write_bytes(b"corrupted")
 
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=copy_corrupt_data),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=copy_corrupt_data),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
 
@@ -3495,14 +10652,14 @@ class BackupSafetyTests(unittest.TestCase):
                 manifest = backup.create_backup([str(source)])
             source.unlink()
 
-            def create_destination(_backup_path, staged_path):
+            def create_destination(_backup_path, staged_path, **_kwargs):
                 source.write_bytes(b"new user file")
                 Path(staged_path).write_bytes(b"saved data")
 
             output = io.StringIO()
             with (
                 mock.patch.object(backup, "_existing_backup_roots", return_value=[temp_dir]),
-                mock.patch.object(backup.shutil, "copy2", side_effect=create_destination),
+                mock.patch.object(backup, "_copy_file_with_progress", side_effect=create_destination),
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -3534,7 +10691,7 @@ class BackupSafetyTests(unittest.TestCase):
                 }],
             }
 
-            def copy_missing_files(command, **_kwargs):
+            def copy_missing_files(command, **kwargs):
                 self.assertIn("/XC", command)
                 self.assertIn("/XN", command)
                 self.assertIn("/XO", command)
@@ -3545,14 +10702,19 @@ class BackupSafetyTests(unittest.TestCase):
                         if not target.exists():
                             target.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(source_file, target)
-                return subprocess.CompletedProcess(command, 1)
+                kwargs["progress"].heartbeat(10)
+                return 1
 
+            output = io.StringIO()
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
                  mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=copy_missing_files):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=copy_missing_files), \
+                 redirect_stdout(output):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
             self.assertEqual((destination / "changed.bin").read_bytes(), b"newer user data")
             self.assertEqual((destination / "removed.bin").read_bytes(), b"restore me")
+            self.assertIn("Checking files to preserve: 1 item checked", output.getvalue())
+            self.assertIn("Still working after 10 seconds", output.getvalue())
 
     @unittest.skipUnless(os.name == "nt", "Robocopy and Windows file attributes are required")
     def test_windows_directory_backup_restore_preserves_hidden_and_system_files(self):
@@ -3643,7 +10805,7 @@ class BackupSafetyTests(unittest.TestCase):
                 mock.patch.object(backup, "get_backup", return_value=manifest),
                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
                 mock.patch.object(backup, "_path_has_reparse_component", side_effect=destination_becomes_linked),
-                mock.patch.object(backup.subprocess, "run") as robocopy,
+                mock.patch.object(backup, "_run_robocopy_with_progress") as robocopy,
                 redirect_stdout(output),
             ):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
@@ -3651,6 +10813,122 @@ class BackupSafetyTests(unittest.TestCase):
             robocopy.assert_not_called()
             self.assertEqual(protected.read_bytes(), b"existing user data")
             self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
+
+    def test_directory_restore_rechecks_destination_after_conflict_inventory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "backup"
+            saved = backup_root / "saved-directory"
+            saved.mkdir(parents=True)
+            (saved / "payload.bin").write_bytes(b"saved data")
+            destination = root / "restored-directory"
+            destination.mkdir()
+            protected = destination / "keep.bin"
+            protected.write_bytes(b"existing user data")
+            manifest = {
+                "id": "backup_20260927_123456_123456",
+                "status": "completed",
+                "timestamp": "2026-09-27T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(saved),
+                    "format": "copy",
+                    "size": backup.get_dir_size(str(saved)),
+                }],
+            }
+            destination_key = os.path.normcase(os.path.abspath(destination))
+            inventory_finished = False
+
+            def destination_changes_during_inventory(path):
+                nonlocal inventory_finished
+                if os.path.normcase(os.path.abspath(path)) == destination_key:
+                    return inventory_finished
+                return False
+
+            finish_progress = backup._BackupProgress.finish
+
+            def finish_inventory_then_mark(progress):
+                nonlocal inventory_finished
+                finish_progress(progress)
+                if progress.phase == "Checking files to preserve":
+                    inventory_finished = True
+
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=destination_changes_during_inventory),
+                mock.patch.object(backup._BackupProgress, "finish", new=finish_inventory_then_mark),
+                mock.patch.object(backup, "_run_robocopy_with_progress") as robocopy,
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(manifest["id"]))
+
+            self.assertTrue(inventory_finished)
+            robocopy.assert_not_called()
+            self.assertEqual(protected.read_bytes(), b"existing user data")
+            self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
+
+    def test_directory_restore_rechecks_both_trees_after_conflict_inventory(self):
+        for tree_name in ("saved backup", "restore destination"):
+            with self.subTest(tree=tree_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                backup_root = root / "backups"
+                saved = backup_root / "saved-directory"
+                saved.mkdir(parents=True)
+                (saved / "payload.bin").write_bytes(b"saved data")
+                destination = root / "restored-directory"
+                destination.mkdir()
+                (destination / "payload.bin").write_bytes(b"existing user data")
+                manifest = {
+                    "id": "backup_20260927_123456_123456",
+                    "status": "completed",
+                    "timestamp": "2026-09-27T12:34:56",
+                    "items": [{
+                        "original_path": str(destination),
+                        "backup_path": str(saved),
+                        "format": "copy",
+                        "size": backup.get_dir_size(str(saved)),
+                    }],
+                }
+                unsafe_tree = saved if tree_name == "saved backup" else destination
+                unsafe_tree_key = os.path.normcase(os.path.abspath(unsafe_tree))
+                inventory_finished = False
+
+                def report_link_after_inventory(path, progress_callback=None, current_callback=None):
+                    if (inventory_finished and
+                            os.path.normcase(os.path.abspath(path)) == unsafe_tree_key):
+                        return True
+                    return False
+
+                finish_progress = backup._BackupProgress.finish
+
+                def finish_inventory_then_mark(progress):
+                    nonlocal inventory_finished
+                    finish_progress(progress)
+                    if progress.phase == "Checking files to preserve":
+                        inventory_finished = True
+
+                output = io.StringIO()
+                with (
+                    mock.patch.object(backup, "get_backup", return_value=manifest),
+                    mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_root)),
+                    mock.patch.object(
+                        backup, "_tree_has_reparse_point",
+                        side_effect=report_link_after_inventory,
+                    ),
+                    mock.patch.object(
+                        backup._BackupProgress, "finish", new=finish_inventory_then_mark
+                    ),
+                    mock.patch.object(backup, "_run_robocopy_with_progress") as robocopy,
+                    redirect_stdout(output),
+                ):
+                    self.assertFalse(backup.restore_backup(manifest["id"]))
+
+                self.assertTrue(inventory_finished)
+                robocopy.assert_not_called()
+                self.assertEqual((destination / "payload.bin").read_bytes(), b"existing user data")
+                self.assertIn("Restore source or destination changed to a reparse point", output.getvalue())
 
     def test_restore_rejects_same_size_corrupted_file_backup_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3666,6 +10944,64 @@ class BackupSafetyTests(unittest.TestCase):
                 self.assertFalse(backup.restore_backup(manifest["id"]))
             self.assertEqual(source.read_bytes(), b"keep this destination")
 
+    def test_restore_rejects_version_two_backup_without_integrity_hash_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / backup.BACKUP_DIR_NAME
+            backup_id = "backup_20261005_123456_123456"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"unverified payload")
+            destination = root / "restored.bin"
+            manifest = {
+                "version": 2,
+                "id": backup_id,
+                "timestamp": "2026-10-05T12:34:56",
+                "status": "completed",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                }],
+            }
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]):
+                self.assertFalse(backup.restore_backup(backup_id))
+
+            self.assertFalse(destination.exists(), "A hashless version 2 backup must not write restored data")
+
+    def test_legacy_version_one_backup_without_hash_remains_restorable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / backup.BACKUP_DIR_NAME
+            backup_id = "backup_20261005_123456_123456"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"legacy recoverable payload")
+            destination = root / "restored.bin"
+            manifest = {
+                "version": 1,
+                "id": backup_id,
+                "timestamp": "2026-10-05T12:34:56",
+                "status": "completed",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": payload.stat().st_size,
+                }],
+            }
+            with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                 mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                 mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]):
+                self.assertTrue(backup.restore_backup(backup_id))
+
+            self.assertEqual(destination.read_bytes(), b"legacy recoverable payload")
+
     def test_restore_rejects_corrupted_directory_backup_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "cache-directory"
@@ -3676,11 +11012,11 @@ class BackupSafetyTests(unittest.TestCase):
                 copy_source = Path(command[1])
                 destination = Path(command[2])
                 shutil.copytree(copy_source, destination)
-                return subprocess.CompletedProcess(command, 1)
+                return 1
 
             with mock.patch.object(backup, "get_backup_root", return_value=temp_dir), \
                  mock.patch.object(backup, "_get_drive_free_space", return_value=10**10), \
-                 mock.patch.object(backup.subprocess, "run", side_effect=mock_robocopy):
+                 mock.patch.object(backup, "_run_robocopy_with_progress", side_effect=mock_robocopy):
                 manifest = backup.create_backup([str(source)])
             item = manifest["items"][0]
             (Path(item["backup_path"]) / "payload.bin").write_bytes(b"X" * len(b"original payload"))
@@ -3767,6 +11103,56 @@ class BackupSafetyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backup._extract_zip_backup(str(archive_path), str(Path(temp_dir) / "restore"))
 
+    def test_zip_restore_rechecks_open_archive_hash_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("payload.txt", "saved contents")
+
+            with self.assertRaisesRegex(RuntimeError, "changed after its saved integrity check"):
+                backup._extract_zip_backup(
+                    str(archive_path), str(destination),
+                    expected_archive_sha256="0" * 64,
+                )
+
+            self.assertFalse(destination.exists())
+
+    def test_zip_restore_rejects_member_changed_after_archive_preflight(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            target = destination / "payload.txt"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("payload.txt", b"original saved contents")
+            expected_archive_sha256 = backup._file_integrity_sha256(str(archive_path))
+
+            original_open = zipfile.ZipFile.open
+            reads = {"payload.txt": 0}
+
+            def change_member_after_preflight(archive, name, *args, **kwargs):
+                member_name = name.filename if isinstance(name, zipfile.ZipInfo) else name
+                if member_name == "payload.txt":
+                    reads[member_name] += 1
+                    if reads[member_name] == 2:
+                        return io.BytesIO(b"changed after preflight")
+                return original_open(archive, name, *args, **kwargs)
+
+            with mock.patch.object(
+                zipfile.ZipFile, "open", autospec=True,
+                side_effect=change_member_after_preflight,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Staged restore file failed its SHA-256"):
+                    backup._extract_zip_backup(
+                        str(archive_path), str(destination),
+                        expected_archive_sha256=expected_archive_sha256,
+                    )
+
+            self.assertFalse(target.exists())
+            self.assertEqual([], list(destination.glob(".drive-cleanr-restore-*.tmp")))
+
     def test_zip_restore_preflights_reparse_paths_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3785,6 +11171,78 @@ class BackupSafetyTests(unittest.TestCase):
             self.assertFalse((destination / "first.txt").exists())
             self.assertFalse((linked_dir / "escape.txt").exists())
 
+    def test_zip_restore_rechecks_directory_after_archive_verification(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "restore"
+            target = destination / "nested"
+            archive_path = root / "directory-race.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("nested/", b"")
+                archive.writestr("nested/payload.txt", "must not be restored")
+
+            target_key = os.path.normcase(os.path.abspath(target))
+            state = {"verified": False}
+            verify_contents = backup._verify_zip_contents
+
+            def verify_then_mark(archive, progress=None, member_digests=None):
+                total = verify_contents(
+                    archive, progress=progress, member_digests=member_digests
+                )
+                state["verified"] = True
+                return total
+
+            def target_becomes_linked(path):
+                return (
+                    state["verified"] and
+                    os.path.normcase(os.path.abspath(path)) == target_key
+                )
+
+            with (
+                mock.patch.object(backup, "_verify_zip_contents", side_effect=verify_then_mark),
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=target_becomes_linked),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "destination changed to a reparse point"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+
+            self.assertFalse(target.exists())
+            self.assertFalse((target / "payload.txt").exists())
+
+    def test_zip_restore_rechecks_directory_immediately_after_creation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            destination = root / "restore"
+            target = destination / "nested"
+            archive_path = root / "directory-create-race.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("nested/", b"")
+                archive.writestr("nested/payload.txt", "must not be restored")
+
+            target_key = os.path.normcase(os.path.abspath(target))
+            state = {"created": False}
+            make_directories = os.makedirs
+
+            def create_then_mark(path, *args, **kwargs):
+                make_directories(path, *args, **kwargs)
+                if os.path.normcase(os.path.abspath(path)) == target_key:
+                    state["created"] = True
+
+            def target_becomes_linked(path):
+                return (
+                    state["created"] and
+                    os.path.normcase(os.path.abspath(path)) == target_key
+                )
+
+            with (
+                mock.patch.object(backup, "_path_has_reparse_component", side_effect=target_becomes_linked),
+                mock.patch.object(backup.os, "makedirs", side_effect=create_then_mark),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "destination changed to a reparse point"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+
+            self.assertTrue(target.is_dir())
+            self.assertFalse((target / "payload.txt").exists())
+
     def test_zip_restore_preserves_existing_files_unless_overwrite_is_explicit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3795,13 +11253,23 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("existing.txt", "saved data")
                 archive.writestr("missing.txt", "also restore")
+            expected_archive_sha256 = backup._file_integrity_sha256(str(archive_path))
 
-            conflicts = backup._extract_zip_backup(str(archive_path), str(destination))
+            conflicts = backup._extract_zip_backup(
+                str(archive_path), str(destination),
+                expected_archive_sha256=expected_archive_sha256,
+            )
             self.assertEqual(conflicts, [str(destination / "existing.txt")])
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "newer user data")
             self.assertEqual((destination / "missing.txt").read_text(encoding="utf-8"), "also restore")
 
-            self.assertEqual(backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True), [])
+            self.assertEqual(
+                backup._extract_zip_backup(
+                    str(archive_path), str(destination), overwrite=True,
+                    expected_archive_sha256=expected_archive_sha256,
+                ),
+                [],
+            )
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "saved data")
 
     def test_zip_restore_write_failure_preserves_overwrite_destination(self):
@@ -3815,11 +11283,11 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("existing.txt", "restored data")
 
-            def partial_write_then_fail(_source, output, length):
+            def partial_write_then_fail(_source, output, *_args, **_kwargs):
                 output.write(b"partial")
                 raise OSError("simulated write failure")
 
-            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+            with mock.patch.object(backup, "_copy_stream_with_progress", side_effect=partial_write_then_fail):
                 with self.assertRaisesRegex(OSError, "simulated write failure"):
                     backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True)
 
@@ -3836,11 +11304,11 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("missing.txt", "restored data")
 
-            def partial_write_then_fail(_source, output, length):
+            def partial_write_then_fail(_source, output, *_args, **_kwargs):
                 output.write(b"partial")
                 raise OSError("simulated write failure")
 
-            with mock.patch.object(backup.shutil, "copyfileobj", side_effect=partial_write_then_fail):
+            with mock.patch.object(backup, "_copy_stream_with_progress", side_effect=partial_write_then_fail):
                 with self.assertRaisesRegex(OSError, "simulated write failure"):
                     backup._extract_zip_backup(str(archive_path), str(destination))
 
@@ -3932,6 +11400,7 @@ class BackupSafetyTests(unittest.TestCase):
                     self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             self.assertFalse(destination.exists())
             restore_summary = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
+            self.assertIn("[Restore] Folder |", restore_summary)
             self.assertIn("Restore incomplete: 0/1 items; 1 failed", restore_summary)
             self.assertNotIn("Restore complete", restore_summary)
 
@@ -3990,6 +11459,24 @@ class BackupSafetyTests(unittest.TestCase):
                         backup._extract_zip_backup(str(archive_path), str(destination))
                     self.assertFalse(destination.exists())
 
+    def test_zip_restore_rejects_windows_invalid_or_hidden_names_before_writing(self):
+        invalid_names = (
+            "bad<name.txt", "bad>name.txt", 'bad"name.txt', "bad|name.txt",
+            "hidden" + chr(0x202E) + ".txt",
+        )
+        for index, invalid_name in enumerate(invalid_names):
+            with self.subTest(name=invalid_name), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                archive_path = root / "invalid-name.zip"
+                destination = root / "restore"
+                with zipfile.ZipFile(archive_path, "w") as archive:
+                    archive.writestr("first.txt", "must not be partially restored")
+                    archive.writestr(invalid_name, "invalid Windows filename")
+
+                with self.assertRaisesRegex(RuntimeError, "Unsafe path"):
+                    backup._extract_zip_backup(str(archive_path), str(destination))
+                self.assertFalse(destination.exists())
+
     def test_restore_manifest_rejects_traversal_before_restoring_anything(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4005,11 +11492,13 @@ class BackupSafetyTests(unittest.TestCase):
                         "original_path": str(root / "first-target.bin"),
                         "backup_path": str(payload),
                         "format": "file",
+                        "size": payload.stat().st_size,
                     },
                     {
                         "original_path": r"C:\Users\..\Windows\system32\target.bin",
                         "backup_path": str(payload),
                         "format": "file",
+                        "size": payload.stat().st_size,
                     },
                 ],
             }
@@ -4055,6 +11544,42 @@ class BackupSafetyTests(unittest.TestCase):
                     message = " ".join(str(call.args[0]) for call in output.call_args_list if call.args)
                     self.assertIn("duplicate or overlapping restore destinations", message)
 
+    def test_restore_manifest_rejects_destinations_inside_or_over_backup_storage(self):
+        backup_id = "backup_20260927_123456_123456"
+        for relation in ("inside", "over"):
+            with self.subTest(relation=relation), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                backup_root = root / "CleanBackups"
+                backup_dir = backup_root / backup_id
+                saved_directory = backup_dir / "saved-directory"
+                saved_directory.mkdir(parents=True)
+                payload = saved_directory / "payload.bin"
+                payload.write_bytes(b"preserve the saved recovery data")
+                destination = (
+                    backup_root / "restored.bin" if relation == "inside" else root
+                )
+                manifest = {
+                    "status": "completed",
+                    "timestamp": "2026-09-27T12:34:56",
+                    "items": [{
+                        "original_path": str(destination),
+                        "backup_path": str(saved_directory),
+                        "format": "copy",
+                        "size": payload.stat().st_size,
+                    }],
+                }
+                with mock.patch.object(backup, "get_backup", return_value=manifest), \
+                     mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
+                     mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]), \
+                     mock.patch.object(backup, "_run_robocopy_with_progress") as restore_tree, \
+                     redirect_stdout(io.StringIO()) as output:
+                    self.assertFalse(backup.restore_backup(backup_id, overwrite=True))
+
+                restore_tree.assert_not_called()
+                self.assertEqual(payload.read_bytes(), b"preserve the saved recovery data")
+                self.assertFalse((backup_root / "restored.bin").exists())
+                self.assertIn("Refusing to restore into or over Drive Cleanr backup storage", output.getvalue())
+
     def test_restore_manifest_refuses_directory_destinations_with_links(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -4071,6 +11596,7 @@ class BackupSafetyTests(unittest.TestCase):
                     "original_path": str(destination),
                     "backup_path": str(backup_copy),
                     "format": "copy",
+                    "size": backup.get_dir_size(str(backup_copy)),
                 }],
             }
             linked_key = os.path.normcase(os.path.abspath(linked_child))
@@ -4078,20 +11604,69 @@ class BackupSafetyTests(unittest.TestCase):
             with mock.patch.object(backup, "get_backup", return_value=manifest), \
                  mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)), \
                  mock.patch.object(backup, "_is_reparse_point", side_effect=is_link), \
-                 mock.patch.object(backup.subprocess, "run") as run_process:
+                 mock.patch.object(backup, "_run_robocopy_with_progress") as run_process:
                 self.assertFalse(backup.restore_backup("backup_20260927_123456_123456"))
             run_process.assert_not_called()
 
+    @unittest.skipUnless(os.name == "nt", "backup restore targets Windows paths")
+    def test_restore_and_verify_reject_boolean_manifest_size(self):
+        backup_id = "backup_20260928_123456_123456"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            backup_root = root / "CleanBackups"
+            backup_dir = backup_root / backup_id
+            backup_dir.mkdir(parents=True)
+            payload = backup_dir / "payload.bin"
+            payload.write_bytes(b"x")
+            destination = root / "restored.bin"
+            manifest = {
+                "version": 2,
+                "id": backup_id,
+                "status": "completed",
+                "timestamp": "2026-09-28T12:34:56",
+                "items": [{
+                    "original_path": str(destination),
+                    "backup_path": str(payload),
+                    "format": "file",
+                    "size": True,
+                    "integrity_sha256": backup._file_integrity_sha256(str(payload)),
+                }],
+            }
+            output = io.StringIO()
+            with (
+                mock.patch.object(backup, "get_backup", return_value=manifest),
+                mock.patch.object(backup, "_find_backup_dir", return_value=str(backup_dir)),
+                mock.patch.object(backup, "_existing_backup_roots", return_value=[str(backup_root)]),
+                redirect_stdout(output),
+            ):
+                self.assertFalse(backup.restore_backup(backup_id, overwrite=True))
+                self.assertFalse(backup.verify_backup(backup_id))
+
+            self.assertFalse(destination.exists())
+            self.assertIn("Refusing to restore an invalid or unverifiable backup manifest entry", output.getvalue())
+            self.assertIn("Refusing to verify a malformed or unsafe backup manifest", output.getvalue())
+
     def test_restore_target_accepts_local_paths_and_rejects_unsafe_forms(self):
-        self.assertTrue(backup._valid_restore_target(r"C:\Users\Jordan\file.bin"))
+        self.assertTrue(backup._valid_restore_target(r"C:\Users\ExampleUser\file.bin"))
+        self.assertTrue(backup._valid_restore_target("C:\\Users\\control" + chr(0x009B) + ".bin"))
         for path in (
             "C:\\", r"\\server\share\file.bin", r"\??\C:\file.bin",
             r"C:\Users\..\Windows\file.bin", r"C:\Users\file.bin:stream",
-            r"C:\Users\*.bin", r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
+            r"C:\Users\*.bin", r"C:\Users\bad<name.bin", r"C:\Users\bad>name.bin",
+            'C:\\Users\\bad"name.bin', r"C:\Users\bad|name.bin",
+            r"C:\Users\CON.txt", "C:\\Users\\COM¹.txt",
             "C:\\Users\\LPT³.log", "C:\\Users\\trailing. ",
+            "C:\\Users\\hidden" + chr(0x202E) + ".bin",
         ):
             with self.subTest(path=path):
                 self.assertFalse(backup._valid_restore_target(path))
+
+    def test_restore_target_rejects_mapped_network_and_unknown_volumes(self):
+        for drive_type in (4, None):
+            with self.subTest(drive_type=drive_type), \
+                 mock.patch.object(backup.os, "name", "nt"), \
+                 mock.patch.object(backup, "_get_backup_drive_type", return_value=drive_type):
+                self.assertFalse(backup._valid_restore_target(r"Z:\Users\ExampleUser\file.bin"))
 
     def test_backup_id_validation_blocks_path_traversal(self):
         self.assertFalse(backup._valid_backup_id(".."))

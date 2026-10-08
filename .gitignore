@@ -1,5 +1,5 @@
 # Local scan data and backup artifacts can contain private paths or file names
-data/*.csv
+/data/
 *.csv
 CleanBackups/
 **/CleanBackups/
@@ -7,6 +7,7 @@ CleanBackups/
 
 # Generated cleanup scripts
 clean_*.ps1
+*.clean.ps1
 
 # WizTree executable (users should download separately)
 WizTree/

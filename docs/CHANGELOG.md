@@ -3,7 +3,135 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Run the Windows test matrix for `main` pushes and pull requests, avoiding a duplicate run (and skipped check) for PR branch pushes; keep manual runs available.
+- Recognize Python virtual-environment markers (`.venv`, `venv`, and `pyvenv.cfg`) and Conda environment metadata (`conda-meta`) so project and environment data stays out of automatic cleanup suggestions; shared `.venv` and `venv` folders at the profile root do not hide unrelated cleanup locations.
+- Recheck a version 2 ZIP backup's saved hash from its open archive immediately before restore writes, and verify each staged file against the member hash read during preflight so archive changes are not published.
+- Let users select a saved backup by its numbered row in the guided menu, with clear retry and cancel choices, instead of typing its full backup ID.
+- Label each guided restore destination and restore progress item as a File or Folder, and explain the scope of OVERWRITE and MERGE before the choice.
+- Open the paginated keyboard picker before printing candidates, so large selections do not spend time dumping off-page paths before users can begin.
+- Explain that WizTree's Fast full-drive mode reads the file table directly only on NTFS (a common Windows file system); other file systems use normal Windows scanning, as shown in the scan menu, progress, reports, and guide.
+- Reject mapped network and optical drives at scan setup, skip non-local scan-export entries, require real local volumes for backup and restore paths, and recheck the volume type when a saved cleanup plan starts.
+- Revalidate scan exports and paired cleanup plans through the same opened file that Windows will remove, while holding parent folders against replacement; reject links and junctions inserted after the initial retention review.
+- Remove saved backups through opened Windows handles and reject reparse points at the removal boundary, including junctions swapped in after the initial inspection; report accurately whether any entries were removed.
+- Retry an invalid overwrite/merge choice in the standalone backup restore command and explain the accepted choices instead of silently cancelling.
+- Recognize VS Code Dev Container project configurations in `.devcontainer/` and `.devcontainer.json` so project-local build and cache data stays protected.
+- Recognize the required Helm `Chart.yaml` file as a project marker so chart contents and local dependency data stay out of cleanup suggestions.
+- Treat linked project-manifest files as project markers during analysis, matching generated cleanup-plan rechecks and preventing misleading cleanup suggestions.
+- Pass the exact detected scanner executable to the scan after the user approves it, so the path shown in the prompt is the one used.
+- Generate profile-root shared-metadata exceptions for analysis and generated PowerShell from one source list to prevent safety-rule drift.
+- Recognize nested `npm-shrinkwrap.json` lockfiles as Node project markers so their project caches stay protected; continue ignoring the same shared metadata at the user-profile root.
+- Stop generated project-marker checks at the active USERPROFILE boundary after checking that root, so a marker in a parent directory does not extend project protection into a relocated profile.
+- Recognize RStudio/renv and Julia project files so their local package environments and caches stay out of cleanup suggestions.
+- Explain the saved-scan picker shortcuts in the number-entry prompt, including when older/newer-page shortcuts are available.
+- Explain that the optional verified backup is for restoring selected data if cleanup affects something an app or Windows needs.
+- Explain before backup approval that a selected folder backup includes its accessible contents, including items cleanup will preserve, and may require more space than cleanup removes.
+- If a scanner exits but its CSV never appears or stops changing, report that the results file was not ready instead of saying the scan itself did not finish.
+- Add a guided main-menu task for reviewing saved scan exports, previewing exact older export and verified paired-plan paths, and requiring the exact `DELETE OLD SCANS` confirmation; abort if scan history changed after review. Prune a plan only when its generated header matches the scan path, preserving user-authored and unverifiable scripts.
+- Recognize Windows Sandbox `*.wsb` configurations as project markers so test and build folders containing them are protected; ignore those files at the profile root so one standalone configuration does not shield the entire profile.
+- Include validated root-level scans from the older `scan_<timestamp>.csv` naming format in saved-scan history and retention; unrelated or malformed CSV files remain untouched.
+- Detect Swift/CocoaPods manifests, Xcode bundle directories, Bazel workspaces, Nix flakes, and Terraform files so cache-like project contents are not suggested for cleanup.
+- Protect Zig build files, Haskell Cabal/Stack manifests, and OCaml Dune/opam manifests so their project caches and build output stay out of cleanup suggestions.
+- Protect .NET SDK/MSBuild configuration and Clojure CLI/Leiningen project files so project-scoped build data stays out of cleanup suggestions.
+- Keep generated cleanup plans' protected-root inventory aligned with Xcode project detection: a folder containing an `.xcodeproj` or `.xcworkspace` bundle remains protected, including cache folders beside the bundle, without a false cleanup error during file rechecks.
+- Tell users at cleanup-plan startup that saved plans do not receive later Drive Cleanr safety updates and should be regenerated after an update.
+- Show progress while checking saved and destination directory trees for links and junctions during restore; repeat the checks after conflict review and immediately before Robocopy. A 10-second heartbeat includes the current entry even if one filesystem check takes a long time.
+- Remove duplicate exit/cancel shortcuts where they performed the same action: the post-scan review prompt now has only Yes/No; main, review, backup, and saved-scan menus use one `0` exit or return choice; and cleanup item-number prompts use Enter alone to cancel.
+- Cache project-marker checks for unchanged parent folders during cleanup, and recheck a folder when its contents change. This avoids repeatedly scanning the same shared parent folders for every selected file while still detecting new project markers before removal.
+- Recheck a selected folder file's parent folders immediately before removal. If a project marker appears after the folder-wide check, keep that file and stop cleanup.
+- Match WizTree command-line options to the detected version: require 3.18+ for CSV export, apply depth limits from 4.02+, allocation sorting from 4.13+, and drive-capacity export from 4.25+; explain when a requested depth limit needs a newer version.
+- Add keyboard multi-selection to the guided file/folder picker: move the highlight with arrow keys, toggle exact rows with Spacebar, and finish with Enter. Keep picks while paging/filtering; in a folder browser, Enter or D keeps nested picks and B returns without adding them. The numbered fallback also restores a folder's previous picks so users can revise them. Use the same keyboard controls in the manual-review file list, with numbered input available when keyboard controls are unavailable.
+- Keep a single exact file/folder selection in sync between the main list and folder browsing in both keyboard and numbered modes. If a row appears in both, the folder browser shows it checked and toggling it updates the same selection instead of adding a duplicate.
+- Explain that folder browsing keeps the chosen review level and that **All review levels** includes entries assigned to more cautious levels.
+- Show a startup message before generated cleanup plans load their native safety helper, so a quiet initialization period does not look like a stalled cleanup; state that nothing has been removed yet.
+- Explain WizTree's Automatic, Fast full-drive, and Standard scan methods by what Drive Cleanr selects, which targets and permissions each method needs, and what files may be missed.
+- Explain scanner, mode, default, cancel, file/folder selection, preview, cleanup, and recovery choices in plain English throughout the interactive workflow; document how WizTree's modes differ and keep the scanner list neutral rather than ranking either app.
+- Reject version 2 restore manifests missing per-item integrity hashes, validate exact nonnegative item sizes before asking for restore approval, and retain size-checked restore support for legacy version 1 backups.
+- Display scan time limits in readable seconds, minutes, and hours so short limits are not shown as zero minutes.
+- Clarify that guided-review cleanup plans retain the user's selection, show it again before backup and final confirmation, while plans generated directly with `--output` prompt for a selection when run.
+- Explain on the welcome screen that choosing a folder includes its files and subfolders, and identify protected and higher-risk contents that stay in place.
+- Limit the extra `claude*` preservation rule to entries beneath configured temporary roots, consistent with the cleanup knowledge base; unrelated lookalike names elsewhere follow normal safety checks.
+- Restrict specific Gradle, Cargo, NuGet, Go, Scoop, and Playwright cache labels to recognized Windows defaults or explicit tool environment roots; keep matching lookalike paths in caution review.
+- Snapshot configured cache roots once per CSV analysis, reducing repeated path checks while preserving custom-root matches.
+- Use normalized ancestor lookups for nested report annotations and deduplicated totals instead of comparing every candidate pair.
+- Allocate tier estimates iteratively so deeply nested report candidates cannot exhaust Python's call stack.
+- Clarify that the scanner has exited while Drive Cleanr waits for the export to finish saving, and show a five-second heartbeat if the file is missing, empty, or temporarily unreadable.
+- Make the post-scan review prompt retry invalid answers and honor `Q` cancellation, while keeping the completed scan available from the main menu.
+- Recognize common Python requirements-list variants such as `requirements-dev.txt`, `requirements-test.in`, and `dev-requirements.in` as project markers, while ignoring shared requirement lists at the user-profile root so they do not shield the whole profile.
+- Show progress while checking saved backups for reparse points and a periodic heartbeat during long backup deletion; warn that a failed or interrupted removal may have left a partial backup, and stop bulk deletion when interrupted.
+- Show a sanitized current path with the running count during folder inventory and link/project/protected-data checks, fold reparse-point refusal into the counted safety pass instead of silently rescanning the full folder, hide protected paths and names in progress, and label per-item rechecks separately from completed removals.
+- Include the current sanitized entry path in path-level project-marker scans, while hiding project-marker and protected item names in progress output.
+- Skip file candidates whose current logical length differs from the scan; require that scanned length in generated file plans, carry it into scripts, and recheck it before cleanup. Never substitute allocated or current size when scan evidence is missing.
+- Offer a full read-only cleanup preview from the guided review menu immediately after saving a plan, with the preview enabled by default and no follow-up command required; if it fails, leave the plan saved and do not offer immediate cleanup.
+- Normalize scanner discovery through the same executable-path validation as guided selection, including environment-variable values wrapped in quotes.
+- Report accurately when a cancelled or failed scan's partial export remains because the scanner may still be running or Windows refused its removal; keep it outside saved-scan review.
+- Sanitize paths discovered inside selected folders in cleanup errors and preview output while retaining original paths for cleanup safety checks.
+- Show sanitized current paths alongside cleanup byte and percentage progress, and preserve folder descendants that contain hidden formatting characters.
+- Recheck ZIP restore destinations before and after creating directory entries, and recheck directory-copy source and destination paths immediately before Robocopy after conflict inventory.
+- Reject scanner exports that pass through a reparse point or junction before validation or promotion into the saved-scan list.
+- Let guided scan users use the detected executable by default or choose another installed/portable scanner executable for one scan.
+- Recognize the active `USERPROFILE` path as well as conventional profile roots; ignore shared profile metadata such as `.gitignore` there while continuing to protect nested projects and any root containing `.git`.
+- Show byte and percentage progress during the final locked content check immediately before deletion, and while checking large named data streams.
+- Escape nonprinting manifest and archive-derived error text; reject hidden-format restore paths and malformed byte counts before verification or writing.
+- Index cleanup-rule matching by path components and cache configured temporary roots so large scan exports avoid checking every rule against every row.
+- Keep recovery backups optional: interactive cleanup defaults to no backup, and reviewed `-Force` runs also default to no backup. Add `-Backup` to create and verify one before removal; any failed or incomplete requested backup stops cleanup.
+- Filter detected projects, redirected paths, and missing files before building the bounded largest-file shortlist, so ineligible large entries cannot crowd eligible files out of manual review.
+- Show up to 100 of the largest unclassified files in a separate manual-review list, with exact-file-only selection, protected/project filtering, no bulk selection, and a typed acknowledgement before a manual cleanup plan can be created.
+- Include each folder's eligible descendant file-data size in cleanup-plan previews, and distinguish overlapping folder-row totals from the deduplicated overall total.
+- List retained scans newest first in the guided review picker, including recognized legacy scan folders, with numeric selection and pagination.
+- Limit scan retention cleanup to validated Drive Cleanr-generated scan exports and their exact paired plans; preserve unrelated CSV files and user-authored scripts.
+- Reject restore destinations inside or above Drive Cleanr backup-storage roots before asking for approval or writing restored data.
+- Skip and count scan paths with hidden formatting or terminal-control characters so cleanup targets cannot be visually spoofed in the terminal.
+- Let guided users enter the full path to an installed or portable scanner executable when automatic discovery fails, and validate it before passing it to the scan process.
+- Use the project directory consistently in `SKILL.md` script examples and guard its quoted YAML description against regressions.
+- Reject malformed backup manifest field types and unsafe verification source paths cleanly before source filesystem checks.
+- Render unrecognized backup manifest statuses as `Unknown` so malformed backups remain manageable for deletion without being treated as restorable.
+- Reject Windows-invalid filename characters in restore destinations and ZIP entries before presenting or writing restored data.
+- Validate guided restore destinations before prompting; reject incomplete, malformed, or overlapping paths and escape terminal controls in displayed paths.
+- Make `D` and `B` distinct in the nested file/folder picker: `D` keeps picks from the current browse, while `B` returns without adding them and preserves earlier main-list selections.
+- Browse scan entries hidden beneath a summarized folder to select exact files or subfolders. Paginate and filter large result sets, respect the chosen review levels, and explain when stale, project, or linked candidates were left off the list.
+- Add `-PreviewOnly` to generated cleanup plans. It runs current safety checks and lists each eligible path and file size without creating a backup or removing data.
+- Show progress during recovery restores: file copies and verification show byte and percentage progress, ZIP restores report archive-check and extraction progress, merge restores show existing-file checks, and directory restores show a periodic Robocopy status. Restore totals count completed items and keep conflicts and failures separate.
+- Handle Ctrl+C and end-of-input throughout the guided scan review so the main menu returns cleanly instead of showing a traceback.
+- Reject folders in the saved-scan picker and recover with a clear prompt when a scan file is missing or unreadable, in both the guided review and direct analyzer command.
+- Show byte counts and per-file percentages while hashing large selected files, so long content checks remain visibly active.
+- Rescan the selected folder for newly appeared project markers, protected paths, and reparse points after backup verification but before the first removal; stop cleanup if the review scope changed.
+- Copy named NTFS streams explicitly during individual-file backup and staged restore so Python 3.10 does not produce incomplete recovery data.
+- Recognize common AI-assistant project guidance files and editor settings folders as project markers, protect candidates beneath them during analysis and cleanup, and ignore shared settings at the user-profile root.
+- Exclude agent/editor settings data folders from cleanup suggestions, while matching only the exact folder names so similarly named cache paths remain reviewable.
+- Protect cache-like paths inside projects marked by a VS Code `.vscode` folder or `*.code-workspace` file, without treating profile-level VS Code extensions or workspace files as markers for the whole user profile.
+- After a direct scan, point users to **Review a previous scan** in the guided menu instead of printing a second Python command.
+- Detect WinDirStat executable versions before scanning; stop for versions older than 2.6 and explain when the version cannot be read.
+- Parse localized WinDirStat CSV headers using the documented layout only after validating its path, numeric fields, and internal type/index values; keep the review output in English.
+- Standardize the guided wording from scan setup through result review, individual file/folder selection, Administrator launch, cleanup confirmation, and recovery-backup management.
+- Make the first cleanup status say the selected item is being checked and that nothing has been removed yet.
+- Show clear project checks, folder reviews, and project-file/protected-data classification passes with a visible console count every 100 entries before any items in that folder can be removed, even when a terminal hides transient PowerShell progress bars.
+- Print file-content check and removal counts every 100 files, and use larger sequential read buffers for hashing selected files.
+- Include named data stream contents in cleanup snapshots, lock file streams and compare directory streams at the removal boundary, and keep the affected item if its streams change.
+- Show the first folder entry and first file being checked immediately, then print long-running progress updates every 100 items or 10 seconds.
+- Show the first entry and completion of each project-marker check, including slow pre-cleanup checks, and remove a redundant post-confirmation scan while keeping the cleanup-loop recheck.
+- Remove an unsupported estimate of how much reclaimable space the analyzer's pattern rules cover; describe their actual scope and case-by-case review for unmatched large items.
+- Clarify that the folder preflight completes before removal, then selected files are rechecked and removed one at a time; progress identifies the file currently being processed and counts only successful removals.
+- Report exact successful file, folder, and byte removals, including partial results when a later cleanup check fails.
+- Number cleanup progress by the selected-item processing order, show each exact path, and warn on later items that earlier selections may already have been removed.
+- Use phase-specific preflight messages so later checks do not imply that earlier selected items are still untouched.
+- Exercise generated cleanup in Windows PowerShell 5.1 as well as PowerShell 7 using an isolated temporary fixture.
+- Avoid a separate PowerShell filesystem lookup for every selected child; retain the lexical folder-boundary check and validate the leaf type, reparse-point status, identity, size, timestamp, and hash through the native locked handle immediately before deletion.
+- Find `backup.py` in the project folder when a cleanup plan is saved elsewhere, while using an adjacent helper when one is present.
+- Use File/Folder labels in the selection and final plan review, explain that only scan-listed entries can be chosen, call the size filter an item-size filter, and make nested-space estimates easier to understand.
+- Clarify that choosing a folder includes contents not listed as separate scan suggestions, while protected and project data are kept and higher-risk candidates stay unless explicitly selected too; warn that the 12-item preview is incomplete.
+- Ignore the full local `data/` tree and default `*.clean.ps1` plans so scan exports and generated cleanup plans stay out of commits by default.
+- After guided plan creation, detect the Administrator status before offering to run the saved plan. Report non-elevated or unknown status and leave the plan saved; when elevated, ask before running and retain the script's cleanup confirmation.
+- Show detected project roots and the marker evidence that caused cleanup candidates beneath them to be withheld from console and exported review reports.
+- Show progress while sizing, copying, compressing, hashing, and verifying large backups, including periodic heartbeats during Robocopy; keep `--json` output parseable by sending progress to stderr.
+- Show CSV byte-read percentage while analyzing a scan export, with 100% reported after parsing finishes.
+- Use monotonic time for scan-export stabilization deadlines so system-clock corrections do not shorten or extend the wait unexpectedly.
+- Distinguish automatically suggested cleanup paths from manual-only examples in the safety knowledge base, and align its cache/log summaries with the analyzer's review tiers.
+- Explain nested candidates that appear in multiple risk tiers, show their nearest containing candidate, and attribute nested space to its tier so tier estimates do not double count.
+- Separate the live scan-progress line from the final scan-complete message so the two messages do not run together.
 - Preserve nested candidates from more cautious tiers when a selected parent folder covers them, and show those paths in the cleanup review preview.
+- Honor a user's explicit selection of a nested higher-risk candidate inside a selected parent folder, and show the nested choice in the plan preview.
+- Normalize unexpected PowerShell cleanup errors to an English summary while retaining Drive Cleanr's specific safety explanations.
+- Include and verify Windows alternate data streams in new recovery backups; use direct-copy backups for large folders containing them and stop if the destination cannot preserve their contents.
 - Delete selected cleanup items through verified Windows handles, holding a shared byte-range lock during the final hash and deletion so ordinary file-handle writes and last-moment junction/path replacements cannot redirect or change the item being removed; keep changed files and nonempty folders in place.
 - Preserve cleanup support for read-only selected files by clearing the read-only attribute only on the verified file handle before removal.
 - Label Cargo install build output and Chocolatey package staging inside known temp roots as caution candidates, since they can contain compiled executables or installer payloads.

@@ -22,11 +22,30 @@ _OS_ERROR_MESSAGES = {
 }
 
 
+def safe_terminal_text(value, fallback="Unknown"):
+    """Escape non-printing text before showing untrusted values in a terminal."""
+    if value is None:
+        value = fallback
+    escaped = []
+    for character in str(value):
+        if character.isprintable():
+            escaped.append(character)
+            continue
+        codepoint = ord(character)
+        if codepoint <= 0xFF:
+            escaped.append(f"\\x{codepoint:02x}")
+        elif codepoint <= 0xFFFF:
+            escaped.append(f"\\u{codepoint:04x}")
+        else:
+            escaped.append(f"\\U{codepoint:08x}")
+    return "".join(escaped)
+
+
 def describe_error(error):
     """Describe an exception without exposing locale-dependent OS text."""
     if not isinstance(error, OSError):
         message = str(error).strip()
-        return message or type(error).__name__
+        return safe_terminal_text(message or type(error).__name__)
 
     windows_code = getattr(error, "winerror", None)
     if windows_code is not None:
