@@ -4368,9 +4368,11 @@ def select_manual_review_files(results):
 def _browse_folder_candidates(
     csv_file, min_size_mb, folder_entries, priority, initial_selected_paths=None,
     folder_already_chosen=False, nested_selection_by_folder=None,
-    available_path_keys=None,
+    available_path_keys=None, browse_state=None,
 ):
     """Find and let the user choose exact scan entries inside one listed folder."""
+    if isinstance(browse_state, dict):
+        browse_state["committed"] = False
     if not folder_entries:
         print("There are no listed folders to browse inside.")
         return []
@@ -4487,6 +4489,8 @@ def _browse_folder_candidates(
         if action == "cancel":
             print("Folder browse cancelled; the main-list picks are unchanged.")
             return None
+        if isinstance(browse_state, dict):
+            browse_state["committed"] = True
         browsed = [
             (candidate_priority, item)
             for candidate_priority, item in entries
@@ -4537,6 +4541,8 @@ def _browse_folder_candidates(
         answer = input("Choose entries on this page: ").strip()
         command = answer.casefold()
         if command in {"d", "done", ""}:
+            if isinstance(browse_state, dict):
+                browse_state["committed"] = True
             if isinstance(nested_selection_by_folder, dict):
                 nested_selection_by_folder[folder_key] = list(selected.values())
             return list(selected.values())
@@ -4649,12 +4655,11 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
     print("Protected paths and detected projects are kept. Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too. The plan preview shows up to 12 direct items; other contents may also be removed.")
     print("Use Up/Down to move the highlight, Space to select or clear an item, and Enter to finish. Esc or Q cancels.")
     print("A selects every suggestion in this list. D browses scan entries inside the highlighted folder. The scan must include file rows to select individual files.")
-    print("If arrow-key selection is unavailable, enter one or more item numbers to toggle picks; A selects all listed suggestions, D opens folder browsing, and Q cancels.")
+    print("If arrow-key selection is unavailable, enter item numbers to toggle picks; the main list and folder browsing share one selection, so the same file or folder is never added twice. A selects listed suggestions, D opens folder browsing, and Q cancels.")
 
     selected_entries = []
     selected_keys = set()
     expanded_candidates = []
-    nested_selection_by_folder = {}
     folders = [
         (candidate_priority, item) for candidate_priority, item in entries
         if display_item_type(item) == "Folder"
@@ -4747,6 +4752,7 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
             if path_key in selected_keys
         ]
     else:
+        selected_by_key = {}
         while True:
             answer = input(
                 "Enter item numbers to select or clear them; A = select all listed suggestions; "
@@ -4756,12 +4762,32 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
                 if not csv_file:
                     print("The saved scan file is unavailable for folder browsing.")
                     continue
+                available_nested_paths = set()
+                browse_state = {"committed": False}
                 browsed = _browse_folder_candidates(
                     csv_file, min_size_mb, folders, priority,
-                    nested_selection_by_folder=nested_selection_by_folder,
+                    initial_selected_paths=[
+                        item.get("path")
+                        for _candidate_priority, item in selected_by_key.values()
+                        if isinstance(item, dict) and isinstance(item.get("path"), str)
+                    ],
+                    available_path_keys=available_nested_paths,
+                    browse_state=browse_state,
                 )
+                if browse_state["committed"]:
+                    for path_key in available_nested_paths:
+                        selected_by_key.pop(path_key, None)
+                    for candidate_priority, item in browsed or []:
+                        path_key = _path_key(item.get("path", ""))
+                        if path_key:
+                            selected_by_key[path_key] = (candidate_priority, item)
+                    print(
+                        "Folder picks saved. "
+                        f"{len(selected_by_key)} exact file/folder "
+                        f"entr{'y' if len(selected_by_key) == 1 else 'ies'} currently selected."
+                    )
                 continue
-            if not answer and (selected_entries or any(nested_selection_by_folder.values())):
+            if not answer and selected_by_key:
                 break
             try:
                 indexes = parse_cleanup_selection(answer, len(entries))
@@ -4776,24 +4802,21 @@ def select_cleanup_candidates(results, priority, csv_file=None, min_size_mb=50):
             for index in indexes:
                 candidate_priority, item = entries[index - 1]
                 key = _path_key(item.get("path", ""))
-                if key in selected_keys and not select_all:
-                    selected_entries = [
-                        pair for pair in selected_entries
-                        if _path_key(pair[1].get("path", "")) != key
-                    ]
-                    selected_keys.discard(key)
-                elif key not in selected_keys:
-                    selected_entries.append((candidate_priority, item))
-                    selected_keys.add(key)
-
-    if nested_selection_by_folder:
-        for nested_entries in nested_selection_by_folder.values():
-            for candidate_priority, item in nested_entries:
-                key = _path_key(item.get("path", ""))
-                if key and key not in selected_keys:
-                    selected_entries.append((candidate_priority, item))
-                    expanded_candidates.append((candidate_priority, item))
-                    selected_keys.add(key)
+                if key in selected_by_key and not select_all:
+                    selected_by_key.pop(key)
+                elif key not in selected_by_key:
+                    selected_by_key[key] = (candidate_priority, item)
+            print(
+                "Current selection: "
+                f"{len(selected_by_key)} exact file/folder "
+                f"entr{'y' if len(selected_by_key) == 1 else 'ies'}."
+            )
+        selected_entries = list(selected_by_key.values())
+        selected_keys = set(selected_by_key)
+        expanded_candidates = [
+            pair for path_key, pair in selected_by_key.items()
+            if path_key not in main_candidate_keys
+        ]
 
     if not selected_entries:
         print("Selection cancelled; no cleanup plan was created.")

@@ -432,6 +432,75 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertEqual(expanded, [])
         self.assertIn("[x] [1]", output.getvalue())
 
+    def test_numbered_folder_browser_shows_and_can_clear_a_main_list_pick(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        file_path = folder_path + r"\content-v2\entry.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": file_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Scanned file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": nested_file}]}
+        output = io.StringIO()
+        answers = ["2", "D", "1", "1", "D", "Q"]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=False), \
+             mock.patch.object(analyze, "analyze_csv", return_value=expanded_results), \
+             mock.patch("builtins.input", side_effect=answers), \
+             redirect_stdout(output):
+            selection = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertIsNone(selection)
+        self.assertIn("* [1] High Priority", output.getvalue())
+
+    def test_numbered_main_list_toggle_clears_a_pick_made_in_folder_browsing(self):
+        folder_path = r"C:\Users\A\AppData\Local\npm-cache"
+        nested_path = folder_path + r"\content-v2\entry.bin"
+        other_path = folder_path + r"\other-cache.bin"
+        label = "Temporary files (check for installers or builds in progress)"
+        folder_item = {
+            "path": folder_path, "size": 1000, "size_formatted": "1000 B",
+            "kind": "Folder", "name": label,
+        }
+        nested_file = {
+            "path": nested_path, "size": 100, "size_formatted": "100 B",
+            "kind": "File", "name": "Nested scan file",
+        }
+        other_file = {
+            "path": other_path, "size": 50, "size_formatted": "50 B",
+            "kind": "File", "name": "Other scan file",
+        }
+        results = {"categories": {
+            "high": {"name": "High", "items": [folder_item, nested_file, other_file]},
+            "medium": {"name": "Medium", "items": []},
+            "low": {"name": "Low", "items": []},
+        }}
+        expanded_results = {"expanded_candidates": [{"priority": "high", "item": nested_file}]}
+        output = io.StringIO()
+        answers = ["D", "1", "1", "D", "2", "3", ""]
+        with mock.patch.object(analyze, "_keyboard_picker_available", return_value=False), \
+             mock.patch.object(analyze, "analyze_csv", return_value=expanded_results), \
+             mock.patch("builtins.input", side_effect=answers), \
+             redirect_stdout(output):
+            selected_paths, expanded = analyze.select_cleanup_candidates(
+                results, "high", csv_file="saved-scan.csv", min_size_mb=50
+            )
+
+        self.assertEqual(selected_paths, [other_path])
+        self.assertEqual(expanded, [])
+        self.assertIn("Folder picks saved. 1 exact file/folder entry currently selected.", output.getvalue())
+        self.assertIn("Current selection: 0 exact file/folder entries.", output.getvalue())
+
     def test_keyboard_folder_browser_b_returns_without_adding_nested_picks(self):
         folder_path = r"C:\Users\A\AppData\Local\npm-cache"
         nested_path = folder_path + r"\content-v2\entry.bin"
@@ -515,7 +584,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
         self.assertIn("| File |", output.getvalue())
         self.assertIn("| Folder |", output.getvalue())
         self.assertIn("Each row is labeled File or Folder.", output.getvalue())
-        self.assertIn("If arrow-key selection is unavailable, enter one or more item numbers to toggle picks", output.getvalue())
+        self.assertIn("If arrow-key selection is unavailable, enter item numbers to toggle picks", output.getvalue())
         self.assertIn("Choosing a folder includes files and folders inside it, even when they are not separate scan suggestions.", output.getvalue())
         self.assertIn("Higher-risk candidates inside selected folders are kept unless you explicitly select their listed entries too.", output.getvalue())
         self.assertIn("D browses scan entries inside the highlighted folder.", output.getvalue())
