@@ -169,6 +169,15 @@ class GitHubWorkflowTests(unittest.TestCase):
         )
         self.assertIn("  workflow_dispatch:", workflow)
 
+    def test_windows_matrix_covers_all_stable_python_minors_in_supported_range(self):
+        workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-tests.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']",
+            workflow,
+        )
+
 
 class AnalyzeSafetyTests(unittest.TestCase):
     @staticmethod
