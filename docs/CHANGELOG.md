@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Recheck a version 2 ZIP backup's saved hash from its open archive immediately before restore writes, and verify each staged file against the member hash read during preflight so archive changes are not published.
 - Let users select a saved backup by its numbered row in the guided menu, with clear retry and cancel choices, instead of typing its full backup ID.
 - Label each guided restore destination and restore progress item as a File or Folder, and explain the scope of OVERWRITE and MERGE before the choice.
 - Open the paginated keyboard picker before printing candidates, so large selections do not spend time dumping off-page paths before users can begin.

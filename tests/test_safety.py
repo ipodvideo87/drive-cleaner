@@ -11043,6 +11043,56 @@ class BackupSafetyTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backup._extract_zip_backup(str(archive_path), str(Path(temp_dir) / "restore"))
 
+    def test_zip_restore_rechecks_open_archive_hash_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("payload.txt", "saved contents")
+
+            with self.assertRaisesRegex(RuntimeError, "changed after its saved integrity check"):
+                backup._extract_zip_backup(
+                    str(archive_path), str(destination),
+                    expected_archive_sha256="0" * 64,
+                )
+
+            self.assertFalse(destination.exists())
+
+    def test_zip_restore_rejects_member_changed_after_archive_preflight(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path = root / "saved.zip"
+            destination = root / "restore"
+            target = destination / "payload.txt"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr("payload.txt", b"original saved contents")
+            expected_archive_sha256 = backup._file_integrity_sha256(str(archive_path))
+
+            original_open = zipfile.ZipFile.open
+            reads = {"payload.txt": 0}
+
+            def change_member_after_preflight(archive, name, *args, **kwargs):
+                member_name = name.filename if isinstance(name, zipfile.ZipInfo) else name
+                if member_name == "payload.txt":
+                    reads[member_name] += 1
+                    if reads[member_name] == 2:
+                        return io.BytesIO(b"changed after preflight")
+                return original_open(archive, name, *args, **kwargs)
+
+            with mock.patch.object(
+                zipfile.ZipFile, "open", autospec=True,
+                side_effect=change_member_after_preflight,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Staged restore file failed its SHA-256"):
+                    backup._extract_zip_backup(
+                        str(archive_path), str(destination),
+                        expected_archive_sha256=expected_archive_sha256,
+                    )
+
+            self.assertFalse(target.exists())
+            self.assertEqual([], list(destination.glob(".drive-cleanr-restore-*.tmp")))
+
     def test_zip_restore_preflights_reparse_paths_before_writing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -11075,8 +11125,10 @@ class BackupSafetyTests(unittest.TestCase):
             state = {"verified": False}
             verify_contents = backup._verify_zip_contents
 
-            def verify_then_mark(archive, progress=None):
-                total = verify_contents(archive, progress=progress)
+            def verify_then_mark(archive, progress=None, member_digests=None):
+                total = verify_contents(
+                    archive, progress=progress, member_digests=member_digests
+                )
                 state["verified"] = True
                 return total
 
@@ -11141,13 +11193,23 @@ class BackupSafetyTests(unittest.TestCase):
             with zipfile.ZipFile(archive_path, "w") as archive:
                 archive.writestr("existing.txt", "saved data")
                 archive.writestr("missing.txt", "also restore")
+            expected_archive_sha256 = backup._file_integrity_sha256(str(archive_path))
 
-            conflicts = backup._extract_zip_backup(str(archive_path), str(destination))
+            conflicts = backup._extract_zip_backup(
+                str(archive_path), str(destination),
+                expected_archive_sha256=expected_archive_sha256,
+            )
             self.assertEqual(conflicts, [str(destination / "existing.txt")])
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "newer user data")
             self.assertEqual((destination / "missing.txt").read_text(encoding="utf-8"), "also restore")
 
-            self.assertEqual(backup._extract_zip_backup(str(archive_path), str(destination), overwrite=True), [])
+            self.assertEqual(
+                backup._extract_zip_backup(
+                    str(archive_path), str(destination), overwrite=True,
+                    expected_archive_sha256=expected_archive_sha256,
+                ),
+                [],
+            )
             self.assertEqual((destination / "existing.txt").read_text(encoding="utf-8"), "saved data")
 
     def test_zip_restore_write_failure_preserves_overwrite_destination(self):

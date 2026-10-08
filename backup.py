@@ -1105,8 +1105,9 @@ def _create_zip_backup(
 
 def _verify_zip_contents(
     archive: zipfile.ZipFile, progress: Optional[_BackupProgress] = None,
+    member_digests: Optional[Dict[str, str]] = None,
 ) -> int:
-    """Read every ZIP member to EOF, checking CRCs while reporting progress."""
+    """Read every ZIP member to EOF, checking CRCs and optionally recording hashes."""
     total_bytes = 0
     for info in archive.infolist():
         if info.is_dir():
@@ -1114,22 +1115,65 @@ def _verify_zip_contents(
                 progress.item(info.filename)
             continue
         member_bytes = 0
+        member_digest = hashlib.sha256()
         with archive.open(info, "r") as member:
             while True:
                 chunk = member.read(1024 * 1024)
                 if not chunk:
                     break
                 member_bytes += len(chunk)
+                member_digest.update(chunk)
                 if progress is not None:
                     progress.file_bytes(
                         info.filename, member_bytes, info.file_size, action="verified"
                     )
         if member_bytes != info.file_size:
             raise zipfile.BadZipFile(f"Incomplete ZIP member: {info.filename}")
+        if member_digests is not None:
+            member_digests[info.filename] = member_digest.hexdigest()
         total_bytes += member_bytes
         if progress is not None:
             progress.item(info.filename, member_bytes)
     return total_bytes
+
+
+def _open_file_integrity_sha256(
+    path: str, source, progress: Optional[_BackupProgress] = None,
+    display_path: Optional[str] = None,
+) -> str:
+    """Hash the exact open file and its named streams, if the file system supports them."""
+    original_position = source.tell()
+    digest = hashlib.sha256()
+    processed = 0
+    try:
+        source.seek(0, os.SEEK_END)
+        total = source.tell()
+        source.seek(0)
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            processed += len(chunk)
+            if progress is not None:
+                progress.file_bytes(
+                    display_path or path, processed, total, action="checked"
+                )
+    finally:
+        source.seek(original_position)
+
+    default_digest = digest.hexdigest()
+    streams = _named_stream_fingerprints(
+        path, progress=progress, display_path=display_path
+    )
+    if not streams:
+        return default_digest
+    snapshot = {
+        "default": [processed, default_digest],
+        "streams": [[name, size, stream_digest] for name, size, stream_digest in streams],
+    }
+    canonical = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _verify_zip_archive(archive_path: str, progress: Optional[_BackupProgress] = None) -> int:
@@ -1141,11 +1185,14 @@ def _verify_zip_archive(archive_path: str, progress: Optional[_BackupProgress] =
 def _extract_zip_backup(
     archive_path: str, destination: str, overwrite: bool = False,
     progress: Optional[_BackupProgress] = None,
+    expected_archive_sha256: Optional[str] = None,
 ) -> list[str]:
     """Restore an archive without replacing existing files unless approved."""
     destination = os.path.abspath(destination)
     if _path_has_reparse_component(destination):
         raise RuntimeError("Refusing to restore through a reparse point or symbolic link")
+    if _path_has_reparse_component(archive_path):
+        raise RuntimeError("Refusing to restore from a reparse point or symbolic link")
 
     planned_entries = []
     archived_attributes = []
@@ -1226,11 +1273,26 @@ def _extract_zip_backup(
 
         # Validate every member before writing any of them, avoiding partial
         # restoration when a later entry is unsafe or has damaged contents.
-        print("        [Checking archive contents before restore]")
+        print("        [Checking archive contents before restore]", flush=True)
+        verified_member_digests = {}
         try:
-            _verify_zip_contents(archive, progress=progress)
+            _verify_zip_contents(
+                archive, progress=progress, member_digests=verified_member_digests
+            )
         except zipfile.BadZipFile as exc:
             raise RuntimeError(f"Refusing a damaged backup archive member: {exc}") from exc
+
+        if expected_archive_sha256 is not None:
+            if not _valid_sha256_digest(expected_archive_sha256):
+                raise RuntimeError("Refusing a backup archive with an invalid integrity hash")
+            if _path_has_reparse_component(archive_path):
+                raise RuntimeError("Saved backup archive changed to a reparse point or symbolic link")
+            print("        [Checking saved archive integrity before restore]", flush=True)
+            actual_archive_sha256 = _open_file_integrity_sha256(
+                archive_path, archive.fp, progress=progress, display_path=destination,
+            )
+            if actual_archive_sha256.lower() != expected_archive_sha256.lower():
+                raise RuntimeError("Backup archive changed after its saved integrity check")
 
         for info, target, timestamp in planned_entries:
             if (_path_has_reparse_component(destination) or
@@ -1258,9 +1320,12 @@ def _extract_zip_backup(
                     target,
                     write_member,
                     overwrite,
+                    expected_sha256=verified_member_digests.get(info.filename),
                     expected_size=info.file_size,
                     timestamp=timestamp,
+                    verify_named_streams=False,
                     progress=progress,
+                    display_path=info.filename,
                 )
                 if not restored:
                     conflicts.append(target)
@@ -2208,6 +2273,9 @@ def restore_backup(backup_id: str, overwrite: bool = False) -> bool:
                 conflicts = _extract_zip_backup(
                     backup_path, original_path, overwrite=overwrite,
                     progress=restore_progress,
+                    expected_archive_sha256=(
+                        item.get("integrity_sha256") if verify_named_streams else None
+                    ),
                 )
                 if conflicts:
                     conflict_count += len(conflicts)
