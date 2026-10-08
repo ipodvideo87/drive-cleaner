@@ -269,15 +269,21 @@ class _BackupDeletionStopped(Exception):
         self.removal_started = bool(removal_started)
 
 
-def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_started=None) -> int:
-    """Remove a directory tree through opened handles without following reparse points."""
+def _windows_delete_tree_no_follow(
+    path: str, on_removed=None, on_removal_started=None,
+    expected_kind: str = "directory", validator=None,
+) -> int:
+    """Remove a file or directory tree through opened handles without following reparse points."""
     if os.name != "nt":
         raise OSError("Handle-based backup deletion is available only on Windows")
+    if expected_kind not in {"directory", "file"}:
+        raise ValueError("expected_kind must be 'directory' or 'file'")
 
     import ctypes
     from ctypes import wintypes
 
     FILE_READ_ATTRIBUTES = 0x0080
+    FILE_READ_DATA = 0x0001
     FILE_WRITE_ATTRIBUTES = 0x0100
     DELETE = 0x00010000
     FILE_SHARE_READ = 0x00000001
@@ -291,6 +297,7 @@ def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_starte
     FILE_ATTRIBUTE_NORMAL = 0x00000080
     FILE_BASIC_INFO_CLASS = 0
     FILE_DISPOSITION_INFO_CLASS = 4
+    DUPLICATE_SAME_ACCESS = 0x00000002
 
     class ByHandleFileInformation(ctypes.Structure):
         _fields_ = [
@@ -337,6 +344,15 @@ def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_starte
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [wintypes.HANDLE]
     close_handle.restype = wintypes.BOOL
+    get_current_process = kernel32.GetCurrentProcess
+    get_current_process.argtypes = []
+    get_current_process.restype = wintypes.HANDLE
+    duplicate_handle = kernel32.DuplicateHandle
+    duplicate_handle.argtypes = [
+        wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+        ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD,
+    ]
+    duplicate_handle.restype = wintypes.BOOL
 
     invalid_handle = ctypes.c_void_p(-1).value
     held_ancestors = []
@@ -400,6 +416,31 @@ def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_starte
     def close(handle) -> None:
         if handle and handle != invalid_handle:
             close_handle(handle)
+
+    def validate_open_file(handle, value: str) -> bool:
+        if validator is None:
+            return True
+        process_handle = get_current_process()
+        duplicate = wintypes.HANDLE()
+        if not duplicate_handle(
+                process_handle, handle, process_handle, ctypes.byref(duplicate),
+                0, False, DUPLICATE_SAME_ACCESS):
+            raise win_error(value)
+        import msvcrt
+        file_descriptor = None
+        try:
+            file_descriptor = msvcrt.open_osfhandle(
+                duplicate.value, os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+            duplicate = wintypes.HANDLE()
+            with os.fdopen(file_descriptor, "r", encoding="utf-8-sig", newline="") as source:
+                file_descriptor = None
+                return bool(validator(source))
+        finally:
+            if file_descriptor is not None:
+                os.close(file_descriptor)
+            if duplicate:
+                close(duplicate)
 
     def report_removed(value: str) -> None:
         nonlocal removed_entries
@@ -471,19 +512,37 @@ def _windows_delete_tree_no_follow(path: str, on_removed=None, on_removal_starte
             access = FILE_READ_ATTRIBUTES
             if is_target:
                 access |= DELETE | FILE_WRITE_ATTRIBUTES
+                if validator is not None:
+                    access |= FILE_READ_DATA
             handle = open_handle(current, access)
             held_ancestors.append(handle)
             attributes = read_attributes(handle, current)
-            if not attributes & FILE_ATTRIBUTE_DIRECTORY:
-                raise OSError(f"Refusing to remove a backup path that is not a folder: {current}")
+            is_directory = bool(attributes & FILE_ATTRIBUTE_DIRECTORY)
+            if (not is_target or expected_kind == "directory") and not is_directory:
+                raise OSError(f"Refusing to remove a path that is not a folder: {current}")
+            if is_target and expected_kind == "file" and is_directory:
+                raise OSError(f"Refusing to remove a path that is not a file: {current}")
 
         target_handle = held_ancestors[-1]
         target_attributes = read_attributes(target_handle, current)
+        if validator is not None and not validate_open_file(target_handle, current):
+            return 0
+        if expected_kind == "file":
+            mark_for_removal(target_handle, current, target_attributes)
+            report_removed(current)
+            return removed_entries
         remove_directory(current, target_handle, target_attributes)
         return removed_entries
     finally:
         for handle in reversed(held_ancestors):
             close(handle)
+
+
+def _windows_remove_file_no_follow(path: str, validator=None) -> bool:
+    """Remove one regular file by a checked Windows handle, optionally revalidating it first."""
+    return _windows_delete_tree_no_follow(
+        path, expected_kind="file", validator=validator,
+    ) == 1
 
 
 def _remove_backup_tree(path: str, on_removed=None, on_removal_started=None) -> None:

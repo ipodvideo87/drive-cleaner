@@ -8100,6 +8100,114 @@ class ScanSafetyTests(unittest.TestCase):
             finally:
                 scan.DATA_DIR = old_data_dir
 
+    @unittest.skipUnless(os.name == "nt", "scan retention safe deletion targets Windows")
+    def test_scan_retention_rejects_junction_swapped_after_export_validation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            scan_folder = data / "scan"
+            scan_folder.mkdir(parents=True)
+            old_export = scan_folder / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = scan_folder / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+
+            outside = Path(temp_dir) / "outside"
+            outside.mkdir()
+            outside_sentinel = outside / old_export.name
+            outside_sentinel.write_bytes(b"outside data must remain")
+            moved_scan_folder = data / "scan-original"
+            original_remove = scan._remove_scan_file_safely
+
+            def swap_parent_then_remove(path, validator=None):
+                if Path(path) == old_export:
+                    scan_folder.rename(moved_scan_folder)
+                    result = subprocess.run(
+                        ["cmd.exe", "/d", "/c", "mklink", "/J", str(scan_folder), str(outside)],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if result.returncode:
+                        self.skipTest("Windows could not create a temporary junction fixture")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=swap_parent_then_remove),
+                ):
+                    self.assertEqual(0, scan.cleanup_old_scans(keep_latest=1))
+                self.assertTrue(outside_sentinel.is_file())
+                self.assertEqual(b"outside data must remain", outside_sentinel.read_bytes())
+                self.assertTrue((moved_scan_folder / old_export.name).is_file())
+                os.rmdir(scan_folder)  # Remove the junction itself, never its target.
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_retention_revalidates_the_open_export_before_removing_it(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            original_remove = scan._remove_scan_file_safely
+
+            def replace_with_unrelated_file(path, validator=None):
+                if Path(path) == old_export:
+                    old_export.write_text("User data,not a scan\n", encoding="utf-8")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=replace_with_unrelated_file),
+                ):
+                    self.assertEqual(0, scan.cleanup_old_scans(keep_latest=1))
+                self.assertEqual("User data,not a scan\n", old_export.read_text(encoding="utf-8"))
+                self.assertTrue(new_export.is_file())
+            finally:
+                scan.DATA_DIR = old_data_dir
+
+    def test_scan_retention_preserves_plan_replaced_after_pairing_check(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            old_data_dir = scan.DATA_DIR
+            data = Path(temp_dir) / "data"
+            data.mkdir()
+            old_export = data / "scan_wiztree_standard_20260927120000000000.csv"
+            new_export = data / "scan_wiztree_standard_20260928120000000000.csv"
+            old_export.write_text("File Name,Size\n", encoding="utf-8")
+            new_export.write_text("File Name,Size\n", encoding="utf-8")
+            os.utime(old_export, (1, 1))
+            os.utime(new_export, (2, 2))
+            old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
+            old_plan.write_text(_paired_cleanup_plan_header(old_export), encoding="utf-8")
+            original_remove = scan._remove_scan_file_safely
+
+            def replace_plan_after_initial_check(path, validator=None):
+                if Path(path) == old_plan:
+                    old_plan.write_text("User-authored script; keep this file.\n", encoding="utf-8")
+                return original_remove(path, validator=validator)
+
+            try:
+                with (
+                    mock.patch.object(scan, "DATA_DIR", str(data)),
+                    mock.patch.object(scan, "_remove_scan_file_safely", side_effect=replace_plan_after_initial_check),
+                ):
+                    self.assertEqual(1, scan.cleanup_old_scans(keep_latest=1, include_scripts=True))
+                self.assertEqual(
+                    "User-authored script; keep this file.\n",
+                    old_plan.read_text(encoding="utf-8"),
+                )
+            finally:
+                scan.DATA_DIR = old_data_dir
+
     def test_scan_cleanup_keeps_user_authored_script_with_matching_scan_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             old_data_dir = scan.DATA_DIR
@@ -8217,15 +8325,15 @@ class ScanSafetyTests(unittest.TestCase):
             os.utime(new_export, (2, 2))
             old_plan = Path(temp_dir) / f"{old_export.stem}.clean.ps1"
             old_plan.write_text("reviewed")
-            original_unlink = Path.unlink
+            original_remove = scan._remove_scan_file_safely
 
-            def fail_old_export(path, *args, **kwargs):
-                if path == old_export:
+            def fail_old_export(path, validator=None):
+                if Path(path) == old_export:
                     raise OSError("simulated export deletion failure")
-                return original_unlink(path, *args, **kwargs)
+                return original_remove(path, validator=validator)
 
             try:
-                with mock.patch.object(Path, "unlink", autospec=True, side_effect=fail_old_export):
+                with mock.patch.object(scan, "_remove_scan_file_safely", side_effect=fail_old_export):
                     scan.cleanup_old_scans(keep_latest=1, include_scripts=True)
                 self.assertTrue(old_export.exists())
                 self.assertTrue(old_plan.exists())
@@ -8814,12 +8922,12 @@ class ScanSafetyTests(unittest.TestCase):
                 Path(command[2]).write_text("partial scan", encoding="utf-8")
                 return process
 
-            def refuse_partial_unlink(path):
+            def refuse_partial_removal(path, validator=None):
                 if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(partial_export)):
                     raise PermissionError(5, "mocked access denied")
-                return original_unlink(path)
+                return original_remove(path, validator=validator)
 
-            original_unlink = os.unlink
+            original_remove = scan._remove_scan_file_safely
             output = io.StringIO()
             with mock.patch.object(scan, "DATA_DIR", str(data_dir)), \
                  mock.patch.object(scan, "datetime", SimpleNamespace(now=lambda: fixed_time)), \
@@ -8827,7 +8935,7 @@ class ScanSafetyTests(unittest.TestCase):
                  mock.patch.object(scan, "_get_windows_file_version", return_value=(2, 6, 0)), \
                  mock.patch.object(scan.subprocess, "Popen", side_effect=fake_popen), \
                  mock.patch.object(scan, "wait_for_scan_process", side_effect=KeyboardInterrupt()), \
-                 mock.patch.object(scan.os, "unlink", side_effect=refuse_partial_unlink), \
+                 mock.patch.object(scan, "_remove_scan_file_safely", side_effect=refuse_partial_removal), \
                  redirect_stdout(output):
                 self.assertIsNone(scan.scan("D:", app="windirstat"))
 

@@ -342,8 +342,8 @@ def _looks_like_localized_windirstat_row(headers, row):
     return (flags & 0xF) in {0x4, 0x8}
 
 
-def validate_scan_export(filepath):
-    """Check a CSV header and sample row without loading a potentially huge export."""
+def _validate_scan_export_stream(filepath, source):
+    """Validate the CSV header and sample row from an already-open stream."""
     path_headers = {"\u6587\u4ef6\u540d\u79f0", "filename", "name"}
     size_headers = {"\u5927\u5c0f", "size", "logicalsize"}
 
@@ -352,28 +352,37 @@ def validate_scan_export(filepath):
         return bool(keys & path_headers) and bool(keys & size_headers)
 
     try:
+        source.seek(0)
+        reader = csv.reader(source, strict=True)
+        first_row = next(reader, [])
+        if is_header(first_row):
+            return True, None
+        first_sample = next(reader, [])
+        if _looks_like_localized_windirstat_row(first_row, first_sample):
+            return True, None
+        # GUI-generated WizTree exports can have one informational line
+        # before the actual column headings.
+        second_row = first_sample
+        if is_header(second_row):
+            return True, None
+        second_sample = next(reader, [])
+        if _looks_like_localized_windirstat_row(second_row, second_sample):
+            return True, None
+        scan_mode_hint = Path(filepath).name.casefold().startswith("scan_windirstat_")
+        if scan_mode_hint and not first_sample and len(first_row) in (9, 10):
+            return True, None
+        if scan_mode_hint and is_header(second_row) is False and not second_sample and len(second_row) in (9, 10):
+            return True, None
+        return False, "CSV is missing a recognized path and size header"
+    except (OSError, UnicodeError, csv.Error) as exc:
+        return False, f"CSV could not be read: {describe_error(exc)}"
+
+
+def validate_scan_export(filepath):
+    """Check a CSV header and sample row without loading a potentially huge export."""
+    try:
         with open(filepath, "r", encoding="utf-8-sig", newline="") as source:
-            reader = csv.reader(source, strict=True)
-            first_row = next(reader, [])
-            if is_header(first_row):
-                return True, None
-            first_sample = next(reader, [])
-            if _looks_like_localized_windirstat_row(first_row, first_sample):
-                return True, None
-            # GUI-generated WizTree exports can have one informational line
-            # before the actual column headings.
-            second_row = first_sample
-            if is_header(second_row):
-                return True, None
-            second_sample = next(reader, [])
-            if _looks_like_localized_windirstat_row(second_row, second_sample):
-                return True, None
-            scan_mode_hint = Path(filepath).name.casefold().startswith("scan_windirstat_")
-            if scan_mode_hint and not first_sample and len(first_row) in (9, 10):
-                return True, None
-            if scan_mode_hint and is_header(second_row) is False and not second_sample and len(second_row) in (9, 10):
-                return True, None
-            return False, "CSV is missing a recognized path and size header"
+            return _validate_scan_export_stream(filepath, source)
     except (OSError, UnicodeError, csv.Error) as exc:
         return False, f"CSV could not be read: {describe_error(exc)}"
 
@@ -423,13 +432,27 @@ def _remove_or_preserve_partial_scan(process, filepath):
     return "running"
 
 
+def _remove_scan_file_safely(filepath, validator=None):
+    """Remove one local scan file without following a swapped link or junction."""
+    if os.name != "nt":
+        raise OSError("Safe scan-file removal is available only on Windows")
+    # Backup and scan retention share the same Windows handle-based path guard.
+    # Import here to keep ordinary scanner startup independent of backup setup.
+    from backup import _windows_remove_file_no_follow
+
+    return _windows_remove_file_no_follow(filepath, validator=validator)
+
+
 def _remove_partial_scan_export(filepath):
     if _path_has_reparse_component(filepath):
         print("Refusing to remove a partial export through a reparse point or junction; it was preserved at:")
         print(safe_terminal_text(filepath))
         return "preserved"
     try:
-        os.unlink(filepath)
+        if not _remove_scan_file_safely(filepath):
+            print("Could not confirm the partial export was a regular file; it was preserved at:")
+            print(safe_terminal_text(filepath))
+            return "preserved"
     except FileNotFoundError:
         return "missing"
     except OSError as exc:
@@ -780,21 +803,24 @@ def get_saved_scans():
     return [item[2] for item in found]
 
 
-def _is_drive_cleanr_scan_export(path):
+def _is_drive_cleanr_scan_export(path, source=None):
     """Match a current generated scan name and a recognizable scan CSV."""
     candidate = Path(path)
     if not _DRIVECLEANR_SCAN_NAME.fullmatch(candidate.stem):
         return False
     if _path_has_reparse_component(candidate):
         return False
-    valid, _error = validate_scan_export(str(candidate))
+    valid, _error = (
+        validate_scan_export(str(candidate)) if source is None else
+        _validate_scan_export_stream(str(candidate), source)
+    )
     return valid
 
 
-def _is_saved_scan_export(path, data_path=None):
+def _is_saved_scan_export(path, data_path=None, source=None):
     """Recognize current exports and the known pre-migration scan folders."""
     candidate = Path(path)
-    if _is_drive_cleanr_scan_export(candidate):
+    if _is_drive_cleanr_scan_export(candidate, source=source):
         return True
 
     if data_path is None:
@@ -813,11 +839,14 @@ def _is_saved_scan_export(path, data_path=None):
         )
     if not recognized_legacy_name or _path_has_reparse_component(candidate):
         return False
-    valid, _error = validate_scan_export(str(candidate))
+    valid, _error = (
+        validate_scan_export(str(candidate)) if source is None else
+        _validate_scan_export_stream(str(candidate), source)
+    )
     return valid
 
 
-def is_paired_cleanup_plan(plan_path, scan_export_path):
+def is_paired_cleanup_plan(plan_path, scan_export_path, source=None):
     """Check the generated-plan marker and path identity for one scan export."""
     source_identity = scan_export_identity(scan_export_path)
     candidate = Path(plan_path)
@@ -826,14 +855,15 @@ def is_paired_cleanup_plan(plan_path, scan_export_path):
     try:
         if not stat.S_ISREG(candidate.lstat().st_mode):
             return False
-        with candidate.open("r", encoding="utf-8-sig", errors="strict") as plan_file:
-            header_lines = []
-            for _ in range(4):
-                line = plan_file.readline(256)
-                if not line.endswith("\n"):
-                    return False
-                header_lines.append(line.rstrip("\r\n"))
+        if source is None:
+            with candidate.open("r", encoding="utf-8-sig", errors="strict") as plan_file:
+                header_lines = _read_cleanup_plan_header(plan_file)
+        else:
+            source.seek(0)
+            header_lines = _read_cleanup_plan_header(source)
     except (OSError, UnicodeError, ValueError):
+        return False
+    if len(header_lines) != 4:
         return False
     return (
         header_lines[0].startswith("# Drive Cleanr Cleanup Plan - ")
@@ -841,6 +871,16 @@ def is_paired_cleanup_plan(plan_path, scan_export_path):
         and header_lines[2] == "# Drive Cleanr Plan Format: 1"
         and header_lines[3] == f"# Source scan identity: {source_identity}"
     )
+
+
+def _read_cleanup_plan_header(plan_file):
+    header_lines = []
+    for _ in range(4):
+        line = plan_file.readline(256)
+        if not line.endswith("\n"):
+            return []
+        header_lines.append(line.rstrip("\r\n"))
+    return header_lines
 
 
 def cleanup_old_scans(keep_latest=1, include_scripts=False, expected_scans=None):
@@ -894,7 +934,12 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False, expected_scans=None)
                 print(f"Refusing to prune changed or linked scan file: {old_file.name}")
                 continue
             try:
-                old_file.unlink()
+                if not _remove_scan_file_safely(
+                        old_file,
+                        validator=lambda source, path=old_file:
+                            _is_saved_scan_export(path, data_path, source=source)):
+                    print(f"Refusing to prune changed or linked scan file: {old_file.name}")
+                    continue
                 print(f"Deleted old scan file: {old_file.name}")
                 deleted += 1
                 pruned_exports.append(old_file)
@@ -927,7 +972,12 @@ def cleanup_old_scans(keep_latest=1, include_scripts=False, expected_scans=None)
                 if not is_paired_cleanup_plan(script, old_file):
                     print(f"Keeping changed cleanup plan: {script.name}")
                     continue
-                script.unlink()
+                if not _remove_scan_file_safely(
+                        script,
+                        validator=lambda source, path=script, export=old_file:
+                            is_paired_cleanup_plan(path, export, source=source)):
+                    print(f"Keeping changed cleanup plan: {script.name}")
+                    continue
                 print(f"Deleted cleanup script: {script.name}")
                 deleted += 1
             except Exception as e:

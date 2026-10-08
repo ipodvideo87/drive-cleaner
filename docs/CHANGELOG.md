@@ -3,6 +3,7 @@
 - Verify candidate file/folder types against the current filesystem; use current type when WinDirStat metadata is missing and skip mismatches with a rescan message.
 
 ## Unreleased
+- Revalidate scan exports and paired cleanup plans through the same opened file that Windows will remove, while holding parent folders against replacement; reject links and junctions inserted after the initial retention review.
 - Remove saved backups through opened Windows handles and reject reparse points at the removal boundary, including junctions swapped in after the initial inspection; report accurately whether any entries were removed.
 - Retry an invalid overwrite/merge choice in the standalone backup restore command and explain the accepted choices instead of silently cancelling.
 - Recognize VS Code Dev Container project configurations in `.devcontainer/` and `.devcontainer.json` so project-local build and cache data stays protected.
