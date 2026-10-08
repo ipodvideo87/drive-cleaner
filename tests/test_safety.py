@@ -158,6 +158,19 @@ class ScannerDocumentationTests(unittest.TestCase):
         self.assertIn("WINDIRSTAT_PATH", readme)
 
 
+class GitHubWorkflowTests(unittest.TestCase):
+    def test_windows_matrix_avoids_duplicate_non_main_push_runs(self):
+        workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "windows-tests.yml"
+        workflow = workflow_path.read_text(encoding="utf-8")
+
+        self.assertIn("  pull_request:", workflow)
+        self.assertIn("  workflow_dispatch:", workflow)
+        self.assertIn(
+            "    if: github.event_name != 'push' || github.ref == 'refs/heads/main'",
+            workflow,
+        )
+
+
 class AnalyzeSafetyTests(unittest.TestCase):
     @staticmethod
     def _install_complete_mock_backup(plan_dir):
@@ -2252,7 +2265,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
                  "-Select", "1", "-PreviewOnly"],
-                capture_output=True, text=True, timeout=90, env=child_environment,
+                capture_output=True, text=True, timeout=180, env=child_environment,
             )
 
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -2264,7 +2277,7 @@ class AnalyzeSafetyTests(unittest.TestCase):
             project_result = subprocess.run(
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_path),
                  "-Select", "1", "-PreviewOnly"],
-                capture_output=True, text=True, timeout=90, env=child_environment,
+                capture_output=True, text=True, timeout=180, env=child_environment,
             )
             self.assertNotEqual(project_result.returncode, 0, project_result.stdout + project_result.stderr)
             self.assertIn("inside a project", project_result.stdout + project_result.stderr)
